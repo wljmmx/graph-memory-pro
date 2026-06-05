@@ -1,0 +1,114 @@
+/**
+ * graph-memory-pro — 三元组提取器
+ *
+ * 从对话中提取 (节点, 关系, 节点) 三元组
+ * 使用 LLM prompt 提取
+ */
+
+import type { CompleteFn } from "../engine/llm.ts";
+import type { ExtractNode, ExtractResult, ExtractEdge } from "../types.ts";
+import type { Driver } from "neo4j-driver";
+
+const EXTRACT_SYSTEM_PROMPT = `你是知识图谱三元组提取专家。
+从用户提供的对话内容中提取知识节点和关系。
+
+## 节点类型
+- TASK: 用户提出的具体任务需求。
+- SKILL: 完成任务使用的方法、工具、代码片段或最佳实践。
+- EVENT: 发生的具体事件、错误、异常或问题。
+
+## 关系类型
+- USED_SKILL: TASK → SKILL。任务使用了某个技能。注意：对TASK使用工具/方法。
+- SOLVED_BY: EVENT → SKILL。事件被某个技能解决。注意：EVENT被SKILL解决。
+- REQUIRES: TASK → TASK。任务依赖另一个任务。注意：先决条件关系。
+- PATCHES: SKILL → SKILL。新的技能修正了旧的技能。注意：新优于旧。
+- CONFLICTS_WITH: SKILL → SKILL。两种技能互相冲突或互斥。
+
+## 提取原则
+- 用户的每一个有实际信息的请求都应该尝试提取
+- 只提取明确提及的信息，不要猜测或编造
+- 如果当前内容没有可提取的信息，返回空数组
+- 节点name统一使用英文
+- 每个节点/边都提供description
+- edge.instruction: 描述这条关系具体是什么意思
+
+## 输出格式 (JSON)
+{
+  "nodes": [
+    { "type": "TASK|SKILL|EVENT", "name": "英文名", "description": "描述", "content": "具体内容" }
+  ],
+  "edges": [
+    { "type": "USED_SKILL|SOLVED_BY|REQUIRES|PATCHES|CONFLICTS_WITH", "fromName": "节点名", "toName": "节点名", "instruction": "关系说明", "condition": "条件（可选）" }
+  ]
+}`;
+
+const FALLBACK: ExtractResult = { nodes: [], edges: [] };
+
+export async function extractTriplets(
+  llm: CompleteFn,
+  userContent: string,
+  assistantContent: string,
+): Promise<ExtractResult> {
+  if (!userContent?.trim() && !assistantContent?.trim()) {
+    return FALLBACK;
+  }
+
+  const userPrompt = `对话内容：
+用户消息: ${userContent.slice(0, 2000)}
+助手回复: ${assistantContent.slice(0, 3000)}
+
+请提取知识三元组。`;
+
+  try {
+    const raw = await llm(EXTRACT_SYSTEM_PROMPT, userPrompt);
+    return parseExtractResult(raw);
+  } catch {
+    return FALLBACK;
+  }
+}
+
+function parseExtractResult(raw: string): ExtractResult {
+  const cleaned = raw
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+
+  try {
+    const parsed = JSON.parse(cleaned);
+    if (!parsed || typeof parsed !== "object") return FALLBACK;
+    return {
+      nodes: Array.isArray(parsed.nodes) ? parsed.nodes.slice(0, 5) : [],
+      edges: Array.isArray(parsed.edges) ? parsed.edges.slice(0, 8) : [],
+    };
+  } catch {
+    const match = cleaned.match(/\{[\s\S]*"nodes"[\s\S]*\}/);
+    if (match) {
+      try {
+        const parsed = JSON.parse(match[0]);
+        return {
+          nodes: Array.isArray(parsed.nodes) ? parsed.nodes.slice(0, 5) : [],
+          edges: Array.isArray(parsed.edges) ? parsed.edges.slice(0, 8) : [],
+        };
+      } catch {
+        return FALLBACK;
+      }
+    }
+    return FALLBACK;
+  }
+}
+
+// ─── Extractor 类包装 ──────────────────────────
+
+import type { Driver } from "neo4j-driver";
+
+export class Extractor {
+  constructor(private _driver: Driver) {}
+
+  async extract(
+    llm: CompleteFn,
+    userContent: string,
+    assistantContent: string,
+  ): Promise<ExtractResult> {
+    return extractTriplets(llm, userContent, assistantContent);
+  }
+}
