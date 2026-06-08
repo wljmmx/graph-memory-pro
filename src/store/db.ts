@@ -15,7 +15,7 @@ export function createDriver(cfg: Neo4jConfig): Driver {
     maxConnectionLifetime: 3 * 60 * 60 * 1000, // 3h
     maxConnectionPoolSize: 50,
     connectionAcquisitionTimeout: 10_000,
-    logging: { level: "warn" },
+    // logging removed to avoid Neo4j ESM bundling issue
   });
   return d;
 }

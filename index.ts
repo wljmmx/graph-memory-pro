@@ -97,7 +97,14 @@ export default definePluginEntry({
   register(api) {
     // ── Gateway 启动时初始化 ──────────────────────
     api.on("gateway_start", async (event) => {
-      const pluginConfig = event?.context?.pluginConfig as GmConfig | undefined;
+      // Read config directly from openclaw.json
+        // Try multiple config sources
+        const { readFileSync } = await import('node:fs');
+        const { join } = await import('node:path');
+        const configPath = join(process.env.HOME || '/home/wljmmx', '.openclaw/openclaw.json');
+        const rawCfg = JSON.parse(readFileSync(configPath, 'utf-8'));
+        const entryCfg = rawCfg?.plugins?.entries?.['graph-memory-pro'];
+        const pluginConfig = (entryCfg?.config ?? entryCfg) as GmConfig | undefined;
       if (!pluginConfig?.neo4j?.uri) {
         console.warn("[graph-memory-pro] No Neo4j config — plugin skipped");
         return;
