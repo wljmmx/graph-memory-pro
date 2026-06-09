@@ -16,21 +16,27 @@ export async function ensureSchema(driver: Driver): Promise<void> {
   const session = getSession(driver);
   try {
     // 约束: 节点 id 唯一
-    await session.run(
-      "CREATE CONSTRAINT gm_node_id IF NOT EXISTS FOR (n:Task|Skill|Event) REQUIRE n.id IS UNIQUE"
-    );
+    for (const label of ["Task", "Skill", "Event"]) {
+      await session.run(
+        `CREATE CONSTRAINT gm_node_id_${label.toLowerCase()} IF NOT EXISTS FOR (n:${label}) REQUIRE n.id IS UNIQUE`
+      );
+    }
     // 约束: 消息 id 唯一
     await session.run(
       "CREATE CONSTRAINT gm_message_id IF NOT EXISTS FOR (m:GmMessage) REQUIRE m.id IS UNIQUE"
     );
     // 索引: 节点状态
-    await session.run(
-      "CREATE INDEX gm_node_status IF NOT EXISTS FOR (n:Task|Skill|Event) ON (n.status)"
-    );
+    for (const label of ["Task", "Skill", "Event"]) {
+      await session.run(
+        `CREATE INDEX gm_node_status_${label.toLowerCase()} IF NOT EXISTS FOR (n:${label}) ON (n.status)`
+      );
+    }
     // 索引: 节点社区
-    await session.run(
-      "CREATE INDEX gm_node_community IF NOT EXISTS FOR (n:Task|Skill|Event) ON (n.communityId)"
-    );
+    for (const label of ["Task", "Skill", "Event"]) {
+      await session.run(
+        `CREATE INDEX gm_node_community_${label.toLowerCase()} IF NOT EXISTS FOR (n:${label}) ON (n.communityId)`
+      );
+    }
     // 索引: 消息会话
     await session.run(
       "CREATE INDEX gm_message_session IF NOT EXISTS FOR (m:GmMessage) ON (m.sessionKey)"

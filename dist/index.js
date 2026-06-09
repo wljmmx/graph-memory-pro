@@ -106,36 +106,24 @@ import neo4j2 from "neo4j-driver";
 async function ensureSchema(driver) {
   const session = getSession(driver);
   try {
-    await session.run(
-      "CREATE CONSTRAINT gm_node_id_task IF NOT EXISTS FOR (n:Task) REQUIRE n.id IS UNIQUE"
-    );
-    await session.run(
-      "CREATE CONSTRAINT gm_node_id_skill IF NOT EXISTS FOR (n:Skill) REQUIRE n.id IS UNIQUE"
-    );
-    await session.run(
-      "CREATE CONSTRAINT gm_node_id_event IF NOT EXISTS FOR (n:Event) REQUIRE n.id IS UNIQUE"
-    );
+    for (const label of ["Task", "Skill", "Event"]) {
+      await session.run(
+        `CREATE CONSTRAINT gm_node_id_${label.toLowerCase()} IF NOT EXISTS FOR (n:${label}) REQUIRE n.id IS UNIQUE`
+      );
+    }
     await session.run(
       "CREATE CONSTRAINT gm_message_id IF NOT EXISTS FOR (m:GmMessage) REQUIRE m.id IS UNIQUE"
     );
-    await session.run(
-      "CREATE INDEX gm_node_status_task IF NOT EXISTS FOR (n:Task) ON (n.status)"
-    );
-    await session.run(
-      "CREATE INDEX gm_node_status_skill IF NOT EXISTS FOR (n:Skill) ON (n.status)"
-    );
-    await session.run(
-      "CREATE INDEX gm_node_status_event IF NOT EXISTS FOR (n:Event) ON (n.status)"
-    );
-    await session.run(
-      "CREATE INDEX gm_node_community_task IF NOT EXISTS FOR (n:Task) ON (n.communityId)"
-    );
-    await session.run(
-      "CREATE INDEX gm_node_community_skill IF NOT EXISTS FOR (n:Skill) ON (n.communityId)"
-    );
-    await session.run(
-      "CREATE INDEX gm_node_community_event IF NOT EXISTS FOR (n:Event) ON (n.communityId)"
-    );
+    for (const label of ["Task", "Skill", "Event"]) {
+      await session.run(
+        `CREATE INDEX gm_node_status_${label.toLowerCase()} IF NOT EXISTS FOR (n:${label}) ON (n.status)`
+      );
+    }
+    for (const label of ["Task", "Skill", "Event"]) {
+      await session.run(
+        `CREATE INDEX gm_node_community_${label.toLowerCase()} IF NOT EXISTS FOR (n:${label}) ON (n.communityId)`
+      );
+    }
     await session.run(
       "CREATE INDEX gm_message_session IF NOT EXISTS FOR (m:GmMessage) ON (m.sessionKey)"
     );
@@ -664,27 +652,7 @@ var init_store = __esm({
 });
 
 // index.ts
-// 内联 definePluginEntry — 消除对 openclaw/plugin-sdk 的外部依赖，修复循环依赖警告
-function createCachedLazyValueGetter(value, fallback) {
-  let resolved = false;
-  let cached;
-  return () => {
-    if (!resolved) {
-      cached = (typeof value === "function" ? value() : value) ?? fallback;
-      resolved = true;
-    }
-    return cached;
-  };
-}
-function definePluginEntry({ id, name, description, kind, configSchema = (() => ({})), reload, nodeHostCommands, securityAuditCollectors, register }) {
-  const getConfigSchema = createCachedLazyValueGetter(configSchema);
-  var result = { id, name, description, get configSchema() { return getConfigSchema(); }, register };
-  if (kind) result.kind = kind;
-  if (reload) result.reload = reload;
-  if (nodeHostCommands) result.nodeHostCommands = nodeHostCommands;
-  if (securityAuditCollectors) result.securityAuditCollectors = securityAuditCollectors;
-  return result;
-}
+import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 
 // node_modules/typebox/build/system/memory/memory.mjs
 var memory_exports = {};
@@ -5850,9 +5818,9 @@ var graph_memory_pro_default = definePluginEntry({
     });
     api.on("before_prompt_build", async (event) => {
       if (!_driver3 || !_cfg2) return;
-      const sessionKey = event.context?.sessionKey || event.sessionId;
+      const sessionKey = event.context.sessionKey;
       if (!sessionKey) return;
-      const tokenBudget = event.context?.tokenBudget ?? 32768;
+      const tokenBudget = event.context.tokenBudget ?? 32768;
       const tail = event.sessionMessages?.slice(-_cfg2.freshTailCount * 2) ?? [];
       try {
         if (_llm2 && _extractor) {
