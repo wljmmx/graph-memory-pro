@@ -5818,7 +5818,7 @@ var graph_memory_pro_default = definePluginEntry({
     });
     api.on("before_prompt_build", async (event) => {
       if (!_driver3 || !_cfg2) return;
-      const sessionKey = event.context.sessionKey;
+      const sessionKey = event.context?.sessionKey;
       if (!sessionKey) return;
       const tokenBudget = event.context.tokenBudget ?? 32768;
       const tail = event.sessionMessages?.slice(-_cfg2.freshTailCount * 2) ?? [];

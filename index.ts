@@ -165,7 +165,7 @@ export default definePluginEntry({
     api.on("before_prompt_build", async (event) => {
       if (!_driver || !_cfg) return;
 
-      const sessionKey = event.context.sessionKey;
+      const sessionKey = event.context?.sessionKey;
       if (!sessionKey) return;
 
       const tokenBudget = event.context.tokenBudget ?? 32768;
