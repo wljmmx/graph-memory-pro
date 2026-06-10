@@ -5996,9 +5996,11 @@ var graph_memory_pro_default = definePluginEntry({
   }
 });
 export {
+  Extractor,
   Recaller,
   graph_memory_pro_default as default,
   ensureSchema,
+  extractTriplets,
   findById,
   getDriver,
   getEdgeCount,

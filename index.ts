@@ -370,3 +370,4 @@ export { upsertNode, upsertEdge, mergeNodes, findById } from "./src/store/store.
 export { Recaller } from "./src/recaller/recall.js";
 export { getDriver } from "./src/store/db.js";
 export { runMaintenance } from "./src/graph/maintenance.js";
+export { Extractor, extractTriplets } from "./src/extractor/extract.ts";
