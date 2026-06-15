@@ -371,3 +371,11 @@ export { Recaller } from "./src/recaller/recall.js";
 export { getDriver } from "./src/store/db.js";
 export { runMaintenance } from "./src/graph/maintenance.js";
 export { Extractor, extractTriplets } from "./src/extractor/extract.ts";
+
+// ─── Additional re-exports for lcm-graph-extra (Layer 1 fix) ────
+export { personalizedPageRank, computeGlobalPageRank } from "./src/graph/pagerank.js";
+export { communityDetection, summarizeCommunities, getVectorHash, getCommunityPeers } from "./src/graph/community.js";
+export { deduplicateNodes } from "./src/graph/dedup.js";
+export type { GmConfig, NodeType, EdgeType, NodeStatus, GmNode, GmEdge, RecallResult, MaintenanceConfig } from "./src/types.js";
+export { createEmbedFn } from "./src/engine/embed.js";
+export type { EmbedFn } from "./src/engine/embed.js";

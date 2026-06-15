@@ -5554,6 +5554,24 @@ async function detectCommunities(driver, maxIter = 50) {
     await session.close();
   }
 }
+async function getCommunityPeers(driver, nodeId, limit = 5) {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(`
+      MATCH (n:Task|Skill|Event {id: $nodeId, status: 'active'})
+      WITH n.communityId AS cid
+      WHERE cid IS NOT NULL
+      MATCH (peer:Task|Skill|Event {communityId: cid, status: 'active'})
+      WHERE peer.id <> $nodeId
+      RETURN peer.id AS id
+      ORDER BY peer.validatedCount DESC, peer.updatedAt DESC
+      LIMIT toInteger($limit)
+    `, { nodeId, limit });
+    return result.records.map((r) => r.get("id"));
+  } finally {
+    await session.close();
+  }
+}
 var COMMUNITY_SUMMARY_SYS = `\u4F60\u662F\u77E5\u8BC6\u56FE\u8C31\u793E\u533A\u6458\u8981\u5F15\u64CE\u3002\u6839\u636E\u793E\u533A\u5185\u7684\u8282\u70B9\u5217\u8868\uFF0C\u751F\u6210\u4E00\u53E5\u8BDD\u63CF\u8FF0\u8BE5\u793E\u533A\u7684\u4E3B\u9898\u9886\u57DF\u3002
 \u8981\u6C42\uFF1A
 - \u53EA\u8FD4\u56DE\u4E00\u53E5\u8BDD\uFF0C\u4E0D\u8D85\u8FC7 30 \u4E2A\u5B57
@@ -5998,18 +6016,23 @@ var graph_memory_pro_default = definePluginEntry({
 export {
   Extractor,
   Recaller,
+  computeGlobalPageRank,
+  createEmbedFn,
   graph_memory_pro_default as default,
   ensureSchema,
   extractTriplets,
   findById,
+  getCommunityPeers,
   getDriver,
   getEdgeCount,
   getEdgesForNodes,
   getNodeCount,
   getTopNodes,
   mergeNodes,
+  personalizedPageRank,
   runMaintenance,
   searchNodes,
+  summarizeCommunities,
   upsertEdge,
   upsertNode
 };

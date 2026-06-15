@@ -119,3 +119,34 @@ export interface CommunitySummary {
   memberCount: number;
   embedding?: number[];
 }
+
+
+/**
+ * Predefined Embedding Model Presets
+ */
+export interface EmbeddingModelPreset {
+  model: string;
+  dimensions: number;
+  baseURL?: string;
+  description: string;
+}
+
+export const EMBEDDING_PRESETS: Record<string, EmbeddingModelPreset> = {
+  "text-embedding-3-small": {
+    model: "text-embedding-3-small",
+    dimensions: 1024,
+    description: "OpenAI text-embedding-3-small",
+  },
+  "nomic-embed-text": {
+    model: "nomic-embed-text",
+    dimensions: 768,
+    description: "Nomic Embed Text (Ollama)",
+  },
+  "qwen3.5-embedding-0.6b": {
+    model: "Qwen3.5-Embedding-0.6B-GGUF",
+    dimensions: 1024,
+    baseURL: "http://192.168.50.5:11434/v1",
+    description: "Qwen3.5 Embedding 0.6B GGUF (Ollama, local)",
+  },
+};
+
