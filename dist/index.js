@@ -5144,14 +5144,14 @@ async function ensureSharedProjection(session) {
       RETURN exists
     `, { name: SHARED_GRAPH_NAME });
     if (checkResult.records[0]?.get("exists") === true) {
-      console.log(`  [pagerank] ensureSharedProjection HIT cached ms=${+(Date.now() - tEnsure).toFixed(1)}`);
+      if (process.env.GM_DEBUG) console.log(`  [pagerank] ensureSharedProjection HIT cached ms=${+(Date.now() - tEnsure).toFixed(1)}`);
       return true;
     }
   }
   const currentTypes = await getExistingRelTypes(session);
   const currentHash = relTypeHash(currentTypes);
   if (currentTypes.length === 0) {
-    console.log(`  [pagerank] ensureSharedProjection NO_TYPES ms=${+(Date.now() - tEnsure).toFixed(1)}`);
+    if (process.env.GM_DEBUG) console.log(`  [pagerank] ensureSharedProjection NO_TYPES ms=${+(Date.now() - tEnsure).toFixed(1)}`);
     return false;
   }
   try {
@@ -5164,7 +5164,7 @@ async function ensureSharedProjection(session) {
   );
   _cachedTimestamp = now;
   _cachedRelTypeHash = currentHash;
-  console.log(`  [pagerank] ensureSharedProjection REBUILT ms=${+(Date.now() - tEnsure).toFixed(1)}`);
+  if (process.env.GM_DEBUG) console.log(`  [pagerank] ensureSharedProjection REBUILT ms=${+(Date.now() - tEnsure).toFixed(1)}`);
   return true;
 }
 async function personalizedPageRank(driver, seedIds, candidateIds, cfg) {
@@ -5233,7 +5233,7 @@ async function runPPR(session, graphName, seedIds, candidateIds, cfg) {
     const rawScore = r.get("score");
     scores.set(r.get("id"), typeof rawScore === "number" ? rawScore : rawScore?.toNumber?.() ?? 0);
   }
-  console.log(`  [pagerank] runPPR ms=${+(Date.now() - tPprFn).toFixed(1)} scores=${scores.size}`);
+  if (process.env.GM_DEBUG) console.log(`  [pagerank] runPPR ms=${+(Date.now() - tPprFn).toFixed(1)} scores=${scores.size}`);
   return { scores };
 }
 async function computeGlobalPageRank(driver, cfg) {
@@ -5307,14 +5307,14 @@ var Recaller = class {
     const generalized = await this.recallGeneralized(query, limit);
     const merged = this.mergeResults(precise, generalized);
     if (process.env.GM_DEBUG) {
-      console.log(`  [DEBUG] recall: ${precise.nodes.length} precise + ${generalized.nodes.length} generalized = ${merged.nodes.length} total`);
+      if (process.env.GM_DEBUG) console.log(`  [DEBUG] recall: ${precise.nodes.length} precise + ${generalized.nodes.length} generalized = ${merged.nodes.length} total`);
     }
     return merged;
   }
   async recallPrecise(query, limit) {
     const tFts = Date.now();
     const ftsNodes = await searchNodes(this.driver, query, limit);
-    console.log(`  [recall-precise] FTS: ${+(Date.now() - tFts).toFixed(1)}ms nodes=${ftsNodes.length}`);
+    if (process.env.GM_DEBUG) console.log(`  [recall-precise] FTS: ${+(Date.now() - tFts).toFixed(1)}ms nodes=${ftsNodes.length}`);
     let vecNodes = [];
     if (this.embed) {
       try {
@@ -5338,13 +5338,13 @@ var Recaller = class {
     const nodeIds = nodes.slice(0, limit).map((n) => n.id);
     const tGw = Date.now();
     const walked = await graphWalk(this.driver, nodeIds, this.cfg.recallMaxDepth);
-    console.log(`  [recall-precise] graphWalk: ${+(Date.now() - tGw).toFixed(1)}ms nodes=${walked.nodes.length}`);
+    if (process.env.GM_DEBUG) console.log(`  [recall-precise] graphWalk: ${+(Date.now() - tGw).toFixed(1)}ms nodes=${walked.nodes.length}`);
     const candidateIds = walked.nodes.map((n) => n.id);
     let pprScores;
     try {
       const tPpr = Date.now();
       const pprResult = await personalizedPageRank(this.driver, nodeIds, candidateIds, this.cfg);
-      console.log(`  [recall-precise] PPR: ${+(Date.now() - tPpr).toFixed(1)}ms scores=${pprResult.scores.size}`);
+      if (process.env.GM_DEBUG) console.log(`  [recall-precise] PPR: ${+(Date.now() - tPpr).toFixed(1)}ms scores=${pprResult.scores.size}`);
       pprScores = pprResult.scores;
     } catch {
       pprScores = /* @__PURE__ */ new Map();
@@ -5948,7 +5948,7 @@ var graph_memory_pro_default = definePluginEntry({
           if (query) {
             const recallStart = Date.now();
             const recallResult = await _recaller.recall(query);
-            event.context.logger?.debug?.("[graph-memory-pro] recall completed", { ms: +(Date.now() - recallStart).toFixed(1) });
+            event.context.logger?.info?.("[graph-memory-pro] recall completed", { ms: +(Date.now() - recallStart).toFixed(1) });
             for (const node of recallResult.nodes) {
               if (_embed2) await _recaller.syncEmbed(node).catch(() => {
               });

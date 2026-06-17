@@ -33,7 +33,7 @@ export class Recaller {
     const merged = this.mergeResults(precise, generalized);
 
     if (process.env.GM_DEBUG) {
-      console.log(`  [DEBUG] recall: ${precise.nodes.length} precise + ${generalized.nodes.length} generalized = ${merged.nodes.length} total`);
+      if (process.env.GM_DEBUG) console.log(`  [DEBUG] recall: ${precise.nodes.length} precise + ${generalized.nodes.length} generalized = ${merged.nodes.length} total`);
     }
 
     return merged;
@@ -43,7 +43,7 @@ export class Recaller {
     // 路径1: 全文搜索
     const tFts = Date.now();
     const ftsNodes = await searchNodes(this.driver, query, limit);
-    console.log(`  [recall-precise] FTS: ${+(Date.now()-tFts).toFixed(1)}ms nodes=${ftsNodes.length}`);
+    if (process.env.GM_DEBUG) console.log(`  [recall-precise] FTS: ${+(Date.now()-tFts).toFixed(1)}ms nodes=${ftsNodes.length}`);
 
     // 路径2: 向量搜索 (如果有embedding)
     let vecNodes: GmNode[] = [];
@@ -72,7 +72,7 @@ export class Recaller {
     const nodeIds = nodes.slice(0, limit).map(n => n.id);
     const tGw = Date.now();
     const walked = await graphWalk(this.driver, nodeIds, this.cfg.recallMaxDepth);
-    console.log(`  [recall-precise] graphWalk: ${+(Date.now()-tGw).toFixed(1)}ms nodes=${walked.nodes.length}`);
+    if (process.env.GM_DEBUG) console.log(`  [recall-precise] graphWalk: ${+(Date.now()-tGw).toFixed(1)}ms nodes=${walked.nodes.length}`);
 
     // PPR 排序
     const candidateIds = walked.nodes.map(n => n.id);
@@ -80,7 +80,7 @@ export class Recaller {
     try {
       const tPpr = Date.now();
       const pprResult = await personalizedPageRank(this.driver, nodeIds, candidateIds, this.cfg);
-      console.log(`  [recall-precise] PPR: ${+(Date.now()-tPpr).toFixed(1)}ms scores=${pprResult.scores.size}`);
+      if (process.env.GM_DEBUG) console.log(`  [recall-precise] PPR: ${+(Date.now()-tPpr).toFixed(1)}ms scores=${pprResult.scores.size}`);
       pprScores = pprResult.scores;
     } catch {
       pprScores = new Map();

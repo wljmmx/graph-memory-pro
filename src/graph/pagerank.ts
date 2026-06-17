@@ -56,7 +56,7 @@ async function ensureSharedProjection(session: Session): Promise<boolean> {
     `, { name: SHARED_GRAPH_NAME });
 
     if (checkResult.records[0]?.get("exists") === true) {
-      console.log(`  [pagerank] ensureSharedProjection HIT cached ms=${+(Date.now()-tEnsure).toFixed(1)}`);
+      if (process.env.GM_DEBUG) console.log(`  [pagerank] ensureSharedProjection HIT cached ms=${+(Date.now()-tEnsure).toFixed(1)}`);
       return true;
     }
   }
@@ -66,7 +66,7 @@ async function ensureSharedProjection(session: Session): Promise<boolean> {
   const currentHash = relTypeHash(currentTypes);
 
   if (currentTypes.length === 0) {
-    console.log(`  [pagerank] ensureSharedProjection NO_TYPES ms=${+(Date.now()-tEnsure).toFixed(1)}`);
+    if (process.env.GM_DEBUG) console.log(`  [pagerank] ensureSharedProjection NO_TYPES ms=${+(Date.now()-tEnsure).toFixed(1)}`);
     return false;
   }
 
@@ -79,7 +79,7 @@ async function ensureSharedProjection(session: Session): Promise<boolean> {
   );
   _cachedTimestamp = now;
   _cachedRelTypeHash = currentHash;
-  console.log(`  [pagerank] ensureSharedProjection REBUILT ms=${+(Date.now()-tEnsure).toFixed(1)}`);
+  if (process.env.GM_DEBUG) console.log(`  [pagerank] ensureSharedProjection REBUILT ms=${+(Date.now()-tEnsure).toFixed(1)}`);
   return true;
 }
 export interface PPRResult {
@@ -170,7 +170,7 @@ async function runPPR(
     scores.set(r.get("id"), typeof rawScore === "number" ? rawScore : (rawScore?.toNumber?.() ?? 0));
   }
 
-  console.log(`  [pagerank] runPPR ms=${+(Date.now()-tPprFn).toFixed(1)} scores=${scores.size}`);
+  if (process.env.GM_DEBUG) console.log(`  [pagerank] runPPR ms=${+(Date.now()-tPprFn).toFixed(1)} scores=${scores.size}`);
   return { scores };
 }
 
