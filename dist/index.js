@@ -5114,7 +5114,9 @@ import { createHash } from "crypto";
 // src/graph/pagerank.ts
 init_db();
 var ALL_REL_TYPES = ["USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH"];
-var STREAM_GRAPH_NAME = "gm_ppr_stream";
+var _cachedGraphName = null;
+var _cachedTimestamp = 0;
+var PROJECTION_TTL_MS = 5 * 60 * 1e3;
 async function getExistingRelTypes(session) {
   const result = await session.run(`
     MATCH (:Task|Skill|Event)-[r]->(:Task|Skill|Event)
@@ -5128,13 +5130,13 @@ function buildRelProjection(existingTypes) {
   const parts = existingTypes.map((t) => `${t}: {orientation: 'UNDIRECTED'}`);
   return `{${parts.join(", ")}}`;
 }
-async function ensureStreamProjection(session) {
+async function ensureProjection(session, graphName) {
   const checkResult = await session.run(`
     CALL gds.graph.exists($name)
     YIELD exists
     RETURN exists
-  `, { name: STREAM_GRAPH_NAME });
-  if (checkResult.records[0]?.get("exists") === true) {
+  `, { name: graphName });
+  if (checkResult.records[0]?.get("exists") === true && Date.now() - _cachedTimestamp < PROJECTION_TTL_MS) {
     return true;
   }
   try {
@@ -5142,10 +5144,15 @@ async function ensureStreamProjection(session) {
     if (existingTypes.length === 0) {
       return false;
     }
+    try {
+      await session.run(`CALL gds.graph.drop('${graphName}')`);
+    } catch {
+    }
     const relProjection = buildRelProjection(existingTypes);
     await session.run(
-      `CALL gds.graph.project('${STREAM_GRAPH_NAME}', ['Task', 'Skill', 'Event'], ${relProjection}, { stream: true })`
+      `CALL gds.graph.project('${graphName}', ['Task', 'Skill', 'Event'], ${relProjection})`
     );
+    _cachedTimestamp = Date.now();
     return true;
   } catch {
     return false;
@@ -5163,19 +5170,23 @@ async function personalizedPageRank(driver, seedIds, candidateIds, cfg) {
       candidateIds.forEach((id, i) => scores.set(id, 1 / (i + 1)));
       return { scores };
     }
-    const hasProjection = await ensureStreamProjection(session);
-    if (!hasProjection) {
-      const scores = /* @__PURE__ */ new Map();
-      candidateIds.forEach((id, i) => scores.set(id, 1 / (i + 1)));
-      return { scores };
+    if (_cachedGraphName && Date.now() - _cachedTimestamp < PROJECTION_TTL_MS) {
+      const hasProjection = await ensureProjection(session, _cachedGraphName);
+      if (hasProjection) {
+        return runPPR(session, _cachedGraphName, seedIds, candidateIds, cfg);
+      }
     }
+    const graphName = `gm-ppr-${Date.now()}`;
+    _cachedGraphName = graphName;
     try {
-      return runPPR(session, STREAM_GRAPH_NAME, seedIds, candidateIds, cfg);
+      await ensureProjection(session, graphName);
+      return runPPR(session, graphName, seedIds, candidateIds, cfg);
     } catch (gdsErr) {
       try {
-        await session.run(`CALL gds.graph.drop('${STREAM_GRAPH_NAME}')`);
+        await session.run(`CALL gds.graph.drop('${graphName}')`);
       } catch {
       }
+      _cachedGraphName = null;
       const scores = /* @__PURE__ */ new Map();
       candidateIds.forEach((id, i) => scores.set(id, 1 / (i + 1)));
       return { scores };
