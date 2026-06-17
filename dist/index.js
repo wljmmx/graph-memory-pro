@@ -6025,8 +6025,8 @@ var graph_memory_pro_default = definePluginEntry({
       reportEveryN: typebox_exports.Optional(typebox_exports.Number({ default: 50 }))
     }))
   }),
-  register(api2) {
-    api2.on("gateway_start", async (event) => {
+  register(api) {
+    api.on("gateway_start", async (event) => {
       const { readFileSync } = await import("fs");
       const { join } = await import("path");
       const configPath = join(process.env.HOME || "/home/wljmmx", ".openclaw/openclaw.json");
@@ -6068,7 +6068,7 @@ var graph_memory_pro_default = definePluginEntry({
       initRoutes(driver, _cfg2, _llm2 ?? void 0, _embed2 ?? void 0);
       console.log("[graph-memory-pro] initialized");
     });
-    api2.on("gateway_stop", async () => {
+    api.on("gateway_stop", async () => {
       closeDriver();
       _driver3 = null;
       _cfg2 = null;
@@ -6077,7 +6077,7 @@ var graph_memory_pro_default = definePluginEntry({
       _recaller = null;
       _extractor = null;
     });
-    api2.on("before_prompt_build", async (event) => {
+    api.on("before_prompt_build", async (event) => {
       if (!_driver3 || !_cfg2) return;
       const sessionKey = event.context?.sessionKey;
       if (!sessionKey) return;
@@ -6135,7 +6135,7 @@ var graph_memory_pro_default = definePluginEntry({
         }
       }
     });
-    api2.on("session_end", async () => {
+    api.on("session_end", async () => {
       if (!_driver3 || !_cfg2) return;
       try {
         await runMaintenance(_driver3, _cfg2, _llm2 ?? void 0, _embed2 ?? void 0);
@@ -6145,7 +6145,7 @@ var graph_memory_pro_default = definePluginEntry({
         }
       }
     });
-    api2.registerTool({
+    api.registerTool({
       name: "gm_search",
       description: "\u5728 Graph Memory Pro \u4E2D\u641C\u7D22\u77E5\u8BC6\u8282\u70B9\u3002\u652F\u6301\u6309\u5173\u952E\u8BCD\u641C\u7D22\u77E5\u8BC6\u56FE\u8C31\u4E2D\u7684\u6280\u80FD(SKILL)\u3001\u4EFB\u52A1(TASK)\u3001\u4E8B\u4EF6(EVENT)\u8282\u70B9",
       parameters: typebox_exports.Object({
@@ -6172,7 +6172,7 @@ var graph_memory_pro_default = definePluginEntry({
         }
       }
     });
-    api2.registerTool({
+    api.registerTool({
       name: "gm_record",
       description: "\u624B\u52A8\u8BB0\u5F55\u4E00\u6761\u77E5\u8BC6\u5230 Graph Memory Pro \u56FE\u8C31\u4E2D\u3002\u5F53\u4F60\u53D1\u73B0\u91CD\u8981\u7684\u6280\u80FD\u3001\u7ECF\u9A8C\u6216\u4E8B\u4EF6\u65F6\u4F7F\u7528",
       parameters: typebox_exports.Object({
@@ -6208,7 +6208,7 @@ var graph_memory_pro_default = definePluginEntry({
         }
       }
     });
-    api2.registerTool({
+    api.registerTool({
       name: "gm_stats",
       description: "\u67E5\u770B Graph Memory Pro \u77E5\u8BC6\u56FE\u8C31\u7684\u7EDF\u8BA1\u4FE1\u606F\uFF0C\u5305\u62EC\u8282\u70B9\u6570\u3001\u5173\u7CFB\u6570\u7B49",
       parameters: typebox_exports.Object({}),
@@ -6232,7 +6232,7 @@ var graph_memory_pro_default = definePluginEntry({
         }
       }
     });
-    api2.registerTool({
+    api.registerTool({
       name: "gm_maintain",
       description: "\u624B\u52A8\u89E6\u53D1 Graph Memory Pro \u56FE\u8C31\u7EF4\u62A4\uFF08\u53BB\u91CD + PageRank + \u793E\u533A\u68C0\u6D4B\uFF09",
       parameters: typebox_exports.Object({}),
@@ -6256,27 +6256,27 @@ var graph_memory_pro_default = definePluginEntry({
         }
       }
     });
-  }
-});
-api.registerTool({
-  name: "gm_latency",
-  description: "\u67E5\u770B Graph Memory Pro \u5404\u9636\u6BB5\u5EF6\u8FDF\u5206\u5E03\u7EDF\u8BA1\uFF08\u767E\u5206\u4F4D/P50/P90/P95/P99\uFF09",
-  parameters: typebox_exports.Object({
-    reset: typebox_exports.Optional(typebox_exports.Boolean({ default: false, description: "\u662F\u5426\u91CD\u7F6E\u7EDF\u8BA1\u6570\u636E" })),
-    enable: typebox_exports.Optional(typebox_exports.Boolean({ description: "\u542F\u7528/\u7981\u7528\u5EF6\u8FDF\u7EDF\u8BA1" }))
-  }),
-  async execute(_callId, params) {
-    const doReset = params.reset === true;
-    const doEnable = params.enable;
-    if (doEnable !== void 0) {
-      setTimingEnabled(doEnable);
-    }
-    if (doReset) {
-      resetAllDistributions();
-      return { content: [{ type: "text", text: "\u5EF6\u8FDF\u7EDF\u8BA1\u6570\u636E\u5DF2\u91CD\u7F6E" }] };
-    }
-    const report = printAllDistributions();
-    return { content: [{ type: "text", text: report }] };
+    api.registerTool({
+      name: "gm_latency",
+      description: "\u67E5\u770B Graph Memory Pro \u5404\u9636\u6BB5\u5EF6\u8FDF\u5206\u5E03\u7EDF\u8BA1\uFF08\u767E\u5206\u4F4D/P50/P90/P95/P99\uFF09",
+      parameters: typebox_exports.Object({
+        reset: typebox_exports.Optional(typebox_exports.Boolean({ default: false, description: "\u662F\u5426\u91CD\u7F6E\u7EDF\u8BA1\u6570\u636E" })),
+        enable: typebox_exports.Optional(typebox_exports.Boolean({ description: "\u542F\u7528/\u7981\u7528\u5EF6\u8FDF\u7EDF\u8BA1" }))
+      }),
+      async execute(_callId, params) {
+        const doReset = params.reset === true;
+        const doEnable = params.enable;
+        if (doEnable !== void 0) {
+          setTimingEnabled(doEnable);
+        }
+        if (doReset) {
+          resetAllDistributions();
+          return { content: [{ type: "text", text: "\u5EF6\u8FDF\u7EDF\u8BA1\u6570\u636E\u5DF2\u91CD\u7F6E" }] };
+        }
+        const report = printAllDistributions();
+        return { content: [{ type: "text", text: report }] };
+      }
+    });
   }
 });
 export {

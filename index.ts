@@ -374,8 +374,6 @@ export default definePluginEntry({
         }
       },
     });
-  },
-});
 
     // gm_latency: latency distribution stats
     api.registerTool({
@@ -401,6 +399,8 @@ export default definePluginEntry({
         return { content: [{ type: "text", text: report }] };
       },
     });
+  },
+});
 
 // ─── Re-exports for lcm-graph-extra ─────────────────────────
 export { ensureSchema, searchNodes, getEdgesForNodes, getTopNodes, getNodeCount, getEdgeCount } from "./src/store/store.js";
