@@ -35,6 +35,7 @@ import { assembleContext } from "./src/format/assemble.ts";
 import { runMaintenance } from "./src/graph/maintenance.ts";
 import { initRoutes, getRoutes } from "./src/routes/crud.ts";
 import { sanitizeToolUseResultPairing } from "./src/format/transcript-repair.ts";
+import { setTimingEnabled, printAllDistributions, resetAllDistributions } from "./src/timing.ts";
 
 // ─── 全局状态 ──────────────────────────────────────────
 
@@ -93,6 +94,11 @@ export default definePluginEntry({
       model: Type.Optional(Type.String()),
       dimensions: Type.Optional(Type.Number({ default: 1024 })),
     })),
+    timing: Type.Optional(Type.Object({
+      enabled: Type.Boolean({ default: false }),
+      maxSamples: Type.Optional(Type.Number({ default: 1000 })),
+      reportEveryN: Type.Optional(Type.Number({ default: 50 })),
+    })),
   }),
   register(api) {
     // ── Gateway 启动时初始化 ──────────────────────
@@ -143,6 +149,11 @@ export default definePluginEntry({
       _recaller = new Recaller(driver, _cfg);
       if (_embed) _recaller.setEmbedFn(_embed);
       _extractor = new Extractor(driver);
+
+      // Set timing enabled based on config
+      if (_cfg.timing?.enabled) {
+        setTimingEnabled(true);
+      }
 
       // 5. 初始化 HTTP 路由
       initRoutes(driver, _cfg, _llm ?? undefined, _embed ?? undefined);
@@ -366,6 +377,31 @@ export default definePluginEntry({
   },
 });
 
+    // gm_latency: latency distribution stats
+    api.registerTool({
+      name: "gm_latency",
+      description: "查看 Graph Memory Pro 各阶段延迟分布统计（百分位/P50/P90/P95/P99）",
+      parameters: Type.Object({
+        reset: Type.Optional(Type.Boolean({ default: false, description: "是否重置统计数据" })),
+        enable: Type.Optional(Type.Boolean({ description: "启用/禁用延迟统计" })),
+      }),
+      async execute(_callId, params) {
+        const doReset = (params.reset as boolean) === true;
+        const doEnable = params.enable as boolean | undefined;
+
+        if (doEnable !== undefined) {
+          setTimingEnabled(doEnable);
+        }
+        if (doReset) {
+          resetAllDistributions();
+          return { content: [{ type: "text", text: "延迟统计数据已重置" }] };
+        }
+
+        const report = printAllDistributions();
+        return { content: [{ type: "text", text: report }] };
+      },
+    });
+
 // ─── Re-exports for lcm-graph-extra ─────────────────────────
 export { ensureSchema, searchNodes, getEdgesForNodes, getTopNodes, getNodeCount, getEdgeCount } from "./src/store/store.js";
 export { upsertNode, upsertEdge, mergeNodes, findById } from "./src/store/store.js";
@@ -380,4 +416,5 @@ export { communityDetection, summarizeCommunities, getVectorHash, getCommunityPe
 export { deduplicateNodes } from "./src/graph/dedup.js";
 export type { GmConfig, NodeType, EdgeType, NodeStatus, GmNode, GmEdge, RecallResult, MaintenanceConfig } from "./src/types.js";
 export { createEmbedFn } from "./src/engine/embed.js";
+export { setTimingEnabled, printAllDistributions, resetAllDistributions, LatencyDistribution } from "./src/timing.js";
 export type { EmbedFn } from "./src/engine/embed.js";

@@ -5113,6 +5113,109 @@ import { createHash } from "crypto";
 
 // src/graph/pagerank.ts
 init_db();
+
+// src/timing.ts
+var DEFAULT_THRESHOLDS = [5, 10, 20, 50, 100, 200, 500, 1e3, 2e3];
+var LatencyDistribution = class {
+  samples = [];
+  thresholds;
+  constructor(thresholds = DEFAULT_THRESHOLDS) {
+    this.thresholds = [...thresholds].sort((a, b) => a - b);
+  }
+  record(ms) {
+    this.samples.push(ms);
+  }
+  reset() {
+    this.samples.length = 0;
+  }
+  get count() {
+    return this.samples.length;
+  }
+  histogram() {
+    const buckets = {};
+    for (const t of this.thresholds) {
+      buckets[`<=${t}ms`] = 0;
+    }
+    buckets[">last"] = 0;
+    for (const s of this.samples) {
+      let placed = false;
+      for (const t of this.thresholds) {
+        if (s <= t) {
+          buckets[`<=${t}ms`]++;
+          placed = true;
+          break;
+        }
+      }
+      if (!placed) buckets[">last"]++;
+    }
+    return buckets;
+  }
+  percentile(p) {
+    if (this.samples.length === 0) return null;
+    const sorted = [...this.samples].sort((a, b) => a - b);
+    const idx = Math.ceil(p / 100 * sorted.length) - 1;
+    return sorted[Math.max(0, idx)];
+  }
+  percentileSummary() {
+    const p50 = this.percentile(50);
+    const p90 = this.percentile(90);
+    const p95 = this.percentile(95);
+    const p99 = this.percentile(99);
+    return `P50=${p50 ?? "-"}ms P90=${p90 ?? "-"}ms P95=${p95 ?? "-"}ms P99=${p99 ?? "-"}ms (n=${this.count})`;
+  }
+  report(phase = "recall") {
+    if (this.samples.length === 0) return `[latency] ${phase}: no samples yet`;
+    const hist = this.histogram();
+    const histStr = Object.entries(hist).map(([k, v]) => `  ${k}: ${v}`).join("\n");
+    return `[latency-distribution] ${phase} (n=${this.count})
+${histStr}
+  ${this.percentileSummary()}`;
+  }
+};
+var collectors = /* @__PURE__ */ new Map();
+function getCollector(phase) {
+  if (!collectors.has(phase)) {
+    collectors.set(phase, new LatencyDistribution());
+  }
+  return collectors.get(phase);
+}
+function recordPhaseTiming(phase, ms) {
+  getCollector(phase).record(ms);
+}
+function printAllDistributions() {
+  const lines = [];
+  for (const [phase, collector] of collectors) {
+    if (collector.count > 0) {
+      lines.push(collector.report(phase));
+    }
+  }
+  return lines.length ? lines.join("\n\n") : "[latency] no data collected";
+}
+function resetAllDistributions() {
+  for (const [, c] of collectors) {
+    c.reset();
+  }
+}
+var _timingEnabled = false;
+function setTimingEnabled(enabled) {
+  _timingEnabled = enabled;
+}
+function isTimingEnabled() {
+  return _timingEnabled || !!process.env.GM_DEBUG;
+}
+function logPhase(phase, ms, ctx) {
+  if (!isTimingEnabled()) return;
+  recordPhaseTiming(phase, ms);
+  const parts = [phase, `+${ms.toFixed(1)}ms`];
+  if (ctx) {
+    for (const [k, v] of Object.entries(ctx)) {
+      parts.push(`${k}=${v}`);
+    }
+  }
+  console.log(`[gm-timing] ${parts.join(" ")}`);
+}
+
+// src/graph/pagerank.ts
 var ALL_REL_TYPES = ["USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH"];
 var SHARED_GRAPH_NAME = "gm-shared";
 var _cachedRelTypeHash = null;
@@ -5144,14 +5247,14 @@ async function ensureSharedProjection(session) {
       RETURN exists
     `, { name: SHARED_GRAPH_NAME });
     if (checkResult.records[0]?.get("exists") === true) {
-      if (process.env.GM_DEBUG) console.log(`  [pagerank] ensureSharedProjection HIT cached ms=${+(Date.now() - tEnsure).toFixed(1)}`);
+      logPhase("ensure_projection", Date.now() - tEnsure, { cache: "hit" });
       return true;
     }
   }
   const currentTypes = await getExistingRelTypes(session);
   const currentHash = relTypeHash(currentTypes);
   if (currentTypes.length === 0) {
-    if (process.env.GM_DEBUG) console.log(`  [pagerank] ensureSharedProjection NO_TYPES ms=${+(Date.now() - tEnsure).toFixed(1)}`);
+    logPhase("ensure_projection", Date.now() - tEnsure, { status: "no_types" });
     return false;
   }
   try {
@@ -5164,7 +5267,7 @@ async function ensureSharedProjection(session) {
   );
   _cachedTimestamp = now;
   _cachedRelTypeHash = currentHash;
-  if (process.env.GM_DEBUG) console.log(`  [pagerank] ensureSharedProjection REBUILT ms=${+(Date.now() - tEnsure).toFixed(1)}`);
+  logPhase("ensure_projection", Date.now() - tEnsure, { status: "rebuilt" });
   return true;
 }
 async function personalizedPageRank(driver, seedIds, candidateIds, cfg) {
@@ -5201,15 +5304,18 @@ async function personalizedPageRank(driver, seedIds, candidateIds, cfg) {
   }
 }
 async function runPPR(session, graphName, seedIds, candidateIds, cfg) {
+  const tSeed = Date.now();
   const seedResult = await session.run(`
   const tPprFn = Date.now();
     MATCH (n:Task|Skill|Event) WHERE n.id IN $seedIds AND n.status = 'active'
     RETURN id(n) AS neoId
   `, { seedIds });
+  logPhase("ppr_seed_lookup", Date.now() - tSeed, { seeds: seedResult.records.length });
   const sourceNodeIds = seedResult.records.map((r) => r.get("neoId"));
   if (sourceNodeIds.length === 0) {
     return { scores: /* @__PURE__ */ new Map() };
   }
+  const tCompute = Date.now();
   const pprResult = await session.run(`
     CALL gds.pageRank.stream($graphName, {
       dampingFactor: $damping,
@@ -5229,11 +5335,12 @@ async function runPPR(session, graphName, seedIds, candidateIds, cfg) {
     candidateIds
   });
   const scores = /* @__PURE__ */ new Map();
+  logPhase("ppr_compute", Date.now() - tCompute, { gds_scores: pprResult.records.length });
   for (const r of pprResult.records) {
     const rawScore = r.get("score");
     scores.set(r.get("id"), typeof rawScore === "number" ? rawScore : rawScore?.toNumber?.() ?? 0);
   }
-  if (process.env.GM_DEBUG) console.log(`  [pagerank] runPPR ms=${+(Date.now() - tPprFn).toFixed(1)} scores=${scores.size}`);
+  logPhase("ppr_compute", Date.now() - tPprFn, { scores: scores.size });
   return { scores };
 }
 async function computeGlobalPageRank(driver, cfg) {
@@ -5291,39 +5398,63 @@ async function readTopK(session) {
 }
 
 // src/recaller/recall.ts
+var _recallCallCount = 0;
+var REPORT_INTERVAL = 50;
 var Recaller = class {
   constructor(driver, cfg) {
     this.driver = driver;
     this.cfg = cfg;
   }
   embed = null;
+  timingCallCount = 0;
   setEmbedFn(fn) {
     this.embed = fn;
+  }
+  resetTiming() {
+    _recallCallCount = 0;
+    this.timingCallCount = 0;
+    resetAllDistributions();
+  }
+  printDistribution() {
+    return printAllDistributions();
   }
   async recall(query) {
     const limit = this.cfg.recallMaxNodes;
     const t0 = Date.now();
+    _recallCallCount++;
+    this.timingCallCount++;
     const precise = await this.recallPrecise(query, limit);
     const generalized = await this.recallGeneralized(query, limit);
     const merged = this.mergeResults(precise, generalized);
+    const totalMs = Date.now() - t0;
+    logPhase("recall_total", totalMs, { nodes: merged.nodes.length, edges: merged.edges.length });
+    if (this.timingCallCount % REPORT_INTERVAL === 0 && isTimingEnabled()) {
+      console.log(printAllDistributions());
+    }
     if (process.env.GM_DEBUG) {
-      if (process.env.GM_DEBUG) console.log(`  [DEBUG] recall: ${precise.nodes.length} precise + ${generalized.nodes.length} generalized = ${merged.nodes.length} total`);
+      console.log("[DEBUG] recall: " + precise.nodes.length + " precise + " + generalized.nodes.length + " generalized = " + merged.nodes.length + " total (" + totalMs.toFixed(1) + "ms)");
     }
     return merged;
   }
   async recallPrecise(query, limit) {
+    const tPrecise = Date.now();
     const tFts = Date.now();
     const ftsNodes = await searchNodes(this.driver, query, limit);
-    if (process.env.GM_DEBUG) console.log(`  [recall-precise] FTS: ${+(Date.now() - tFts).toFixed(1)}ms nodes=${ftsNodes.length}`);
+    logPhase("fts_search", Date.now() - tFts, { nodes: ftsNodes.length });
     let vecNodes = [];
     if (this.embed) {
       try {
+        const tEmbed = Date.now();
         const vec = await this.embed(query);
+        logPhase("vec_embed", Date.now() - tEmbed, { dims: vec.length });
         if (vec.length) {
+          const tVecSearch = Date.now();
           const vecResults = await vectorSearchWithScore(this.driver, vec, limit);
+          logPhase("vec_search", Date.now() - tVecSearch, { nodes: vecResults.length });
           vecNodes = vecResults.map((v) => v.node).slice(0, limit);
         }
-      } catch {
+      } catch (e) {
+        if (process.env.GM_DEBUG) console.log("[recall-precise] vector search failed: " + e);
       }
     }
     const seen = /* @__PURE__ */ new Set();
@@ -5334,19 +5465,23 @@ var Recaller = class {
         nodes.push(n);
       }
     }
-    if (!nodes.length) return { nodes: [], edges: [], tokenEstimate: 0 };
+    if (!nodes.length) {
+      logPhase("recall_precise", Date.now() - tPrecise, { early_exit: true });
+      return { nodes: [], edges: [], tokenEstimate: 0 };
+    }
     const nodeIds = nodes.slice(0, limit).map((n) => n.id);
     const tGw = Date.now();
     const walked = await graphWalk(this.driver, nodeIds, this.cfg.recallMaxDepth);
-    if (process.env.GM_DEBUG) console.log(`  [recall-precise] graphWalk: ${+(Date.now() - tGw).toFixed(1)}ms nodes=${walked.nodes.length}`);
+    logPhase("graph_walk", Date.now() - tGw, { nodes: walked.nodes.length, edges: walked.edges.length });
     const candidateIds = walked.nodes.map((n) => n.id);
     let pprScores;
     try {
       const tPpr = Date.now();
       const pprResult = await personalizedPageRank(this.driver, nodeIds, candidateIds, this.cfg);
-      if (process.env.GM_DEBUG) console.log(`  [recall-precise] PPR: ${+(Date.now() - tPpr).toFixed(1)}ms scores=${pprResult.scores.size}`);
+      logPhase("ppr_compute", Date.now() - tPpr, { scores: pprResult.scores.size });
       pprScores = pprResult.scores;
-    } catch {
+    } catch (e) {
+      if (process.env.GM_DEBUG) console.log("[recall-precise] PPR failed: " + e);
       pprScores = /* @__PURE__ */ new Map();
     }
     const scored = walked.nodes.map((n) => ({
@@ -5358,24 +5493,35 @@ var Recaller = class {
     const edges = walked.edges.filter(
       (e) => finalNodes.some((n) => n.id === e.fromId) && finalNodes.some((n) => n.id === e.toId)
     );
+    logPhase("recall_precise", Date.now() - tPrecise, { finalNodes: finalNodes.length });
     return { nodes: finalNodes, edges, tokenEstimate: finalNodes.length * 50 + edges.length * 20 };
   }
   async recallGeneralized(query, limit) {
     if (!this.embed) return { nodes: [], edges: [], tokenEstimate: 0 };
+    const tGen = Date.now();
     try {
+      const tEmbed = Date.now();
       const vec = await this.embed(query);
+      logPhase("vec_embed", Date.now() - tEmbed, { context: "generalized" });
       if (!vec.length) return { nodes: [], edges: [], tokenEstimate: 0 };
+      const tCommVec = Date.now();
       const communityResults = await communityVectorSearch(this.driver, vec);
+      logPhase("community_vec_search", Date.now() - tCommVec, { communities: communityResults.length });
       const communityIds = communityResults.slice(0, 3).map((c) => c.id);
       if (!communityIds.length) return { nodes: [], edges: [], tokenEstimate: 0 };
+      const tReps = Date.now();
       const repNodes = await communityRepresentatives(this.driver, communityIds);
+      logPhase("community_reps", Date.now() - tReps, { reps: repNodes.length });
       if (!repNodes.length) return { nodes: [], edges: [], tokenEstimate: 0 };
       const repIds = repNodes.map((n) => n.id);
       let pprScores;
       try {
+        const tPpr = Date.now();
         const pprResult = await personalizedPageRank(this.driver, repIds, repIds, this.cfg);
+        logPhase("ppr_compute", Date.now() - tPpr, { scores: pprResult.scores.size, context: "generalized" });
         pprScores = pprResult.scores;
-      } catch {
+      } catch (e) {
+        if (process.env.GM_DEBUG) console.log("[recall-generalized] PPR failed: " + e);
         pprScores = /* @__PURE__ */ new Map();
       }
       const scored = repNodes.map((n) => ({
@@ -5384,12 +5530,15 @@ var Recaller = class {
       }));
       scored.sort((a, b) => b.score - a.score);
       const finalNodes = scored.slice(0, limit).map((s) => s.node);
+      logPhase("recall_generalized", Date.now() - tGen, { finalNodes: finalNodes.length });
       return { nodes: finalNodes, edges: [], tokenEstimate: finalNodes.length * 30 };
-    } catch {
+    } catch (e) {
+      if (process.env.GM_DEBUG) console.log("[recall-generalized] failed: " + e);
       return { nodes: [], edges: [], tokenEstimate: 0 };
     }
   }
   mergeResults(a, b) {
+    const tMerge = Date.now();
     const seen = /* @__PURE__ */ new Set();
     const nodes = [];
     const edges = /* @__PURE__ */ new Map();
@@ -5402,6 +5551,7 @@ var Recaller = class {
     for (const e of [...a.edges, ...b.edges]) {
       edges.set(e.id, e);
     }
+    logPhase("merge_results", Date.now() - tMerge, { nodes: nodes.length, edges: edges.size });
     return { nodes, edges: Array.from(edges.values()), tokenEstimate: nodes.length * 40 + edges.size * 15 };
   }
   async syncEmbed(node) {
@@ -5410,9 +5560,10 @@ var Recaller = class {
     const existingHash = await getVectorHash(this.driver, node.id);
     if (existingHash === hash) return;
     try {
-      const text = `${node.name}: ${node.description}
-${node.content.slice(0, 500)}`;
+      const tSync = Date.now();
+      const text = node.name + ": " + node.description + "\n" + node.content.slice(0, 500);
       const vec = await this.embed(text);
+      logPhase("vec_embed", Date.now() - tSync, { context: "syncEmbed" });
       if (vec.length) await saveVector(this.driver, node.id, node.content, vec);
     } catch {
     }
@@ -5867,10 +6018,15 @@ var graph_memory_pro_default = definePluginEntry({
       baseURL: typebox_exports.Optional(typebox_exports.String()),
       model: typebox_exports.Optional(typebox_exports.String()),
       dimensions: typebox_exports.Optional(typebox_exports.Number({ default: 1024 }))
+    })),
+    timing: typebox_exports.Optional(typebox_exports.Object({
+      enabled: typebox_exports.Boolean({ default: false }),
+      maxSamples: typebox_exports.Optional(typebox_exports.Number({ default: 1e3 })),
+      reportEveryN: typebox_exports.Optional(typebox_exports.Number({ default: 50 }))
     }))
   }),
-  register(api) {
-    api.on("gateway_start", async (event) => {
+  register(api2) {
+    api2.on("gateway_start", async (event) => {
       const { readFileSync } = await import("fs");
       const { join } = await import("path");
       const configPath = join(process.env.HOME || "/home/wljmmx", ".openclaw/openclaw.json");
@@ -5906,10 +6062,13 @@ var graph_memory_pro_default = definePluginEntry({
       _recaller = new Recaller(driver, _cfg2);
       if (_embed2) _recaller.setEmbedFn(_embed2);
       _extractor = new Extractor(driver);
+      if (_cfg2.timing?.enabled) {
+        setTimingEnabled(true);
+      }
       initRoutes(driver, _cfg2, _llm2 ?? void 0, _embed2 ?? void 0);
       console.log("[graph-memory-pro] initialized");
     });
-    api.on("gateway_stop", async () => {
+    api2.on("gateway_stop", async () => {
       closeDriver();
       _driver3 = null;
       _cfg2 = null;
@@ -5918,7 +6077,7 @@ var graph_memory_pro_default = definePluginEntry({
       _recaller = null;
       _extractor = null;
     });
-    api.on("before_prompt_build", async (event) => {
+    api2.on("before_prompt_build", async (event) => {
       if (!_driver3 || !_cfg2) return;
       const sessionKey = event.context?.sessionKey;
       if (!sessionKey) return;
@@ -5976,7 +6135,7 @@ var graph_memory_pro_default = definePluginEntry({
         }
       }
     });
-    api.on("session_end", async () => {
+    api2.on("session_end", async () => {
       if (!_driver3 || !_cfg2) return;
       try {
         await runMaintenance(_driver3, _cfg2, _llm2 ?? void 0, _embed2 ?? void 0);
@@ -5986,7 +6145,7 @@ var graph_memory_pro_default = definePluginEntry({
         }
       }
     });
-    api.registerTool({
+    api2.registerTool({
       name: "gm_search",
       description: "\u5728 Graph Memory Pro \u4E2D\u641C\u7D22\u77E5\u8BC6\u8282\u70B9\u3002\u652F\u6301\u6309\u5173\u952E\u8BCD\u641C\u7D22\u77E5\u8BC6\u56FE\u8C31\u4E2D\u7684\u6280\u80FD(SKILL)\u3001\u4EFB\u52A1(TASK)\u3001\u4E8B\u4EF6(EVENT)\u8282\u70B9",
       parameters: typebox_exports.Object({
@@ -6013,7 +6172,7 @@ var graph_memory_pro_default = definePluginEntry({
         }
       }
     });
-    api.registerTool({
+    api2.registerTool({
       name: "gm_record",
       description: "\u624B\u52A8\u8BB0\u5F55\u4E00\u6761\u77E5\u8BC6\u5230 Graph Memory Pro \u56FE\u8C31\u4E2D\u3002\u5F53\u4F60\u53D1\u73B0\u91CD\u8981\u7684\u6280\u80FD\u3001\u7ECF\u9A8C\u6216\u4E8B\u4EF6\u65F6\u4F7F\u7528",
       parameters: typebox_exports.Object({
@@ -6049,7 +6208,7 @@ var graph_memory_pro_default = definePluginEntry({
         }
       }
     });
-    api.registerTool({
+    api2.registerTool({
       name: "gm_stats",
       description: "\u67E5\u770B Graph Memory Pro \u77E5\u8BC6\u56FE\u8C31\u7684\u7EDF\u8BA1\u4FE1\u606F\uFF0C\u5305\u62EC\u8282\u70B9\u6570\u3001\u5173\u7CFB\u6570\u7B49",
       parameters: typebox_exports.Object({}),
@@ -6073,7 +6232,7 @@ var graph_memory_pro_default = definePluginEntry({
         }
       }
     });
-    api.registerTool({
+    api2.registerTool({
       name: "gm_maintain",
       description: "\u624B\u52A8\u89E6\u53D1 Graph Memory Pro \u56FE\u8C31\u7EF4\u62A4\uFF08\u53BB\u91CD + PageRank + \u793E\u533A\u68C0\u6D4B\uFF09",
       parameters: typebox_exports.Object({}),
@@ -6099,8 +6258,30 @@ var graph_memory_pro_default = definePluginEntry({
     });
   }
 });
+api.registerTool({
+  name: "gm_latency",
+  description: "\u67E5\u770B Graph Memory Pro \u5404\u9636\u6BB5\u5EF6\u8FDF\u5206\u5E03\u7EDF\u8BA1\uFF08\u767E\u5206\u4F4D/P50/P90/P95/P99\uFF09",
+  parameters: typebox_exports.Object({
+    reset: typebox_exports.Optional(typebox_exports.Boolean({ default: false, description: "\u662F\u5426\u91CD\u7F6E\u7EDF\u8BA1\u6570\u636E" })),
+    enable: typebox_exports.Optional(typebox_exports.Boolean({ description: "\u542F\u7528/\u7981\u7528\u5EF6\u8FDF\u7EDF\u8BA1" }))
+  }),
+  async execute(_callId, params) {
+    const doReset = params.reset === true;
+    const doEnable = params.enable;
+    if (doEnable !== void 0) {
+      setTimingEnabled(doEnable);
+    }
+    if (doReset) {
+      resetAllDistributions();
+      return { content: [{ type: "text", text: "\u5EF6\u8FDF\u7EDF\u8BA1\u6570\u636E\u5DF2\u91CD\u7F6E" }] };
+    }
+    const report = printAllDistributions();
+    return { content: [{ type: "text", text: report }] };
+  }
+});
 export {
   Extractor,
+  LatencyDistribution,
   Recaller,
   computeGlobalPageRank,
   createEmbedFn,
@@ -6116,8 +6297,11 @@ export {
   getTopNodes,
   mergeNodes,
   personalizedPageRank,
+  printAllDistributions,
+  resetAllDistributions,
   runMaintenance,
   searchNodes,
+  setTimingEnabled,
   summarizeCommunities,
   upsertEdge,
   upsertNode

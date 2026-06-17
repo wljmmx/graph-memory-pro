@@ -21,6 +21,16 @@ export interface EmbeddingConfig {
   dimensions?: number;
 }
 
+/** Timing / latency distribution options */
+export interface GmTimingOptions {
+  /** Enable per-phase timing collection */
+  enabled: boolean;
+  /** Number of samples to keep per phase before rolling (default 1000) */
+  maxSamples?: number;
+  /** Print distribution report every N calls (0 = disabled, default 50) */
+  reportEveryN?: number;
+}
+
 export interface GmConfig {
   neo4j: Neo4jConfig;
   compactTurnCount: number;
@@ -32,6 +42,8 @@ export interface GmConfig {
   pagerankIterations: number;
   llm?: LlmConfig;
   embedding?: EmbeddingConfig;
+  /** Latency distribution tracking (optional) */
+  timing?: GmTimingOptions;
 }
 
 export type NodeType = "TASK" | "SKILL" | "EVENT";
@@ -149,4 +161,3 @@ export const EMBEDDING_PRESETS: Record<string, EmbeddingModelPreset> = {
     description: "Qwen3.5 Embedding 0.6B GGUF (Ollama, local)",
   },
 };
-

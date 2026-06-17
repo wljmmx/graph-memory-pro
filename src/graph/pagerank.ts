@@ -7,6 +7,7 @@
 import type { Driver, Session } from "neo4j-driver";
 import type { GmConfig } from "../types.ts";
 import { getSession } from "../store/db.ts";
+import { logPhase, isTimingEnabled } from "../timing.ts";
 
 const ALL_REL_TYPES = ["USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH"];
 
@@ -56,7 +57,7 @@ async function ensureSharedProjection(session: Session): Promise<boolean> {
     `, { name: SHARED_GRAPH_NAME });
 
     if (checkResult.records[0]?.get("exists") === true) {
-      if (process.env.GM_DEBUG) console.log(`  [pagerank] ensureSharedProjection HIT cached ms=${+(Date.now()-tEnsure).toFixed(1)}`);
+            logPhase("ensure_projection", Date.now() - tEnsure, { cache: "hit" });
       return true;
     }
   }
@@ -66,7 +67,7 @@ async function ensureSharedProjection(session: Session): Promise<boolean> {
   const currentHash = relTypeHash(currentTypes);
 
   if (currentTypes.length === 0) {
-    if (process.env.GM_DEBUG) console.log(`  [pagerank] ensureSharedProjection NO_TYPES ms=${+(Date.now()-tEnsure).toFixed(1)}`);
+          logPhase("ensure_projection", Date.now() - tEnsure, { status: "no_types" });
     return false;
   }
 
@@ -79,7 +80,7 @@ async function ensureSharedProjection(session: Session): Promise<boolean> {
   );
   _cachedTimestamp = now;
   _cachedRelTypeHash = currentHash;
-  if (process.env.GM_DEBUG) console.log(`  [pagerank] ensureSharedProjection REBUILT ms=${+(Date.now()-tEnsure).toFixed(1)}`);
+        logPhase("ensure_projection", Date.now() - tEnsure, { status: "rebuilt" });
   return true;
 }
 export interface PPRResult {
@@ -134,18 +135,21 @@ async function runPPR(
   candidateIds: string[],
   cfg: GmConfig,
 ): Promise<PPRResult> {
-  const seedResult = await session.run(`
+  const tSeed = Date.now();
+    const seedResult = await session.run(`
   const tPprFn = Date.now();
     MATCH (n:Task|Skill|Event) WHERE n.id IN $seedIds AND n.status = 'active'
     RETURN id(n) AS neoId
   `, { seedIds });
-  const sourceNodeIds = seedResult.records.map(r => r.get("neoId"));
+  logPhase("ppr_seed_lookup", Date.now() - tSeed, { seeds: seedResult.records.length });
+    const sourceNodeIds = seedResult.records.map(r => r.get("neoId"));
 
   if (sourceNodeIds.length === 0) {
     return { scores: new Map() };
   }
 
-  const pprResult = await session.run(`
+  const tCompute = Date.now();
+    const pprResult = await session.run(`
     CALL gds.pageRank.stream($graphName, {
       dampingFactor: $damping,
       maxIterations: toInteger($iterations),
@@ -165,12 +169,13 @@ async function runPPR(
   });
 
   const scores = new Map<string, number>();
-  for (const r of pprResult.records) {
+  logPhase("ppr_compute", Date.now() - tCompute, { gds_scores: pprResult.records.length });
+    for (const r of pprResult.records) {
     const rawScore = r.get("score");
     scores.set(r.get("id"), typeof rawScore === "number" ? rawScore : (rawScore?.toNumber?.() ?? 0));
   }
 
-  if (process.env.GM_DEBUG) console.log(`  [pagerank] runPPR ms=${+(Date.now()-tPprFn).toFixed(1)} scores=${scores.size}`);
+    logPhase("ppr_compute", Date.now() - tPprFn, { scores: scores.size });
   return { scores };
 }
 
