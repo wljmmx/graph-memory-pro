@@ -26,6 +26,7 @@ export class Recaller {
 
   async recall(query: string): Promise<RecallResult> {
     const limit = this.cfg.recallMaxNodes;
+    const t0 = Date.now();
 
     const precise = await this.recallPrecise(query, limit);
     const generalized = await this.recallGeneralized(query, limit);
@@ -40,7 +41,9 @@ export class Recaller {
 
   private async recallPrecise(query: string, limit: number): Promise<RecallResult> {
     // 路径1: 全文搜索
+    const tFts = Date.now();
     const ftsNodes = await searchNodes(this.driver, query, limit);
+    console.log(`  [recall-precise] FTS: ${+(Date.now()-tFts).toFixed(1)}ms nodes=${ftsNodes.length}`);
 
     // 路径2: 向量搜索 (如果有embedding)
     let vecNodes: GmNode[] = [];
@@ -67,13 +70,17 @@ export class Recaller {
 
     // 图遍历
     const nodeIds = nodes.slice(0, limit).map(n => n.id);
+    const tGw = Date.now();
     const walked = await graphWalk(this.driver, nodeIds, this.cfg.recallMaxDepth);
+    console.log(`  [recall-precise] graphWalk: ${+(Date.now()-tGw).toFixed(1)}ms nodes=${walked.nodes.length}`);
 
     // PPR 排序
     const candidateIds = walked.nodes.map(n => n.id);
     let pprScores: Map<string, number>;
     try {
+      const tPpr = Date.now();
       const pprResult = await personalizedPageRank(this.driver, nodeIds, candidateIds, this.cfg);
+      console.log(`  [recall-precise] PPR: ${+(Date.now()-tPpr).toFixed(1)}ms scores=${pprResult.scores.size}`);
       pprScores = pprResult.scores;
     } catch {
       pprScores = new Map();

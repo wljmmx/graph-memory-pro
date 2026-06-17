@@ -5114,9 +5114,10 @@ import { createHash } from "crypto";
 // src/graph/pagerank.ts
 init_db();
 var ALL_REL_TYPES = ["USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH"];
-var _cachedGraphName = null;
+var SHARED_GRAPH_NAME = "gm-shared";
+var _cachedRelTypeHash = null;
 var _cachedTimestamp = 0;
-var PROJECTION_TTL_MS = 5 * 60 * 1e3;
+var PROJECTION_TTL_MS = 15 * 60 * 1e3;
 async function getExistingRelTypes(session) {
   const result = await session.run(`
     MATCH (:Task|Skill|Event)-[r]->(:Task|Skill|Event)
@@ -5125,38 +5126,46 @@ async function getExistingRelTypes(session) {
   `, { types: ALL_REL_TYPES });
   return result.records.map((r) => r.get("t"));
 }
+function relTypeHash(types) {
+  return types.sort().join(",");
+}
 function buildRelProjection(existingTypes) {
   if (existingTypes.length === 0) return "'*'";
   const parts = existingTypes.map((t) => `${t}: {orientation: 'UNDIRECTED'}`);
   return `{${parts.join(", ")}}`;
 }
-async function ensureProjection(session, graphName) {
-  const checkResult = await session.run(`
-    CALL gds.graph.exists($name)
-    YIELD exists
-    RETURN exists
-  `, { name: graphName });
-  if (checkResult.records[0]?.get("exists") === true && Date.now() - _cachedTimestamp < PROJECTION_TTL_MS) {
-    return true;
+async function ensureSharedProjection(session) {
+  const now = Date.now();
+  const tEnsure = Date.now();
+  if (_cachedRelTypeHash && now - _cachedTimestamp < PROJECTION_TTL_MS) {
+    const checkResult = await session.run(`
+      CALL gds.graph.exists($name)
+      YIELD exists
+      RETURN exists
+    `, { name: SHARED_GRAPH_NAME });
+    if (checkResult.records[0]?.get("exists") === true) {
+      console.log(`  [pagerank] ensureSharedProjection HIT cached ms=${+(Date.now() - tEnsure).toFixed(1)}`);
+      return true;
+    }
   }
-  try {
-    const existingTypes = await getExistingRelTypes(session);
-    if (existingTypes.length === 0) {
-      return false;
-    }
-    try {
-      await session.run(`CALL gds.graph.drop('${graphName}')`);
-    } catch {
-    }
-    const relProjection = buildRelProjection(existingTypes);
-    await session.run(
-      `CALL gds.graph.project('${graphName}', ['Task', 'Skill', 'Event'], ${relProjection})`
-    );
-    _cachedTimestamp = Date.now();
-    return true;
-  } catch {
+  const currentTypes = await getExistingRelTypes(session);
+  const currentHash = relTypeHash(currentTypes);
+  if (currentTypes.length === 0) {
+    console.log(`  [pagerank] ensureSharedProjection NO_TYPES ms=${+(Date.now() - tEnsure).toFixed(1)}`);
     return false;
   }
+  try {
+    await session.run(`CALL gds.graph.drop('${SHARED_GRAPH_NAME}')`);
+  } catch {
+  }
+  const relProjection = buildRelProjection(currentTypes);
+  await session.run(
+    `CALL gds.graph.project('${SHARED_GRAPH_NAME}', ['Task', 'Skill', 'Event'], ${relProjection})`
+  );
+  _cachedTimestamp = now;
+  _cachedRelTypeHash = currentHash;
+  console.log(`  [pagerank] ensureSharedProjection REBUILT ms=${+(Date.now() - tEnsure).toFixed(1)}`);
+  return true;
 }
 async function personalizedPageRank(driver, seedIds, candidateIds, cfg) {
   if (!seedIds.length || !candidateIds.length) {
@@ -5170,33 +5179,30 @@ async function personalizedPageRank(driver, seedIds, candidateIds, cfg) {
       candidateIds.forEach((id, i) => scores.set(id, 1 / (i + 1)));
       return { scores };
     }
-    if (_cachedGraphName && Date.now() - _cachedTimestamp < PROJECTION_TTL_MS) {
-      const hasProjection = await ensureProjection(session, _cachedGraphName);
-      if (hasProjection) {
-        return runPPR(session, _cachedGraphName, seedIds, candidateIds, cfg);
-      }
-    }
-    const graphName = `gm-ppr-${Date.now()}`;
-    _cachedGraphName = graphName;
-    try {
-      await ensureProjection(session, graphName);
-      return runPPR(session, graphName, seedIds, candidateIds, cfg);
-    } catch (gdsErr) {
-      try {
-        await session.run(`CALL gds.graph.drop('${graphName}')`);
-      } catch {
-      }
-      _cachedGraphName = null;
+    const hasProjection = await ensureSharedProjection(session);
+    if (!hasProjection) {
       const scores = /* @__PURE__ */ new Map();
       candidateIds.forEach((id, i) => scores.set(id, 1 / (i + 1)));
       return { scores };
     }
+    return runPPR(session, SHARED_GRAPH_NAME, seedIds, candidateIds, cfg);
+  } catch (gdsErr) {
+    _cachedRelTypeHash = null;
+    _cachedTimestamp = 0;
+    try {
+      await session.run(`CALL gds.graph.drop('${SHARED_GRAPH_NAME}')`);
+    } catch {
+    }
+    const scores = /* @__PURE__ */ new Map();
+    candidateIds.forEach((id, i) => scores.set(id, 1 / (i + 1)));
+    return { scores };
   } finally {
     await session.close();
   }
 }
 async function runPPR(session, graphName, seedIds, candidateIds, cfg) {
   const seedResult = await session.run(`
+  const tPprFn = Date.now();
     MATCH (n:Task|Skill|Event) WHERE n.id IN $seedIds AND n.status = 'active'
     RETURN id(n) AS neoId
   `, { seedIds });
@@ -5227,11 +5233,11 @@ async function runPPR(session, graphName, seedIds, candidateIds, cfg) {
     const rawScore = r.get("score");
     scores.set(r.get("id"), typeof rawScore === "number" ? rawScore : rawScore?.toNumber?.() ?? 0);
   }
+  console.log(`  [pagerank] runPPR ms=${+(Date.now() - tPprFn).toFixed(1)} scores=${scores.size}`);
   return { scores };
 }
 async function computeGlobalPageRank(driver, cfg) {
   const session = getSession(driver);
-  const graphName = `gm-global-pr`;
   try {
     const countResult = await session.run("MATCH (n:Task|Skill|Event {status: 'active'}) RETURN count(n) AS c");
     const nodeCount = countResult.records[0]?.get("c")?.toNumber?.() ?? 0;
@@ -5240,58 +5246,48 @@ async function computeGlobalPageRank(driver, cfg) {
     if (existingTypes.length === 0) {
       const uniformScore = 1 / nodeCount;
       await session.run("MATCH (n:Task|Skill|Event {status: 'active'}) SET n.pagerank = $score", { score: uniformScore });
-      const topResult2 = await session.run(`
-        MATCH (n:Task|Skill|Event {status: 'active'}) RETURN n.id AS id, n.name AS name, n.pagerank AS score
-        ORDER BY n.pagerank DESC LIMIT 20
-      `);
-      const scores2 = /* @__PURE__ */ new Map();
-      const topK2 = topResult2.records.map((r) => {
-        const s = typeof r.get("score") === "number" ? r.get("score") : r.get("score")?.toNumber?.() ?? 0;
-        return { id: r.get("id"), name: r.get("name"), score: s };
-      });
-      return { scores: scores2, topK: topK2 };
+      return readTopK(session);
     }
-    const relProjection = buildRelProjection(existingTypes);
-    try {
-      await session.run(`CALL gds.graph.drop('${graphName}')`);
-    } catch {
+    const hasProjection = await ensureSharedProjection(session);
+    if (!hasProjection) {
+      const uniformScore = 1 / nodeCount;
+      await session.run("MATCH (n:Task|Skill|Event {status: 'active'}) SET n.pagerank = $score", { score: uniformScore });
+      return readTopK(session);
     }
-    await session.run(
-      `CALL gds.graph.project('${graphName}', ['Task', 'Skill', 'Event'], ${relProjection})`
-    );
     await session.run(`
-      CALL gds.pageRank.write('${graphName}', {
+      CALL gds.pageRank.write('${SHARED_GRAPH_NAME}', {
         writeProperty: 'pagerank',
         dampingFactor: $damping,
         maxIterations: toInteger($iterations)
       })
     `, { damping: cfg.pagerankDamping, iterations: cfg.pagerankIterations });
-    try {
-      await session.run(`CALL gds.graph.drop('${graphName}')`);
-    } catch {
-    }
-    const topResult = await session.run(`
-      MATCH (n:Task|Skill|Event {status: 'active'}) RETURN n.id AS id, n.name AS name, n.pagerank AS score
-      ORDER BY n.pagerank DESC LIMIT 20
-    `);
-    const scores = /* @__PURE__ */ new Map();
-    const topK = [];
-    for (const r of topResult.records) {
-      const raw = r.get("score");
-      const score = typeof raw === "number" ? raw : raw?.toNumber?.() ?? 0;
-      scores.set(r.get("id"), score);
-      topK.push({ id: r.get("id"), name: r.get("name"), score });
-    }
-    return { scores, topK };
+    return readTopK(session);
   } catch (err) {
+    _cachedRelTypeHash = null;
+    _cachedTimestamp = 0;
     try {
-      await session.run(`CALL gds.graph.drop('${graphName}')`);
+      await session.run(`CALL gds.graph.drop('${SHARED_GRAPH_NAME}')`);
     } catch {
     }
     return { scores: /* @__PURE__ */ new Map(), topK: [] };
   } finally {
     await session.close();
   }
+}
+async function readTopK(session) {
+  const topResult = await session.run(`
+    MATCH (n:Task|Skill|Event {status: 'active'}) RETURN n.id AS id, n.name AS name, n.pagerank AS score
+    ORDER BY n.pagerank DESC LIMIT 20
+  `);
+  const scores = /* @__PURE__ */ new Map();
+  const topK = [];
+  for (const r of topResult.records) {
+    const raw = r.get("score");
+    const score = typeof raw === "number" ? raw : raw?.toNumber?.() ?? 0;
+    scores.set(r.get("id"), score);
+    topK.push({ id: r.get("id"), name: r.get("name"), score });
+  }
+  return { scores, topK };
 }
 
 // src/recaller/recall.ts
@@ -5306,6 +5302,7 @@ var Recaller = class {
   }
   async recall(query) {
     const limit = this.cfg.recallMaxNodes;
+    const t0 = Date.now();
     const precise = await this.recallPrecise(query, limit);
     const generalized = await this.recallGeneralized(query, limit);
     const merged = this.mergeResults(precise, generalized);
@@ -5315,7 +5312,9 @@ var Recaller = class {
     return merged;
   }
   async recallPrecise(query, limit) {
+    const tFts = Date.now();
     const ftsNodes = await searchNodes(this.driver, query, limit);
+    console.log(`  [recall-precise] FTS: ${+(Date.now() - tFts).toFixed(1)}ms nodes=${ftsNodes.length}`);
     let vecNodes = [];
     if (this.embed) {
       try {
@@ -5337,11 +5336,15 @@ var Recaller = class {
     }
     if (!nodes.length) return { nodes: [], edges: [], tokenEstimate: 0 };
     const nodeIds = nodes.slice(0, limit).map((n) => n.id);
+    const tGw = Date.now();
     const walked = await graphWalk(this.driver, nodeIds, this.cfg.recallMaxDepth);
+    console.log(`  [recall-precise] graphWalk: ${+(Date.now() - tGw).toFixed(1)}ms nodes=${walked.nodes.length}`);
     const candidateIds = walked.nodes.map((n) => n.id);
     let pprScores;
     try {
+      const tPpr = Date.now();
       const pprResult = await personalizedPageRank(this.driver, nodeIds, candidateIds, this.cfg);
+      console.log(`  [recall-precise] PPR: ${+(Date.now() - tPpr).toFixed(1)}ms scores=${pprResult.scores.size}`);
       pprScores = pprResult.scores;
     } catch {
       pprScores = /* @__PURE__ */ new Map();
@@ -5943,7 +5946,9 @@ var graph_memory_pro_default = definePluginEntry({
           const lastUserMsg = [...tail].reverse().find((m) => m.role === "user" && typeof m.content === "string");
           const query = lastUserMsg ? lastUserMsg.content.slice(0, 500) : "";
           if (query) {
+            const recallStart = Date.now();
             const recallResult = await _recaller.recall(query);
+            event.context.logger?.debug?.("[graph-memory-pro] recall completed", { ms: +(Date.now() - recallStart).toFixed(1) });
             for (const node of recallResult.nodes) {
               if (_embed2) await _recaller.syncEmbed(node).catch(() => {
               });

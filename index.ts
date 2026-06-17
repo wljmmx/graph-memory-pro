@@ -197,7 +197,9 @@ export default definePluginEntry({
           const query = lastUserMsg ? (lastUserMsg.content as string).slice(0, 500) : "";
           
           if (query) {
+            const recallStart = Date.now();
             const recallResult = await _recaller.recall(query);
+            event.context.logger?.debug?.("[graph-memory-pro] recall completed", { ms: +(Date.now() - recallStart).toFixed(1) });
             
             // 在插入完节点之后同步 embedding
             for (const node of recallResult.nodes) {

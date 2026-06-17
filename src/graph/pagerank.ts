@@ -45,6 +45,7 @@ function buildRelProjection(existingTypes: string[]): string {
  */
 async function ensureSharedProjection(session: Session): Promise<boolean> {
   const now = Date.now();
+  const tEnsure = Date.now();
 
   // Fast path: within TTL, check GDS-side existence
   if (_cachedRelTypeHash && (now - _cachedTimestamp) < PROJECTION_TTL_MS) {
@@ -55,6 +56,7 @@ async function ensureSharedProjection(session: Session): Promise<boolean> {
     `, { name: SHARED_GRAPH_NAME });
 
     if (checkResult.records[0]?.get("exists") === true) {
+      console.log(`  [pagerank] ensureSharedProjection HIT cached ms=${+(Date.now()-tEnsure).toFixed(1)}`);
       return true;
     }
   }
@@ -64,6 +66,7 @@ async function ensureSharedProjection(session: Session): Promise<boolean> {
   const currentHash = relTypeHash(currentTypes);
 
   if (currentTypes.length === 0) {
+    console.log(`  [pagerank] ensureSharedProjection NO_TYPES ms=${+(Date.now()-tEnsure).toFixed(1)}`);
     return false;
   }
 
@@ -76,6 +79,7 @@ async function ensureSharedProjection(session: Session): Promise<boolean> {
   );
   _cachedTimestamp = now;
   _cachedRelTypeHash = currentHash;
+  console.log(`  [pagerank] ensureSharedProjection REBUILT ms=${+(Date.now()-tEnsure).toFixed(1)}`);
   return true;
 }
 export interface PPRResult {
@@ -131,6 +135,7 @@ async function runPPR(
   cfg: GmConfig,
 ): Promise<PPRResult> {
   const seedResult = await session.run(`
+  const tPprFn = Date.now();
     MATCH (n:Task|Skill|Event) WHERE n.id IN $seedIds AND n.status = 'active'
     RETURN id(n) AS neoId
   `, { seedIds });
@@ -165,6 +170,7 @@ async function runPPR(
     scores.set(r.get("id"), typeof rawScore === "number" ? rawScore : (rawScore?.toNumber?.() ?? 0));
   }
 
+  console.log(`  [pagerank] runPPR ms=${+(Date.now()-tPprFn).toFixed(1)} scores=${scores.size}`);
   return { scores };
 }
 
