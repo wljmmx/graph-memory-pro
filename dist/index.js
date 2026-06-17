@@ -128,6 +128,24 @@ async function ensureSchema(driver) {
       "CREATE INDEX gm_message_session IF NOT EXISTS FOR (m:GmMessage) ON (m.sessionKey)"
     );
     try {
+      await session.run(
+        `CREATE FULLTEXT INDEX task_search IF NOT EXISTS FOR (n:Task) ON EACH [n.name, n.description, n.content]`
+      );
+    } catch {
+    }
+    try {
+      await session.run(
+        `CREATE FULLTEXT INDEX skill_search IF NOT EXISTS FOR (n:Skill) ON EACH [n.name, n.description, n.content]`
+      );
+    } catch {
+    }
+    try {
+      await session.run(
+        `CREATE FULLTEXT INDEX event_search IF NOT EXISTS FOR (n:Event) ON EACH [n.name, n.description, n.content]`
+      );
+    } catch {
+    }
+    try {
       await session.run(`
         CALL db.index.vector.createNodeIndex(
           'gm_node_embedding', '\u8282\u70B9\u5D4C\u5165',
@@ -201,6 +219,35 @@ async function findById(driver, id) {
 async function searchNodes(driver, query, limit) {
   const session = getSession(driver);
   try {
+    const fulltextResults = await session.run(`
+      CALL db.index.fulltext.queryNodes('task_search', $query, { limit: toInteger($limit) })
+      YIELD node AS n, score
+      WHERE n.status = 'active'
+      RETURN n, score
+      UNION ALL
+      CALL db.index.fulltext.queryNodes('skill_search', $query, { limit: toInteger($limit) })
+      YIELD node AS n, score
+      WHERE n.status = 'active'
+      RETURN n, score
+      UNION ALL
+      CALL db.index.fulltext.queryNodes('event_search', $query, { limit: toInteger($limit) })
+      YIELD node AS n, score
+      WHERE n.status = 'active'
+      RETURN n, score
+    `, { query, limit });
+    const seen = /* @__PURE__ */ new Map();
+    for (const r of fulltextResults.records) {
+      const node = r.get("n");
+      if (!node || !node.properties) continue;
+      const id = node.properties.id;
+      if (!seen.has(id)) {
+        seen.set(id, recordToNode(node));
+      }
+    }
+    const nodes = Array.from(seen.values());
+    nodes.sort((a, b) => (b.validatedCount ?? 0) - (a.validatedCount ?? 0) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+    return nodes.slice(0, limit);
+  } catch {
     const result = await session.run(
       `MATCH (n:Task|Skill|Event {status: 'active'})
        WHERE n.name CONTAINS $query
@@ -238,8 +285,9 @@ async function vectorSearchWithScore(driver, vec, topK) {
 async function graphWalk(driver, seedIds, depth) {
   const session = getSession(driver);
   try {
+    const relTypes = "USED_SKILL|SOLVED_BY|REQUIRES|PATCHES|CONFLICTS_WITH";
     const result = await session.run(
-      `MATCH path = (start:Task|Skill|Event)-[r*1..${depth}]-(end:Task|Skill|Event)
+      `MATCH path = (start:Task|Skill|Event)-[r:${relTypes}*1..${depth}]-(end:Task|Skill|Event)
        WHERE start.id IN $seedIds
          AND start.status = 'active'
        UNWIND nodes(path) AS n
@@ -366,16 +414,14 @@ async function mergeNodes(driver, keepId, mergeId) {
         SET nr2.instruction =
           CASE
             WHEN nr2.instruction IS NULL THEN r2.instruction
-            WHEN r2.instruction IS NOT NULL AND nr2.instruction <> r2.instruction
+            WHEN r2.instruction IS NOT NULL AND nr2.instruction <> r.instruction
               THEN nr2.instruction + ' | ' + r2.instruction
             ELSE nr2.instruction
           END,
             nr2.weight = nr2.weight + r2.weight
       }
       WITH keep, merge
-      // \u5408\u5E76 validatedCount
       SET keep.validatedCount = keep.validatedCount + merge.validatedCount
-      // \u6807\u8BB0 merge \u8282\u70B9\u5DF2\u5408\u5E76
       SET merge.status = 'merged', merge.updatedAt = timestamp()
     `, { keepId, mergeId });
   } finally {
@@ -5068,6 +5114,9 @@ import { createHash } from "crypto";
 // src/graph/pagerank.ts
 init_db();
 var ALL_REL_TYPES = ["USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH"];
+var _cachedGraphName = null;
+var _cachedTimestamp = 0;
+var PROJECTION_TTL_MS = 5 * 60 * 1e3;
 async function getExistingRelTypes(session) {
   const result = await session.run(`
     MATCH (:Task|Skill|Event)-[r]->(:Task|Skill|Event)
@@ -5081,6 +5130,30 @@ function buildRelProjection(existingTypes) {
   const parts = existingTypes.map((t) => `${t}: {orientation: 'UNDIRECTED'}`);
   return `{${parts.join(", ")}}`;
 }
+async function ensureProjection(session, graphName) {
+  const checkResult = await session.run(`
+    CALL gds.graph.exists($name)
+    YIELD exists
+    RETURN exists
+  `, { name: graphName });
+  if (checkResult.records[0]?.get("exists") === true) {
+    return true;
+  }
+  try {
+    const existingTypes = await getExistingRelTypes(session);
+    if (existingTypes.length === 0) {
+      return false;
+    }
+    const relProjection = buildRelProjection(existingTypes);
+    await session.run(
+      `CALL gds.graph.project('${graphName}', ['Task', 'Skill', 'Event'], ${relProjection})`
+    );
+    _cachedTimestamp = Date.now();
+    return true;
+  } catch {
+    return false;
+  }
+}
 async function personalizedPageRank(driver, seedIds, candidateIds, cfg) {
   if (!seedIds.length || !candidateIds.length) {
     return { scores: /* @__PURE__ */ new Map() };
@@ -5093,56 +5166,23 @@ async function personalizedPageRank(driver, seedIds, candidateIds, cfg) {
       candidateIds.forEach((id, i) => scores.set(id, 1 / (i + 1)));
       return { scores };
     }
+    if (_cachedGraphName && Date.now() - _cachedTimestamp < PROJECTION_TTL_MS) {
+      const hasProjection = await ensureProjection(session, _cachedGraphName);
+      if (hasProjection) {
+        return runPPR(session, _cachedGraphName, seedIds, candidateIds, cfg);
+      }
+    }
     const graphName = `gm-ppr-${Date.now()}`;
-    const relProjection = buildRelProjection(existingTypes);
+    _cachedGraphName = graphName;
     try {
-      await session.run(
-        `CALL gds.graph.project('${graphName}', ['Task', 'Skill', 'Event'], ${relProjection})`
-      );
-      const seedResult = await session.run(`
-        MATCH (n:Task|Skill|Event) WHERE n.id IN $seedIds AND n.status = 'active'
-        RETURN id(n) AS neoId
-      `, { seedIds });
-      const sourceNodeIds = seedResult.records.map((r) => r.get("neoId"));
-      if (sourceNodeIds.length === 0) {
-        try {
-          await session.run(`CALL gds.graph.drop('${graphName}')`);
-        } catch {
-        }
-        return { scores: /* @__PURE__ */ new Map() };
-      }
-      const pprResult = await session.run(`
-        CALL gds.pageRank.stream('${graphName}', {
-          dampingFactor: $damping,
-          maxIterations: toInteger($iterations),
-          sourceNodes: $sourceNodes
-        })
-        YIELD nodeId, score
-        WITH gds.util.asNode(nodeId) AS node, score
-        WHERE node.id IN $candidateIds AND node.status = 'active'
-        RETURN node.id AS id, score
-        ORDER BY score DESC
-      `, {
-        damping: cfg.pagerankDamping,
-        iterations: cfg.pagerankIterations,
-        sourceNodes: sourceNodeIds,
-        candidateIds
-      });
-      const scores = /* @__PURE__ */ new Map();
-      for (const r of pprResult.records) {
-        const rawScore = r.get("score");
-        scores.set(r.get("id"), typeof rawScore === "number" ? rawScore : rawScore?.toNumber?.() ?? 0);
-      }
-      try {
-        await session.run(`CALL gds.graph.drop('${graphName}')`);
-      } catch {
-      }
-      return { scores };
+      await ensureProjection(session, graphName);
+      return runPPR(session, graphName, seedIds, candidateIds, cfg);
     } catch (gdsErr) {
       try {
         await session.run(`CALL gds.graph.drop('${graphName}')`);
       } catch {
       }
+      _cachedGraphName = null;
       const scores = /* @__PURE__ */ new Map();
       candidateIds.forEach((id, i) => scores.set(id, 1 / (i + 1)));
       return { scores };
@@ -5150,6 +5190,40 @@ async function personalizedPageRank(driver, seedIds, candidateIds, cfg) {
   } finally {
     await session.close();
   }
+}
+async function runPPR(session, graphName, seedIds, candidateIds, cfg) {
+  const seedResult = await session.run(`
+    MATCH (n:Task|Skill|Event) WHERE n.id IN $seedIds AND n.status = 'active'
+    RETURN id(n) AS neoId
+  `, { seedIds });
+  const sourceNodeIds = seedResult.records.map((r) => r.get("neoId"));
+  if (sourceNodeIds.length === 0) {
+    return { scores: /* @__PURE__ */ new Map() };
+  }
+  const pprResult = await session.run(`
+    CALL gds.pageRank.stream($graphName, {
+      dampingFactor: $damping,
+      maxIterations: toInteger($iterations),
+      sourceNodes: $sourceNodes
+    })
+    YIELD nodeId, score
+    WITH gds.util.asNode(nodeId) AS node, score
+    WHERE node.id IN $candidateIds AND node.status = 'active'
+    RETURN node.id AS id, score
+    ORDER BY score DESC
+  `, {
+    graphName,
+    damping: cfg.pagerankDamping,
+    iterations: cfg.pagerankIterations,
+    sourceNodes: sourceNodeIds,
+    candidateIds
+  });
+  const scores = /* @__PURE__ */ new Map();
+  for (const r of pprResult.records) {
+    const rawScore = r.get("score");
+    scores.set(r.get("id"), typeof rawScore === "number" ? rawScore : rawScore?.toNumber?.() ?? 0);
+  }
+  return { scores };
 }
 async function computeGlobalPageRank(driver, cfg) {
   const session = getSession(driver);
@@ -5197,7 +5271,7 @@ async function computeGlobalPageRank(driver, cfg) {
     const topK = [];
     for (const r of topResult.records) {
       const raw = r.get("score");
-      const score = typeof raw === "number" ? raw : raw?.toNumber?.() ?? 0;
+      const score = typeof raw === "number" ? raw.get : raw?.toNumber?.() ?? 0;
       scores.set(r.get("id"), score);
       topK.push({ id: r.get("id"), name: r.get("name"), score });
     }

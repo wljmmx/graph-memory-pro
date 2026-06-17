@@ -42,6 +42,23 @@ export async function ensureSchema(driver: Driver): Promise<void> {
       "CREATE INDEX gm_message_session IF NOT EXISTS FOR (m:GmMessage) ON (m.sessionKey)"
     );
 
+    // FULLTEXT 索引：用于全文搜索（替代 CONTAINS）
+    try {
+      await session.run(
+        `CREATE FULLTEXT INDEX task_search IF NOT EXISTS FOR (n:Task) ON EACH [n.name, n.description, n.content]`
+      );
+    } catch { /* may exist */ }
+    try {
+      await session.run(
+        `CREATE FULLTEXT INDEX skill_search IF NOT EXISTS FOR (n:Skill) ON EACH [n.name, n.description, n.content]`
+      );
+    } catch { /* may exist */ }
+    try {
+      await session.run(
+        `CREATE FULLTEXT INDEX event_search IF NOT EXISTS FOR (n:Event) ON EACH [n.name, n.description, n.content]`
+      );
+    } catch { /* may exist */ }
+
     // 向量索引 (Neo4j 5.11+): 用于语义搜索和去重
     try {
       await session.run(`
@@ -139,7 +156,41 @@ export async function searchNodes(
 ): Promise<GmNode[]> {
   const session = getSession(driver);
   try {
-    // 使用 CONTAINS 替代 FTS5 (Neo4j 原生不支持 FTS5)
+    // ✅ 优化：使用 FULLTEXT 索引查询替代 CONTAINS
+    // 分别查询三个 FULLTEXT 索引，合并去重后排序
+    const fulltextResults = await session.run(`
+      CALL db.index.fulltext.queryNodes('task_search', $query, { limit: toInteger($limit) })
+      YIELD node AS n, score
+      WHERE n.status = 'active'
+      RETURN n, score
+      UNION ALL
+      CALL db.index.fulltext.queryNodes('skill_search', $query, { limit: toInteger($limit) })
+      YIELD node AS n, score
+      WHERE n.status = 'active'
+      RETURN n, score
+      UNION ALL
+      CALL db.index.fulltext.queryNodes('event_search', $query, { limit: toInteger($limit) })
+      YIELD node AS n, score
+      WHERE n.status = 'active'
+      RETURN n, score
+    `, { query, limit });
+
+    // 去重并按 validatedCount 排序
+    const seen = new Map<string, any>();
+    for (const r of fulltextResults.records) {
+      const node = r.get("n");
+      if (!node || !node.properties) continue;
+      const id = node.properties.id;
+      if (!seen.has(id)) {
+        seen.set(id, recordToNode(node));
+      }
+    }
+
+    const nodes = Array.from(seen.values());
+    nodes.sort((a, b) => (b.validatedCount ?? 0) - (a.validatedCount ?? 0) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+    return nodes.slice(0, limit);
+  } catch {
+    // ✅ Fallback: 如果 FULLTEXT 索引不可用，回退到 CONTAINS
     const result = await session.run(
       `MATCH (n:Task|Skill|Event {status: 'active'})
        WHERE n.name CONTAINS $query
@@ -187,8 +238,10 @@ export async function graphWalk(
 ): Promise<{ nodes: GmNode[]; edges: GmEdge[] }> {
   const session = getSession(driver);
   try {
+    // ✅ 优化：限制关系类型为有意义的业务关系，排除 NEXT_SESSION/CONTAINS 等高频低价值边
+    const relTypes = "USED_SKILL|SOLVED_BY|REQUIRES|PATCHES|CONFLICTS_WITH";
     const result = await session.run(
-      `MATCH path = (start:Task|Skill|Event)-[r*1..${depth}]-(end:Task|Skill|Event)
+      `MATCH path = (start:Task|Skill|Event)-[r:${relTypes}*1..${depth}]-(end:Task|Skill|Event)
        WHERE start.id IN $seedIds
          AND start.status = 'active'
        UNWIND nodes(path) AS n
@@ -280,8 +333,6 @@ export async function upsertEdge(
 ): Promise<void> {
   const session = getSession(driver);
   try {
-    // 先用 MERGE 找到或创建节点关系
-    // 不使用 APOC apoc.create.relationship，使用原生 Cypher
     await session.run(
       `MATCH (from:Task|Skill|Event {id: $fromId})
        MATCH (to:Task|Skill|Event {id: $toId})
@@ -316,8 +367,6 @@ export async function mergeNodes(
 ): Promise<void> {
   const session = getSession(driver);
   try {
-    // 1. 重新连接 merge 节点的所有关系到 keep 节点
-    // 使用原生 Cypher MATCH-MERGE, 不使用 APOC
     await session.run(`
       MATCH (keep:Task|Skill|Event {id: $keepId})
       MATCH (merge:Task|Skill|Event {id: $mergeId})
@@ -345,16 +394,14 @@ export async function mergeNodes(
         SET nr2.instruction =
           CASE
             WHEN nr2.instruction IS NULL THEN r2.instruction
-            WHEN r2.instruction IS NOT NULL AND nr2.instruction <> r2.instruction
+            WHEN r2.instruction IS NOT NULL AND nr2.instruction <> r.instruction
               THEN nr2.instruction + ' | ' + r2.instruction
             ELSE nr2.instruction
           END,
             nr2.weight = nr2.weight + r2.weight
       }
       WITH keep, merge
-      // 合并 validatedCount
       SET keep.validatedCount = keep.validatedCount + merge.validatedCount
-      // 标记 merge 节点已合并
       SET merge.status = 'merged', merge.updatedAt = timestamp()
     `, { keepId, mergeId });
   } finally {
@@ -577,8 +624,6 @@ export async function getVectorHash(
   driver: Driver,
   _nodeId: string,
 ): Promise<string> {
-  // 在 Neo4j 中我们不存储 hash 到单独的字段
-  // 返回空字符串表示始终需要重新计算 embedding
   return "";
 }
 
@@ -649,7 +694,6 @@ export async function getRecentDistinctMessages(
   limit: number,
 ): Promise<GmMessage[]> {
   const messages = await getSessionMessages(driver, sessionKey, limit * 2);
-  // 去重
   const seen = new Set<string>();
   const distinct: GmMessage[] = [];
   for (const msg of messages) {
