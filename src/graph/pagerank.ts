@@ -1,7 +1,7 @@
 /**
  * graph-memory-pro — PageRank (Neo4j GDS 2.12 OpenGDS)
  *
- * ✅ 优化：复用 in-memory graph projection，避免每次 recall 都重建
+ * ✅ 优化：使用 GDS stream projection（持久化），重启不丢失
  */
 
 import type { Driver, Session } from "neo4j-driver";
@@ -10,10 +10,8 @@ import { getSession } from "../store/db.ts";
 
 const ALL_REL_TYPES = ["USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH"];
 
-// ✅ Projection 缓存：复用 graph projection，避免每次 PPR 都重建
-let _cachedGraphName: string | null = null;
-let _cachedTimestamp = 0;
-const PROJECTION_TTL_MS = 5 * 60 * 1000; // 5分钟过期
+// ✅ 固定名称的 stream projection，持久化到 Neo4j，重启不丢失
+const STREAM_GRAPH_NAME = "gm_ppr_stream";
 
 async function getExistingRelTypes(session: Session): Promise<string[]> {
   const result = await session.run(`
@@ -30,19 +28,25 @@ function buildRelProjection(existingTypes: string[]): string {
   return `{${parts.join(", ")}}`;
 }
 
-async function ensureProjection(session: Session, graphName: string): Promise<boolean> {
-  // ✅ 检查 projection 是否存在且未过期
+/**
+ * ✅ 创建或刷新 GDS stream projection
+ * Stream projection 持久化到 Neo4j 内部存储，重启不丢失
+ * 首次创建后会自动跟踪底层图的变化（新增/删除节点边自动同步）
+ */
+async function ensureStreamProjection(session: Session): Promise<boolean> {
+  // 检查 stream projection 是否已存在
   const checkResult = await session.run(`
     CALL gds.graph.exists($name)
     YIELD exists
     RETURN exists
-  `, { name: graphName });
+  `, { name: STREAM_GRAPH_NAME });
 
   if (checkResult.records[0]?.get("exists") === true) {
+    // ✅ 已存在，stream projection 会自动同步底层图变化，直接使用
     return true;
   }
 
-  // Projection 不存在或已过期，重新创建
+  // 首次创建或之前被删除了，重新创建
   try {
     const existingTypes = await getExistingRelTypes(session);
     if (existingTypes.length === 0) {
@@ -50,10 +54,12 @@ async function ensureProjection(session: Session, graphName: string): Promise<bo
     }
 
     const relProjection = buildRelProjection(existingTypes);
+
+    // ✅ 使用 stream projection（持久化到 Neo4j，重启不丢失）
     await session.run(
-      `CALL gds.graph.project('${graphName}', ['Task', 'Skill', 'Event'], ${relProjection})`
+      `CALL gds.graph.project('${STREAM_GRAPH_NAME}', ['Task', 'Skill', 'Event'], ${relProjection}, { stream: true })`
     );
-    _cachedTimestamp = Date.now();
+
     return true;
   } catch {
     return false;
@@ -83,24 +89,20 @@ export async function personalizedPageRank(
       return { scores };
     }
 
-    // ✅ 复用或创建 projection（带 TTL）
-    if (_cachedGraphName && Date.now() - _cachedTimestamp < PROJECTION_TTL_MS) {
-      const hasProjection = await ensureProjection(session, _cachedGraphName);
-      if (hasProjection) {
-        return runPPR(session, _cachedGraphName, seedIds, candidateIds, cfg);
-      }
+    // ✅ 确保 stream projection 存在（持久化，重启不丢失）
+    const hasProjection = await ensureStreamProjection(session);
+    if (!hasProjection) {
+      const scores = new Map<string, number>();
+      candidateIds.forEach((id, i) => scores.set(id, 1 / (i + 1)));
+      return { scores };
     }
 
-    // 需要新建 projection
-    const graphName = `gm-ppr-${Date.now()}`;
-    _cachedGraphName = graphName;
-
     try {
-      await ensureProjection(session, graphName);
-      return runPPR(session, graphName, seedIds, candidateIds, cfg);
+      // ✅ 直接使用持久化的 stream projection，零投影开销
+      return runPPR(session, STREAM_GRAPH_NAME, seedIds, candidateIds, cfg);
     } catch (gdsErr) {
-      try { await session.run(`CALL gds.graph.drop('${graphName}')`); } catch {}
-      _cachedGraphName = null;
+      // Fallback：如果 stream projection 损坏，尝试重建
+      try { await session.run(`CALL gds.graph.drop('${STREAM_GRAPH_NAME}')`); } catch {}
       const scores = new Map<string, number>();
       candidateIds.forEach((id, i) => scores.set(id, 1 / (i + 1)));
       return { scores };
@@ -162,7 +164,8 @@ export interface GlobalPageRankResult {
 
 export async function computeGlobalPageRank(driver: Driver, cfg: GmConfig): Promise<GlobalPageRankResult> {
   const session = getSession(driver);
-  const graphName = `gm-global-pr-${Date.now()}`;
+  // Global PageRank 仍需临时 projection（write 模式），用固定名便于清理
+  const graphName = `gm-global-pr`;
 
   try {
     const countResult = await session.run("MATCH (n:Task|Skill|Event {status: 'active'}) RETURN count(n) AS c");
@@ -180,13 +183,18 @@ export async function computeGlobalPageRank(driver: Driver, cfg: GmConfig): Prom
       const scores = new Map<string, number>();
       const topK = topResult.records.map(r => {
         const s = typeof r.get("score") === "number" ? r.get("score") : (r.get("score")?.toNumber?.() ?? 0);
-        scores.set(r.get("id"), s);
         return { id: r.get("id"), name: r.get("name"), score: s };
       });
       return { scores, topK };
     }
 
     const relProjection = buildRelProjection(existingTypes);
+
+    // 先清理旧的全局 projection（避免残留）
+    try {
+      await session.run(`CALL gds.graph.drop('${graphName}')`);
+    } catch {}
+
     await session.run(
       `CALL gds.graph.project('${graphName}', ['Task', 'Skill', 'Event'], ${relProjection})`
     );
@@ -210,7 +218,7 @@ export async function computeGlobalPageRank(driver: Driver, cfg: GmConfig): Prom
     const topK: Array<{ id: string; name: string; score: number }> = [];
     for (const r of topResult.records) {
       const raw = r.get("score");
-      const score = typeof raw === "number" ? raw.get : (raw?.toNumber?.() ?? 0);
+      const score = typeof raw === "number" ? raw : (raw?.toNumber?.() ?? 0);
       scores.set(r.get("id"), score);
       topK.push({ id: r.get("id"), name: r.get("name"), score });
     }

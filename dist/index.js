@@ -5114,9 +5114,7 @@ import { createHash } from "crypto";
 // src/graph/pagerank.ts
 init_db();
 var ALL_REL_TYPES = ["USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH"];
-var _cachedGraphName = null;
-var _cachedTimestamp = 0;
-var PROJECTION_TTL_MS = 5 * 60 * 1e3;
+var STREAM_GRAPH_NAME = "gm_ppr_stream";
 async function getExistingRelTypes(session) {
   const result = await session.run(`
     MATCH (:Task|Skill|Event)-[r]->(:Task|Skill|Event)
@@ -5130,12 +5128,12 @@ function buildRelProjection(existingTypes) {
   const parts = existingTypes.map((t) => `${t}: {orientation: 'UNDIRECTED'}`);
   return `{${parts.join(", ")}}`;
 }
-async function ensureProjection(session, graphName) {
+async function ensureStreamProjection(session) {
   const checkResult = await session.run(`
     CALL gds.graph.exists($name)
     YIELD exists
     RETURN exists
-  `, { name: graphName });
+  `, { name: STREAM_GRAPH_NAME });
   if (checkResult.records[0]?.get("exists") === true) {
     return true;
   }
@@ -5146,9 +5144,8 @@ async function ensureProjection(session, graphName) {
     }
     const relProjection = buildRelProjection(existingTypes);
     await session.run(
-      `CALL gds.graph.project('${graphName}', ['Task', 'Skill', 'Event'], ${relProjection})`
+      `CALL gds.graph.project('${STREAM_GRAPH_NAME}', ['Task', 'Skill', 'Event'], ${relProjection}, { stream: true })`
     );
-    _cachedTimestamp = Date.now();
     return true;
   } catch {
     return false;
@@ -5166,23 +5163,19 @@ async function personalizedPageRank(driver, seedIds, candidateIds, cfg) {
       candidateIds.forEach((id, i) => scores.set(id, 1 / (i + 1)));
       return { scores };
     }
-    if (_cachedGraphName && Date.now() - _cachedTimestamp < PROJECTION_TTL_MS) {
-      const hasProjection = await ensureProjection(session, _cachedGraphName);
-      if (hasProjection) {
-        return runPPR(session, _cachedGraphName, seedIds, candidateIds, cfg);
-      }
+    const hasProjection = await ensureStreamProjection(session);
+    if (!hasProjection) {
+      const scores = /* @__PURE__ */ new Map();
+      candidateIds.forEach((id, i) => scores.set(id, 1 / (i + 1)));
+      return { scores };
     }
-    const graphName = `gm-ppr-${Date.now()}`;
-    _cachedGraphName = graphName;
     try {
-      await ensureProjection(session, graphName);
-      return runPPR(session, graphName, seedIds, candidateIds, cfg);
+      return runPPR(session, STREAM_GRAPH_NAME, seedIds, candidateIds, cfg);
     } catch (gdsErr) {
       try {
-        await session.run(`CALL gds.graph.drop('${graphName}')`);
+        await session.run(`CALL gds.graph.drop('${STREAM_GRAPH_NAME}')`);
       } catch {
       }
-      _cachedGraphName = null;
       const scores = /* @__PURE__ */ new Map();
       candidateIds.forEach((id, i) => scores.set(id, 1 / (i + 1)));
       return { scores };
@@ -5227,7 +5220,7 @@ async function runPPR(session, graphName, seedIds, candidateIds, cfg) {
 }
 async function computeGlobalPageRank(driver, cfg) {
   const session = getSession(driver);
-  const graphName = `gm-global-pr-${Date.now()}`;
+  const graphName = `gm-global-pr`;
   try {
     const countResult = await session.run("MATCH (n:Task|Skill|Event {status: 'active'}) RETURN count(n) AS c");
     const nodeCount = countResult.records[0]?.get("c")?.toNumber?.() ?? 0;
@@ -5243,12 +5236,15 @@ async function computeGlobalPageRank(driver, cfg) {
       const scores2 = /* @__PURE__ */ new Map();
       const topK2 = topResult2.records.map((r) => {
         const s = typeof r.get("score") === "number" ? r.get("score") : r.get("score")?.toNumber?.() ?? 0;
-        scores2.set(r.get("id"), s);
         return { id: r.get("id"), name: r.get("name"), score: s };
       });
       return { scores: scores2, topK: topK2 };
     }
     const relProjection = buildRelProjection(existingTypes);
+    try {
+      await session.run(`CALL gds.graph.drop('${graphName}')`);
+    } catch {
+    }
     await session.run(
       `CALL gds.graph.project('${graphName}', ['Task', 'Skill', 'Event'], ${relProjection})`
     );
@@ -5271,7 +5267,7 @@ async function computeGlobalPageRank(driver, cfg) {
     const topK = [];
     for (const r of topResult.records) {
       const raw = r.get("score");
-      const score = typeof raw === "number" ? raw.get : raw?.toNumber?.() ?? 0;
+      const score = typeof raw === "number" ? raw : raw?.toNumber?.() ?? 0;
       scores.set(r.get("id"), score);
       topK.push({ id: r.get("id"), name: r.get("name"), score });
     }
