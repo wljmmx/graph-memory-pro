@@ -1,7 +1,7 @@
 /**
  * graph-memory-pro — PageRank (Neo4j GDS 2.12 OpenGDS)
  *
- * ✅ In-memory projection + TTL 缓存（OpenGDS 兼容方案）
+ * ✅ PPR & Global PR share a single in-memory projection
  */
 
 import type { Driver, Session } from "neo4j-driver";
@@ -10,10 +10,11 @@ import { getSession } from "../store/db.ts";
 
 const ALL_REL_TYPES = ["USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH"];
 
-// ✅ In-memory projection 缓存（TTL），OpenGDS 下最优方案
-let _cachedGraphName: string | null = null;
+// ✅ Shared projection config
+const SHARED_GRAPH_NAME = "gm-shared";
+let _cachedRelTypeHash: string | null = null;
 let _cachedTimestamp = 0;
-const PROJECTION_TTL_MS = 5 * 60 * 1000; // 5分钟过期
+const PROJECTION_TTL_MS = 15 * 60 * 1000; // 15 min TTL
 
 async function getExistingRelTypes(session: Session): Promise<string[]> {
   const result = await session.run(`
@@ -22,6 +23,13 @@ async function getExistingRelTypes(session: Session): Promise<string[]> {
     RETURN DISTINCT type(r) AS t
   `, { types: ALL_REL_TYPES });
   return result.records.map(r => r.get("t"));
+
+}
+/**
+ * Compute a stable hash of the relation-type set (for change detection).
+ */
+function relTypeHash(types: string[]): string {
+  return types.sort().join(",");
 }
 
 function buildRelProjection(existingTypes: string[]): string {
@@ -30,39 +38,46 @@ function buildRelProjection(existingTypes: string[]): string {
   return `{${parts.join(", ")}}`;
 }
 
-async function ensureProjection(session: Session, graphName: string): Promise<boolean> {
-  // 检查 projection 是否存在且未过期
-  const checkResult = await session.run(`
-    CALL gds.graph.exists($name)
-    YIELD exists
-    RETURN exists
-  `, { name: graphName });
+/**
+ * Ensure the shared projection exists and is fresh.
+ * - Within TTL and GDS-side exists -> reuse
+ * - TTL expired or struct changed -> drop + recreate
+ */
+async function ensureSharedProjection(session: Session): Promise<boolean> {
+  const now = Date.now();
 
-  if (checkResult.records[0]?.get("exists") === true && Date.now() - _cachedTimestamp < PROJECTION_TTL_MS) {
-    return true;
+  // Fast path: within TTL, check GDS-side existence
+  if (_cachedRelTypeHash && (now - _cachedTimestamp) < PROJECTION_TTL_MS) {
+    const checkResult = await session.run(`
+      CALL gds.graph.exists($name)
+      YIELD exists
+      RETURN exists
+    `, { name: SHARED_GRAPH_NAME });
+
+    if (checkResult.records[0]?.get("exists") === true) {
+      return true;
+    }
   }
 
-  // Projection 不存在或已过期，重新创建
-  try {
-    const existingTypes = await getExistingRelTypes(session);
-    if (existingTypes.length === 0) {
-      return false;
-    }
+  // Check if relation types changed
+  const currentTypes = await getExistingRelTypes(session);
+  const currentHash = relTypeHash(currentTypes);
 
-    // 先清理旧的（避免残留）
-    try { await session.run(`CALL gds.graph.drop('${graphName}')`); } catch {}
-
-    const relProjection = buildRelProjection(existingTypes);
-    await session.run(
-      `CALL gds.graph.project('${graphName}', ['Task', 'Skill', 'Event'], ${relProjection})`
-    );
-    _cachedTimestamp = Date.now();
-    return true;
-  } catch {
+  if (currentTypes.length === 0) {
     return false;
   }
-}
 
+  // Drop old and recreate
+  try { await session.run(`CALL gds.graph.drop('${SHARED_GRAPH_NAME}')`); } catch {}
+
+  const relProjection = buildRelProjection(currentTypes);
+  await session.run(
+    `CALL gds.graph.project('${SHARED_GRAPH_NAME}', ['Task', 'Skill', 'Event'], ${relProjection})`
+  );
+  _cachedTimestamp = now;
+  _cachedRelTypeHash = currentHash;
+  return true;
+}
 export interface PPRResult {
   scores: Map<string, number>;
 }
@@ -86,28 +101,23 @@ export async function personalizedPageRank(
       return { scores };
     }
 
-    // 复用缓存或创建新投影
-    if (_cachedGraphName && Date.now() - _cachedTimestamp < PROJECTION_TTL_MS) {
-      const hasProjection = await ensureProjection(session, _cachedGraphName);
-      if (hasProjection) {
-        return runPPR(session, _cachedGraphName, seedIds, candidateIds, cfg);
-      }
-    }
-
-    // 需要新建 projection
-    const graphName = `gm-ppr-${Date.now()}`;
-    _cachedGraphName = graphName;
-
-    try {
-      await ensureProjection(session, graphName);
-      return runPPR(session, graphName, seedIds, candidateIds, cfg);
-    } catch (gdsErr) {
-      try { await session.run(`CALL gds.graph.drop('${graphName}')`); } catch {}
-      _cachedGraphName = null;
+    // Ensure shared projection exists
+    const hasProjection = await ensureSharedProjection(session);
+    if (!hasProjection) {
       const scores = new Map<string, number>();
       candidateIds.forEach((id, i) => scores.set(id, 1 / (i + 1)));
       return { scores };
     }
+
+    return runPPR(session, SHARED_GRAPH_NAME, seedIds, candidateIds, cfg);
+  } catch (gdsErr) {
+    // GDS error: invalidate cache and fallback
+    _cachedRelTypeHash = null;
+    _cachedTimestamp = 0;
+    try { await session.run(`CALL gds.graph.drop('${SHARED_GRAPH_NAME}')`); } catch {}
+    const scores = new Map<string, number>();
+    candidateIds.forEach((id, i) => scores.set(id, 1 / (i + 1)));
+    return { scores };
   } finally {
     await session.close();
   }
@@ -165,7 +175,6 @@ export interface GlobalPageRankResult {
 
 export async function computeGlobalPageRank(driver: Driver, cfg: GmConfig): Promise<GlobalPageRankResult> {
   const session = getSession(driver);
-  const graphName = `gm-global-pr`;
 
   try {
     const countResult = await session.run("MATCH (n:Task|Skill|Event {status: 'active'}) RETURN count(n) AS c");
@@ -176,57 +185,50 @@ export async function computeGlobalPageRank(driver: Driver, cfg: GmConfig): Prom
     if (existingTypes.length === 0) {
       const uniformScore = 1 / nodeCount;
       await session.run("MATCH (n:Task|Skill|Event {status: 'active'}) SET n.pagerank = $score", { score: uniformScore });
-      const topResult = await session.run(`
-        MATCH (n:Task|Skill|Event {status: 'active'}) RETURN n.id AS id, n.name AS name, n.pagerank AS score
-        ORDER BY n.pagerank DESC LIMIT 20
-      `);
-      const scores = new Map<string, number>();
-      const topK = topResult.records.map(r => {
-        const s = typeof r.get("score") === "number" ? r.get("score") : (r.get("score")?.toNumber?.() ?? 0);
-        return { id: r.get("id"), name: r.get("name"), score: s };
-      });
-      return { scores, topK };
+      return readTopK(session);
     }
 
-    const relProjection = buildRelProjection(existingTypes);
+    // Reuse shared projection instead of creating a new one each time
+    const hasProjection = await ensureSharedProjection(session);
+    if (!hasProjection) {
+      const uniformScore = 1 / nodeCount;
+      await session.run("MATCH (n:Task|Skill|Event {status: 'active'}) SET n.pagerank = $score", { score: uniformScore });
+      return readTopK(session);
+    }
 
-    // 先清理旧的投影（避免残留）
-    try {
-      await session.run(`CALL gds.graph.drop('${graphName}')`);
-    } catch {}
-
-    await session.run(
-      `CALL gds.graph.project('${graphName}', ['Task', 'Skill', 'Event'], ${relProjection})`
-    );
-
+    // Global PR write mode - reuse shared projection
     await session.run(`
-      CALL gds.pageRank.write('${graphName}', {
+      CALL gds.pageRank.write('${SHARED_GRAPH_NAME}', {
         writeProperty: 'pagerank',
         dampingFactor: $damping,
         maxIterations: toInteger($iterations)
       })
     `, { damping: cfg.pagerankDamping, iterations: cfg.pagerankIterations });
 
-    try { await session.run(`CALL gds.graph.drop('${graphName}')`); } catch {}
-
-    const topResult = await session.run(`
-      MATCH (n:Task|Skill|Event {status: 'active'}) RETURN n.id AS id, n.name AS name, n.pagerank AS score
-      ORDER BY n.pagerank DESC LIMIT 20
-    `);
-
-    const scores = new Map<string, number>();
-    const topK: Array<{ id: string; name: string; score: number }> = [];
-    for (const r of topResult.records) {
-      const raw = r.get("score");
-      const score = typeof raw === "number" ? raw : (raw?.toNumber?.() ?? 0);
-      scores.set(r.get("id"), score);
-      topK.push({ id: r.get("id"), name: r.get("name"), score });
-    }
-    return { scores, topK };
+    return readTopK(session);
   } catch (err) {
-    try { await session.run(`CALL gds.graph.drop('${graphName}')`); } catch {}
+    _cachedRelTypeHash = null;
+    _cachedTimestamp = 0;
+    try { await session.run(`CALL gds.graph.drop('${SHARED_GRAPH_NAME}')`); } catch {}
     return { scores: new Map(), topK: [] };
   } finally {
     await session.close();
   }
+}
+
+async function readTopK(session: Session): Promise<GlobalPageRankResult> {
+  const topResult = await session.run(`
+    MATCH (n:Task|Skill|Event {status: 'active'}) RETURN n.id AS id, n.name AS name, n.pagerank AS score
+    ORDER BY n.pagerank DESC LIMIT 20
+  `);
+
+  const scores = new Map<string, number>();
+  const topK: Array<{ id: string; name: string; score: number }> = [];
+  for (const r of topResult.records) {
+    const raw = r.get("score");
+    const score = typeof raw === "number" ? raw : (raw?.toNumber?.() ?? 0);
+    scores.set(r.get("id"), score);
+    topK.push({ id: r.get("id"), name: r.get("name"), score });
+  }
+  return { scores, topK };
 }
