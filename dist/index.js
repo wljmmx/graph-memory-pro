@@ -282,20 +282,20 @@ async function vectorSearchWithScore(driver, vec, topK) {
   const session = getSession(driver);
   try {
     const result = await session.run(
-      `(CALL db.index.vector.queryNodes('gm_node_embedding_task', toInteger($topK), $vec)
+      `CALL db.index.vector.queryNodes('gm_node_embedding_task', toInteger($topK), $vec)
         YIELD node, score
-        WHERE node.status = 'active'
-        RETURN node, score)
+        WITH node, score WHERE node.status = 'active'
+        RETURN node, score
        UNION ALL
-       (CALL db.index.vector.queryNodes('gm_node_embedding_skill', toInteger($topK), $vec)
+       CALL db.index.vector.queryNodes('gm_node_embedding_skill', toInteger($topK), $vec)
         YIELD node, score
-        WHERE node.status = 'active'
-        RETURN node, score)
+        WITH node, score WHERE node.status = 'active'
+        RETURN node, score
        UNION ALL
-       (CALL db.index.vector.queryNodes('gm_node_embedding_event', toInteger($topK), $vec)
+       CALL db.index.vector.queryNodes('gm_node_embedding_event', toInteger($topK), $vec)
         YIELD node, score
-        WHERE node.status = 'active'
-        RETURN node, score)
+        WITH node, score WHERE node.status = 'active'
+        RETURN node, score
        ORDER BY score DESC`,
       { vec, topK }
     );
@@ -5904,20 +5904,20 @@ async function detectDuplicates(driver, cfg) {
       const nodeName = record.get("name");
       const embedding = record.get("embedding");
       const searchResult = await session.run(`
-        (CALL db.index.vector.queryNodes('gm_node_embedding_task', 5, $vec)
+        CALL db.index.vector.queryNodes('gm_node_embedding_task', 5, $vec)
         YIELD node, score
-        WHERE node.id <> $nodeId AND node.status = 'active' AND score >= $threshold
-        RETURN node.id AS id, node.name AS name, score)
+        WITH node, score WHERE node.id <> $nodeId AND node.status = 'active' AND score >= $threshold
+        RETURN node.id AS id, node.name AS name, score
         UNION ALL
-        (CALL db.index.vector.queryNodes('gm_node_embedding_skill', 5, $vec)
+        CALL db.index.vector.queryNodes('gm_node_embedding_skill', 5, $vec)
         YIELD node, score
-        WHERE node.id <> $nodeId AND node.status = 'active' AND score >= $threshold
-        RETURN node.id AS id, node.name AS name, score)
+        WITH node, score WHERE node.id <> $nodeId AND node.status = 'active' AND score >= $threshold
+        RETURN node.id AS id, node.name AS name, score
         UNION ALL
-        (CALL db.index.vector.queryNodes('gm_node_embedding_event', 5, $vec)
+        CALL db.index.vector.queryNodes('gm_node_embedding_event', 5, $vec)
         YIELD node, score
-        WHERE node.id <> $nodeId AND node.status = 'active' AND score >= $threshold
-        RETURN node.id AS id, node.name AS name, score)
+        WITH node, score WHERE node.id <> $nodeId AND node.status = 'active' AND score >= $threshold
+        RETURN node.id AS id, node.name AS name, score
       `, { vec: embedding, nodeId, threshold: cfg.dedupThreshold });
       for (const sr of searchResult.records) {
         const otherId = sr.get("id");

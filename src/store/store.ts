@@ -226,20 +226,20 @@ export async function vectorSearchWithScore(
   const session = getSession(driver);
   try {
     const result = await session.run(
-      `(CALL db.index.vector.queryNodes('gm_node_embedding_task', toInteger($topK), $vec)
+      `CALL db.index.vector.queryNodes('gm_node_embedding_task', toInteger($topK), $vec)
         YIELD node, score
-        WHERE node.status = 'active'
-        RETURN node, score)
+        WITH node, score WHERE node.status = 'active'
+        RETURN node, score
        UNION ALL
-       (CALL db.index.vector.queryNodes('gm_node_embedding_skill', toInteger($topK), $vec)
+       CALL db.index.vector.queryNodes('gm_node_embedding_skill', toInteger($topK), $vec)
         YIELD node, score
-        WHERE node.status = 'active'
-        RETURN node, score)
+        WITH node, score WHERE node.status = 'active'
+        RETURN node, score
        UNION ALL
-       (CALL db.index.vector.queryNodes('gm_node_embedding_event', toInteger($topK), $vec)
+       CALL db.index.vector.queryNodes('gm_node_embedding_event', toInteger($topK), $vec)
         YIELD node, score
-        WHERE node.status = 'active'
-        RETURN node, score)
+        WITH node, score WHERE node.status = 'active'
+        RETURN node, score
        ORDER BY score DESC`,
       { vec, topK },
     );
