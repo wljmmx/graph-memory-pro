@@ -412,43 +412,83 @@ async function upsertEdge(driver, edge) {
 async function mergeNodes(driver, keepId, mergeId) {
   const session = getSession(driver);
   try {
-    await session.run(`
-      MATCH (keep:Task|Skill|Event {id: $keepId})
-      MATCH (merge:Task|Skill|Event {id: $mergeId})
-      OPTIONAL MATCH (merge)-[r]->(target:Task|Skill|Event)
-      WHERE target.id <> $keepId
-      WITH keep, merge, r, target
-      CALL {
-        WITH keep, r, target
-        MERGE (keep)-[nr:type(r)]->(target)
-        SET nr.instruction =
-          CASE
-            WHEN nr.instruction IS NULL THEN r.instruction
-            WHEN r.instruction IS NOT NULL AND nr.instruction <> r.instruction
-              THEN nr.instruction + ' | ' + r.instruction
-            ELSE nr.instruction
-          END,
-            nr.weight = nr.weight + r.weight
-      }
-      WITH keep, merge
-      OPTIONAL MATCH (source:Task|Skill|Event)-[r2]->(merge)
-      WHERE source.id <> $keepId
-      CALL {
-        WITH keep, r2, source
-        MERGE (source)-[nr2:type(r2)]->(keep)
-        SET nr2.instruction =
-          CASE
-            WHEN nr2.instruction IS NULL THEN r2.instruction
-            WHEN r2.instruction IS NOT NULL AND nr2.instruction <> r.instruction
-              THEN nr2.instruction + ' | ' + r2.instruction
-            ELSE nr2.instruction
-          END,
-            nr2.weight = nr2.weight + r2.weight
-      }
-      WITH keep, merge
-      SET keep.validatedCount = keep.validatedCount + merge.validatedCount
-      SET merge.status = 'merged', merge.updatedAt = timestamp()
-    `, { keepId, mergeId });
+    const outResult = await session.run(
+      `MATCH (merge:Task|Skill|Event {id: $mergeId})
+
+       OPTIONAL MATCH (merge)-[r]->(target:Task|Skill|Event)
+
+       WHERE target.id <> $keepId AND r IS NOT NULL
+
+       RETURN id(target) AS targetId, type(r) AS relType, r.instruction AS instruction, r.weight AS weight`,
+      { mergeId }
+    );
+    for (const record of outResult.records) {
+      const targetId = String(record.get("targetId"));
+      const relType = String(record.get("relType"));
+      const instruction = record.get("instruction") ? String(record.get("instruction")) : null;
+      const weight = record.get("weight");
+      const w = typeof weight === "number" ? weight : weight && typeof weight.toNumber === "function" ? weight.toNumber() : 0;
+      await session.run(
+        `MATCH (k {id: $keepId}), (t {id: $targetId})
+
+         MERGE (k)-[nr:${relType}]->(t)
+
+         SET nr.instruction = CASE
+
+           WHEN nr.instruction IS NULL THEN COALESCE($instruction, nr.instruction)
+
+           WHEN $instruction IS NOT NULL AND nr.instruction <> $instruction THEN nr.instruction + ' | ' + $instruction
+
+           ELSE nr.instruction
+
+         END,
+
+             nr.weight = COALESCE(nr.weight, 0) + $weight`,
+        { keepId, targetId, instruction, weight: w }
+      );
+    }
+    const inResult = await session.run(
+      `MATCH (merge:Task|Skill|Event {id: $mergeId})
+
+       OPTIONAL MATCH (source:Task|Skill|Event)-[r2]->(merge)
+
+       WHERE source.id <> $keepId AND r2 IS NOT NULL
+
+       RETURN id(source) AS sourceId, type(r2) AS relType, r2.instruction AS instruction, r2.weight AS weight`,
+      { mergeId }
+    );
+    for (const record of inResult.records) {
+      const sourceId = String(record.get("sourceId"));
+      const relType = String(record.get("relType"));
+      const instruction = record.get("instruction") ? String(record.get("instruction")) : null;
+      const weight = record.get("weight");
+      const w = typeof weight === "number" ? weight : weight && typeof weight.toNumber === "function" ? weight.toNumber() : 0;
+      await session.run(
+        `MATCH (s {id: $sourceId}), (k {id: $keepId})
+
+         MERGE (s)-[nr2:${relType}]->(k)
+
+         SET nr2.instruction = CASE
+
+           WHEN nr2.instruction IS NULL THEN COALESCE($instruction, nr2.instruction)
+
+           WHEN $instruction IS NOT NULL AND nr2.instruction <> $instruction THEN nr2.instruction + ' | ' + $instruction
+
+           ELSE nr2.instruction
+
+         END,
+
+             nr2.weight = COALESCE(nr2.weight, 0) + $weight`,
+        { sourceId, keepId, instruction, weight: w }
+      );
+    }
+    await session.run(
+      `MATCH (keep {id: $keepId}), (merge {id: $mergeId})
+
+       SET keep.validatedCount = COALESCE(keep.validatedCount, 0) + COALESCE(merge.validatedCount, 0),
+           merge.status = 'merged', merge.updatedAt = timestamp()`,
+      { keepId, mergeId }
+    );
   } finally {
     await session.close();
   }
