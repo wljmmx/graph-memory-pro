@@ -148,8 +148,23 @@ async function ensureSchema(driver) {
     try {
       await session.run(`
         CALL db.index.vector.createNodeIndex(
-          'gm_node_embedding', '\u8282\u70B9\u5D4C\u5165',
-          1024, 'cosine'
+          'gm_node_embedding_task', ['Task'], 'embedding', 1024, 'cosine'
+        )
+      `);
+    } catch {
+    }
+    try {
+      await session.run(`
+        CALL db.index.vector.createNodeIndex(
+          'gm_node_embedding_skill', ['Skill'], 'embedding', 1024, 'cosine'
+        )
+      `);
+    } catch {
+    }
+    try {
+      await session.run(`
+        CALL db.index.vector.createNodeIndex(
+          'gm_node_embedding_event', ['Event'], 'embedding', 1024, 'cosine'
         )
       `);
     } catch {
@@ -267,7 +282,13 @@ async function vectorSearchWithScore(driver, vec, topK) {
   const session = getSession(driver);
   try {
     const result = await session.run(
-      `CALL db.index.vector.queryNodes('gm_node_embedding', toInteger($topK), $vec)
+      `CALL db.index.vector.queryNodes('gm_node_embedding_task', toInteger($topK), $vec)
+       YIELD node, score
+       UNION ALL
+       CALL db.index.vector.queryNodes('gm_node_embedding_skill', toInteger($topK), $vec)
+       YIELD node, score
+       UNION ALL
+       CALL db.index.vector.queryNodes('gm_node_embedding_event', toInteger($topK), $vec)
        YIELD node, score
        WHERE node.status = 'active'
        RETURN node, score
@@ -5879,7 +5900,13 @@ async function detectDuplicates(driver, cfg) {
       const nodeName = record.get("name");
       const embedding = record.get("embedding");
       const searchResult = await session.run(`
-        CALL db.index.vector.queryNodes('gm_node_embedding', 5, $vec)
+        CALL db.index.vector.queryNodes('gm_node_embedding_task', 5, $vec)
+        YIELD node, score
+        UNION ALL
+        CALL db.index.vector.queryNodes('gm_node_embedding_skill', 5, $vec)
+        YIELD node, score
+        UNION ALL
+        CALL db.index.vector.queryNodes('gm_node_embedding_event', 5, $vec)
         YIELD node, score
         WHERE node.id <> $nodeId AND node.status = 'active' AND score >= $threshold
         RETURN node.id AS id, node.name AS name, score
@@ -6254,27 +6281,6 @@ var graph_memory_pro_default = definePluginEntry({
         } catch (err) {
           return { content: [{ type: "text", text: `\u7EF4\u62A4\u5931\u8D25: ${err.message}` }] };
         }
-      }
-    });
-    api.registerTool({
-      name: "gm_latency",
-      description: "\u67E5\u770B Graph Memory Pro \u5404\u9636\u6BB5\u5EF6\u8FDF\u5206\u5E03\u7EDF\u8BA1\uFF08\u767E\u5206\u4F4D/P50/P90/P95/P99\uFF09",
-      parameters: typebox_exports.Object({
-        reset: typebox_exports.Optional(typebox_exports.Boolean({ default: false, description: "\u662F\u5426\u91CD\u7F6E\u7EDF\u8BA1\u6570\u636E" })),
-        enable: typebox_exports.Optional(typebox_exports.Boolean({ description: "\u542F\u7528/\u7981\u7528\u5EF6\u8FDF\u7EDF\u8BA1" }))
-      }),
-      async execute(_callId, params) {
-        const doReset = params.reset === true;
-        const doEnable = params.enable;
-        if (doEnable !== void 0) {
-          setTimingEnabled(doEnable);
-        }
-        if (doReset) {
-          resetAllDistributions();
-          return { content: [{ type: "text", text: "\u5EF6\u8FDF\u7EDF\u8BA1\u6570\u636E\u5DF2\u91CD\u7F6E" }] };
-        }
-        const report = printAllDistributions();
-        return { content: [{ type: "text", text: report }] };
       }
     });
   }

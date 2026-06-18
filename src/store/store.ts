@@ -59,17 +59,28 @@ export async function ensureSchema(driver: Driver): Promise<void> {
       );
     } catch { /* may exist */ }
 
-    // 向量索引 (Neo4j 5.11+): 用于语义搜索和去重
+    // 向量索引 (Neo4j 5.11+): 按标签分离的向量索引，用于语义搜索和去重
     try {
       await session.run(`
         CALL db.index.vector.createNodeIndex(
-          'gm_node_embedding', '节点嵌入',
-          1024, 'cosine'
+          'gm_node_embedding_task', ['Task'], 'embedding', 1024, 'cosine'
         )
       `);
-    } catch {
-      // 可能已存在
-    }
+    } catch { /* may exist */ }
+    try {
+      await session.run(`
+        CALL db.index.vector.createNodeIndex(
+          'gm_node_embedding_skill', ['Skill'], 'embedding', 1024, 'cosine'
+        )
+      `);
+    } catch { /* may exist */ }
+    try {
+      await session.run(`
+        CALL db.index.vector.createNodeIndex(
+          'gm_node_embedding_event', ['Event'], 'embedding', 1024, 'cosine'
+        )
+      `);
+    } catch { /* may exist */ }
 
     // 社区摘要向量索引
     try {
@@ -215,7 +226,13 @@ export async function vectorSearchWithScore(
   const session = getSession(driver);
   try {
     const result = await session.run(
-      `CALL db.index.vector.queryNodes('gm_node_embedding', toInteger($topK), $vec)
+      `CALL db.index.vector.queryNodes('gm_node_embedding_task', toInteger($topK), $vec)
+       YIELD node, score
+       UNION ALL
+       CALL db.index.vector.queryNodes('gm_node_embedding_skill', toInteger($topK), $vec)
+       YIELD node, score
+       UNION ALL
+       CALL db.index.vector.queryNodes('gm_node_embedding_event', toInteger($topK), $vec)
        YIELD node, score
        WHERE node.status = 'active'
        RETURN node, score

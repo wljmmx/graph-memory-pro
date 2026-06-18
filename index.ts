@@ -375,30 +375,6 @@ export default definePluginEntry({
       },
     });
 
-    // gm_latency: latency distribution stats
-    api.registerTool({
-      name: "gm_latency",
-      description: "查看 Graph Memory Pro 各阶段延迟分布统计（百分位/P50/P90/P95/P99）",
-      parameters: Type.Object({
-        reset: Type.Optional(Type.Boolean({ default: false, description: "是否重置统计数据" })),
-        enable: Type.Optional(Type.Boolean({ description: "启用/禁用延迟统计" })),
-      }),
-      async execute(_callId, params) {
-        const doReset = (params.reset as boolean) === true;
-        const doEnable = params.enable as boolean | undefined;
-
-        if (doEnable !== undefined) {
-          setTimingEnabled(doEnable);
-        }
-        if (doReset) {
-          resetAllDistributions();
-          return { content: [{ type: "text", text: "延迟统计数据已重置" }] };
-        }
-
-        const report = printAllDistributions();
-        return { content: [{ type: "text", text: report }] };
-      },
-    });
   },
 });
 
