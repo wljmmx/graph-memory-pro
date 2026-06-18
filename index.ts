@@ -33,6 +33,7 @@ import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
 import { assembleContext } from "./src/format/assemble.ts";
 import { runMaintenance } from "./src/graph/maintenance.ts";
+import { reEmbedNodes } from "./src/graph/reembed.ts";
 import { initRoutes, getRoutes } from "./src/routes/crud.ts";
 import { sanitizeToolUseResultPairing } from "./src/format/transcript-repair.ts";
 import { setTimingEnabled, printAllDistributions, resetAllDistributions } from "./src/timing.ts";
@@ -371,6 +372,35 @@ export default definePluginEntry({
           return { content: [{ type: "text", text }] };
         } catch (err: any) {
           return { content: [{ type: "text", text: `维护失败: ${err.message}` }] };
+        }
+      },
+    });
+
+    // gm_reembed: batch re-embed nodes missing embedding vectors
+    api.registerTool({
+      name: "gm_reembed",
+      description: "Batch re-embed all active nodes that are missing an embedding vector (only processes status=active with empty/null embedding)",
+      parameters: Type.Object({}),
+      async execute() {
+        if (!_driver || !_cfg) {
+          return { content: [{ type: "text", text: "Graph Memory Pro not connected" }] };
+        }
+        if (!_embed) {
+          return { content: [{ type: "text", text: "Embedding engine not configured" }] };
+        }
+        try {
+          const result = await reEmbedNodes(_driver, _embed);
+          const lines = [
+            "Re-Embed done",
+            `Scanned: ${result.totalScanned} nodes`,
+            `Embedded: ${result.reEmbedded} nodes`,
+            `Failed: ${result.failed}`,
+            `Skipped: ${result.skipped}`,
+            `Duration: ${result.durationMs}ms`,
+          ];
+          return { content: [{ type: "text", text: lines.join("\n") }] };
+        } catch (err) {
+          return { content: [{ type: "text", text: "Re-Embed failed: " + String(err) }] };
         }
       },
     });
