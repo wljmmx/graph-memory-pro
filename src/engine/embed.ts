@@ -20,8 +20,8 @@ const RETRY_DELAYS = [1000, 3000, 5000];
  */
 export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
   const apiKey = config.apiKey || "";
-  const baseURL = (config.baseURL || "https://api.openai.com/v1").replace(/\/+$/, "");
-  const model = config.model || "text-embedding-3-small";
+  const baseURL = (config.baseURL || "http://192.168.50.5:11434/v1").replace(/\/+$/, "");
+  const model = config.model || "Qwen3.5-Embedding-0.6B-GGUF";
   const dimensions = config.dimensions ?? 1024;
 
   return async function embed(text: string): Promise<number[]> {
