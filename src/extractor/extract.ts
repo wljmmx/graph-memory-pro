@@ -23,6 +23,7 @@ const EXTRACT_SYSTEM_PROMPT = `你是知识图谱三元组提取专家。
 - REQUIRES: TASK → TASK。任务依赖另一个任务。注意：先决条件关系。
 - PATCHES: SKILL → SKILL。新的技能修正了旧的技能。注意：新优于旧。
 - CONFLICTS_WITH: SKILL → SKILL。两种技能互相冲突或互斥。
+- RELATES_TO: TASK ↔ EVENT 或 SKILL ↔ EVENT 或 TASK ↔ TOPIC。跨领域关联关系，用于连接不同知识领域的节点。注意：不同标签类型之间的重要联系。
 
 ## 提取原则
 - 用户的每一个有实际信息的请求都应该尝试提取
@@ -38,7 +39,7 @@ const EXTRACT_SYSTEM_PROMPT = `你是知识图谱三元组提取专家。
     { "type": "TASK|SKILL|EVENT", "name": "英文名", "description": "描述", "content": "具体内容" }
   ],
   "edges": [
-    { "type": "USED_SKILL|SOLVED_BY|REQUIRES|PATCHES|CONFLICTS_WITH", "fromName": "节点名", "toName": "节点名", "instruction": "关系说明", "condition": "条件（可选）" }
+    { "type": "USED_SKILL|SOLVED_BY|REQUIRES|PATCHES|CONFLICTS_WITH|RELATES_TO", "fromName": "节点名", "toName": "节点名", "instruction": "关系说明", "condition": "条件（可选）" }
   ]
 }`;
 

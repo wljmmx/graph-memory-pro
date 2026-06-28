@@ -10,7 +10,7 @@ import type { Driver } from "neo4j-driver";
 import { getSession } from "../store/db.ts";
 import { updateCommunities, upsertCommunitySummary, pruneCommunitySummaries } from "../store/store.ts";
 
-const ALL_REL_TYPES = ["USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH"];
+const ALL_REL_TYPES = ["USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH", "RELATES_TO"];
 
 async function getExistingRelTypes(session: any): Promise<string[]> {
   const result = await session.run(`

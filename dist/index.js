@@ -146,6 +146,12 @@ async function ensureSchema(driver) {
     } catch {
     }
     try {
+      await session.run(
+        `CREATE FULLTEXT INDEX conversation_search IF NOT EXISTS FOR (n:ConversationMessage) ON EACH [n.content]`
+      );
+    } catch {
+    }
+    try {
       await session.run(`
         CALL db.index.vector.createNodeIndex(
           'gm_node_embedding_task', ['Task'], 'embedding', 1024, 'cosine'
@@ -249,6 +255,10 @@ async function searchNodes(driver, query, limit) {
       YIELD node AS n, score
       WHERE n.status = 'active'
       RETURN n, score
+      UNION ALL
+      CALL db.index.fulltext.queryNodes('conversation_search', $query, { limit: toInteger($limit) })
+      YIELD node AS n, score
+      RETURN n, score
     `, { query, limit });
     const seen = /* @__PURE__ */ new Map();
     for (const r of fulltextResults.records) {
@@ -264,7 +274,7 @@ async function searchNodes(driver, query, limit) {
     return nodes.slice(0, limit);
   } catch {
     const result = await session.run(
-      `MATCH (n:Task|Skill|Event {status: 'active'})
+      `MATCH (n:Task|Skill|Event|ConversationMessage) WHERE (n.status = 'active' OR NOT n.status IS SET)
        WHERE n.name CONTAINS $query
           OR n.description CONTAINS $query
           OR n.content CONTAINS $query
@@ -5103,6 +5113,7 @@ var EXTRACT_SYSTEM_PROMPT = `\u4F60\u662F\u77E5\u8BC6\u56FE\u8C31\u4E09\u5143\u7
 - REQUIRES: TASK \u2192 TASK\u3002\u4EFB\u52A1\u4F9D\u8D56\u53E6\u4E00\u4E2A\u4EFB\u52A1\u3002\u6CE8\u610F\uFF1A\u5148\u51B3\u6761\u4EF6\u5173\u7CFB\u3002
 - PATCHES: SKILL \u2192 SKILL\u3002\u65B0\u7684\u6280\u80FD\u4FEE\u6B63\u4E86\u65E7\u7684\u6280\u80FD\u3002\u6CE8\u610F\uFF1A\u65B0\u4F18\u4E8E\u65E7\u3002
 - CONFLICTS_WITH: SKILL \u2192 SKILL\u3002\u4E24\u79CD\u6280\u80FD\u4E92\u76F8\u51B2\u7A81\u6216\u4E92\u65A5\u3002
+- RELATES_TO: TASK \u2194 EVENT \u6216 SKILL \u2194 EVENT \u6216 TASK \u2194 TOPIC\u3002\u8DE8\u9886\u57DF\u5173\u8054\u5173\u7CFB\uFF0C\u7528\u4E8E\u8FDE\u63A5\u4E0D\u540C\u77E5\u8BC6\u9886\u57DF\u7684\u8282\u70B9\u3002\u6CE8\u610F\uFF1A\u4E0D\u540C\u6807\u7B7E\u7C7B\u578B\u4E4B\u95F4\u7684\u91CD\u8981\u8054\u7CFB\u3002
 
 ## \u63D0\u53D6\u539F\u5219
 - \u7528\u6237\u7684\u6BCF\u4E00\u4E2A\u6709\u5B9E\u9645\u4FE1\u606F\u7684\u8BF7\u6C42\u90FD\u5E94\u8BE5\u5C1D\u8BD5\u63D0\u53D6
@@ -5118,7 +5129,7 @@ var EXTRACT_SYSTEM_PROMPT = `\u4F60\u662F\u77E5\u8BC6\u56FE\u8C31\u4E09\u5143\u7
     { "type": "TASK|SKILL|EVENT", "name": "\u82F1\u6587\u540D", "description": "\u63CF\u8FF0", "content": "\u5177\u4F53\u5185\u5BB9" }
   ],
   "edges": [
-    { "type": "USED_SKILL|SOLVED_BY|REQUIRES|PATCHES|CONFLICTS_WITH", "fromName": "\u8282\u70B9\u540D", "toName": "\u8282\u70B9\u540D", "instruction": "\u5173\u7CFB\u8BF4\u660E", "condition": "\u6761\u4EF6\uFF08\u53EF\u9009\uFF09" }
+    { "type": "USED_SKILL|SOLVED_BY|REQUIRES|PATCHES|CONFLICTS_WITH|RELATES_TO", "fromName": "\u8282\u70B9\u540D", "toName": "\u8282\u70B9\u540D", "instruction": "\u5173\u7CFB\u8BF4\u660E", "condition": "\u6761\u4EF6\uFF08\u53EF\u9009\uFF09" }
   ]
 }`;
 var FALLBACK = { nodes: [], edges: [] };
@@ -5281,7 +5292,7 @@ function logPhase(phase, ms, ctx) {
 }
 
 // src/graph/pagerank.ts
-var ALL_REL_TYPES = ["USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH"];
+var ALL_REL_TYPES = ["USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH", "RELATES_TO"];
 var SHARED_GRAPH_NAME = "gm-shared";
 var _cachedRelTypeHash = null;
 var _cachedTimestamp = 0;
@@ -5772,7 +5783,7 @@ function escapeXml(s) {
 // src/graph/community.ts
 init_db();
 init_store();
-var ALL_REL_TYPES2 = ["USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH"];
+var ALL_REL_TYPES2 = ["USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH", "RELATES_TO"];
 async function getExistingRelTypes2(session) {
   const result = await session.run(`
     MATCH (:Task|Skill|Event)-[r]->(:Task|Skill|Event)

@@ -53,7 +53,8 @@ export type EdgeType =
   | "SOLVED_BY"
   | "REQUIRES"
   | "PATCHES"
-  | "CONFLICTS_WITH";
+  | "CONFLICTS_WITH"
+  | "RELATES_TO"
 
 export type NodeStatus = "active" | "deprecated" | "merged";
 

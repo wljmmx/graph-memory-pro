@@ -58,6 +58,11 @@ export async function ensureSchema(driver: Driver): Promise<void> {
         `CREATE FULLTEXT INDEX event_search IF NOT EXISTS FOR (n:Event) ON EACH [n.name, n.description, n.content]`
       );
     } catch { /* may exist */ }
+    try {
+      await session.run(
+        `CREATE FULLTEXT INDEX conversation_search IF NOT EXISTS FOR (n:ConversationMessage) ON EACH [n.content]`
+      );
+    } catch { /* may exist */ }
 
     // 向量索引 (Neo4j 5.11+): 按标签分离的向量索引，用于语义搜索和去重
     try {
@@ -184,6 +189,10 @@ export async function searchNodes(
       YIELD node AS n, score
       WHERE n.status = 'active'
       RETURN n, score
+      UNION ALL
+      CALL db.index.fulltext.queryNodes('conversation_search', $query, { limit: toInteger($limit) })
+      YIELD node AS n, score
+      RETURN n, score
     `, { query, limit });
 
     // 去重并按 validatedCount 排序
@@ -203,7 +212,7 @@ export async function searchNodes(
   } catch {
     // ✅ Fallback: 如果 FULLTEXT 索引不可用，回退到 CONTAINS
     const result = await session.run(
-      `MATCH (n:Task|Skill|Event {status: 'active'})
+      `MATCH (n:Task|Skill|Event|ConversationMessage) WHERE (n.status = 'active' OR NOT n.status IS SET)
        WHERE n.name CONTAINS $query
           OR n.description CONTAINS $query
           OR n.content CONTAINS $query
