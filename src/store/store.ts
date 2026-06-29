@@ -213,7 +213,7 @@ export async function searchNodes(
     // ✅ Fallback: 如果 FULLTEXT 索引不可用，回退到 CONTAINS
     const result = await session.run(
       `MATCH (n:Task|Skill|Event|ConversationMessage) WHERE (n.status = 'active' OR NOT n.status IS SET)
-       WHERE n.name CONTAINS $query
+       AND n.name CONTAINS $query
           OR n.description CONTAINS $query
           OR n.content CONTAINS $query
        RETURN n

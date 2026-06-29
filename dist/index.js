@@ -275,7 +275,7 @@ async function searchNodes(driver, query, limit) {
   } catch {
     const result = await session.run(
       `MATCH (n:Task|Skill|Event|ConversationMessage) WHERE (n.status = 'active' OR NOT n.status IS SET)
-       WHERE n.name CONTAINS $query
+       AND n.name CONTAINS $query
           OR n.description CONTAINS $query
           OR n.content CONTAINS $query
        RETURN n
