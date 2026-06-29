@@ -135,21 +135,22 @@ async function runPPR(
   candidateIds: string[],
   cfg: GmConfig,
 ): Promise<PPRResult> {
-  const tSeed = Date.now();
-    const seedResult = await session.run(`
   const tPprFn = Date.now();
+
+  const tSeed = Date.now();
+  const seedResult = await session.run(`
     MATCH (n:Task|Skill|Event) WHERE n.id IN $seedIds AND n.status = 'active'
     RETURN id(n) AS neoId
   `, { seedIds });
   logPhase("ppr_seed_lookup", Date.now() - tSeed, { seeds: seedResult.records.length });
-    const sourceNodeIds = seedResult.records.map(r => r.get("neoId"));
+  const sourceNodeIds = seedResult.records.map(r => r.get("neoId"));
 
   if (sourceNodeIds.length === 0) {
     return { scores: new Map() };
   }
 
   const tCompute = Date.now();
-    const pprResult = await session.run(`
+  const pprResult = await session.run(`
     CALL gds.pageRank.stream($graphName, {
       dampingFactor: $damping,
       maxIterations: toInteger($iterations),
@@ -170,12 +171,12 @@ async function runPPR(
 
   const scores = new Map<string, number>();
   logPhase("ppr_compute", Date.now() - tCompute, { gds_scores: pprResult.records.length });
-    for (const r of pprResult.records) {
+  for (const r of pprResult.records) {
     const rawScore = r.get("score");
     scores.set(r.get("id"), typeof rawScore === "number" ? rawScore : (rawScore?.toNumber?.() ?? 0));
   }
 
-    logPhase("ppr_compute", Date.now() - tPprFn, { scores: scores.size });
+  logPhase("ppr_total", Date.now() - tPprFn, { scores: scores.size });
   return { scores };
 }
 

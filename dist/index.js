@@ -275,9 +275,11 @@ async function searchNodes(driver, query, limit) {
   } catch {
     const result = await session.run(
       `MATCH (n:Task|Skill|Event|ConversationMessage) WHERE (n.status = 'active' OR NOT n.status IS SET)
-       AND n.name CONTAINS $query
+       AND (
+          n.name CONTAINS $query
           OR n.description CONTAINS $query
           OR n.content CONTAINS $query
+       )
        RETURN n
        ORDER BY n.validatedCount DESC, n.updatedAt DESC
        LIMIT toInteger($limit)`,
@@ -5380,9 +5382,9 @@ async function personalizedPageRank(driver, seedIds, candidateIds, cfg) {
   }
 }
 async function runPPR(session, graphName, seedIds, candidateIds, cfg) {
+  const tPprFn = Date.now();
   const tSeed = Date.now();
   const seedResult = await session.run(`
-  const tPprFn = Date.now();
     MATCH (n:Task|Skill|Event) WHERE n.id IN $seedIds AND n.status = 'active'
     RETURN id(n) AS neoId
   `, { seedIds });
@@ -5416,7 +5418,7 @@ async function runPPR(session, graphName, seedIds, candidateIds, cfg) {
     const rawScore = r.get("score");
     scores.set(r.get("id"), typeof rawScore === "number" ? rawScore : rawScore?.toNumber?.() ?? 0);
   }
-  logPhase("ppr_compute", Date.now() - tPprFn, { scores: scores.size });
+  logPhase("ppr_total", Date.now() - tPprFn, { scores: scores.size });
   return { scores };
 }
 async function computeGlobalPageRank(driver, cfg) {
