@@ -18,7 +18,10 @@ const RETRY_DELAYS = [2000, 5000, 10_000];
  * 使用 fetch + retry，支持 OpenAI-compatible API
  */
 export function createCompleteFn(config?: LlmConfig): CompleteFn | null {
-  if (!config?.apiKey) {
+  if (!config?.model && !config?.baseURL && !config?.apiKey) {
+    return null;
+  }
+  if (!config?.model && !config?.baseURL) {
     return null;
   }
   return createOpenAICompatibleComplete(config);
