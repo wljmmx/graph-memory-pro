@@ -184,8 +184,25 @@ export default definePluginEntry({
       const tail = event.sessionMessages?.slice(-_cfg.freshTailCount * 2) ?? [];
 
       try {
+        // ── 动态选择 LLM 进行三元组提取 ──
+        // 主会话使用 ollama/ollama-256k 时，优先使用当前会话的模型
+        // 否则使用配置的 fallback (qwen3.6:27b)
+        const { modelProviderId, modelId } = event.context ?? {};
+        const isLocalOllama = modelProviderId === "ollama" || modelProviderId === "ollama-256k";
+
+        let extractLlm: CompleteFn | null = null;
+
+        if (isLocalOllama && modelId) {
+          extractLlm = createCompleteFn({
+            baseURL: "http://192.168.50.5:11434/v1",
+            model: modelId,
+          });
+        } else {
+          extractLlm = _llm;
+        }
+
         // 提取三元组
-        if (_llm && _extractor) {
+        if (extractLlm && _extractor) {
           let extracted = 0;
           for (let i = 0; i < tail.length && extracted < 10; i += 2) {
             const userMsg = tail[i];
@@ -193,7 +210,7 @@ export default definePluginEntry({
             if (!userMsg || !asstMsg) continue;
             if (typeof userMsg.content !== "string" || typeof asstMsg.content !== "string") continue;
             try {
-              const result = await _extractor.extract(_llm, userMsg.content, asstMsg.content);
+              const result = await _extractor.extract(extractLlm, userMsg.content, asstMsg.content);
               if (result.nodes.length > 0) extracted++;
             } catch {}
           }

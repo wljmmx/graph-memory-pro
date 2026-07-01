@@ -102,7 +102,13 @@ export class Recaller {
     const walked = await graphWalk(this.driver, nodeIds, this.cfg.recallMaxDepth);
     logPhase("graph_walk", Date.now() - tGw, { nodes: walked.nodes.length, edges: walked.edges.length });
 
-    const candidateIds = walked.nodes.map(n => n.id);
+    // Fallback: if graphWalk returned nothing, use seed nodes directly
+    let candidateNodes = walked.nodes;
+    if (candidateNodes.length === 0) {
+      candidateNodes = nodes.slice(0, limit);
+      logPhase("graph_walk", Date.now() - tGw, { fallback: true, nodes: candidateNodes.length });
+    }
+    const candidateIds = candidateNodes.map(n => n.id);
     let pprScores: Map<string, number>;
     try {
       const tPpr = Date.now();
@@ -114,7 +120,7 @@ export class Recaller {
       pprScores = new Map();
     }
 
-    const scored = walked.nodes.map(n => ({
+    const scored = candidateNodes.map(n => ({
       node: n,
       score: pprScores.get(n.id) ?? 0,
     }));

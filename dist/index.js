@@ -5075,6 +5075,9 @@ function createEmbedFn(config) {
             input: text,
             model,
             ...config.options ? { options: config.options } : {},
+            ...config.keepAlive ? { keep_alive: config.keepAlive } : {},
+            ...config.keepAlive ? { keep_alive: config.keepAlive } : {},
+            ...config.keepAlive ? { keep_alive: config.keepAlive } : {},
             dimensions
           }),
           signal: AbortSignal.timeout(3e4)
@@ -5555,7 +5558,12 @@ var Recaller = class {
     const tGw = Date.now();
     const walked = await graphWalk(this.driver, nodeIds, this.cfg.recallMaxDepth);
     logPhase("graph_walk", Date.now() - tGw, { nodes: walked.nodes.length, edges: walked.edges.length });
-    const candidateIds = walked.nodes.map((n) => n.id);
+    let candidateNodes = walked.nodes;
+    if (candidateNodes.length === 0) {
+      candidateNodes = nodes.slice(0, limit);
+      logPhase("graph_walk", Date.now() - tGw, { fallback: true, nodes: candidateNodes.length });
+    }
+    const candidateIds = candidateNodes.map((n) => n.id);
     let pprScores;
     try {
       const tPpr = Date.now();
@@ -5566,7 +5574,7 @@ var Recaller = class {
       if (process.env.GM_DEBUG) console.log("[recall-precise] PPR failed: " + e);
       pprScores = /* @__PURE__ */ new Map();
     }
-    const scored = walked.nodes.map((n) => ({
+    const scored = candidateNodes.map((n) => ({
       node: n,
       score: pprScores.get(n.id) ?? 0
     }));
@@ -6239,7 +6247,18 @@ var graph_memory_pro_default = definePluginEntry({
       const tokenBudget = event.context.tokenBudget ?? 32768;
       const tail = event.sessionMessages?.slice(-_cfg2.freshTailCount * 2) ?? [];
       try {
-        if (_llm2 && _extractor) {
+        const { modelProviderId, modelId } = event.context ?? {};
+        const isLocalOllama = modelProviderId === "ollama" || modelProviderId === "ollama-256k";
+        let extractLlm = null;
+        if (isLocalOllama && modelId) {
+          extractLlm = createCompleteFn({
+            baseURL: "http://192.168.50.5:11434/v1",
+            model: modelId
+          });
+        } else {
+          extractLlm = _llm2;
+        }
+        if (extractLlm && _extractor) {
           let extracted = 0;
           for (let i = 0; i < tail.length && extracted < 10; i += 2) {
             const userMsg = tail[i];
@@ -6247,7 +6266,7 @@ var graph_memory_pro_default = definePluginEntry({
             if (!userMsg || !asstMsg) continue;
             if (typeof userMsg.content !== "string" || typeof asstMsg.content !== "string") continue;
             try {
-              const result = await _extractor.extract(_llm2, userMsg.content, asstMsg.content);
+              const result = await _extractor.extract(extractLlm, userMsg.content, asstMsg.content);
               if (result.nodes.length > 0) extracted++;
             } catch {
             }

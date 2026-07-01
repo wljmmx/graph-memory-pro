@@ -20,6 +20,9 @@ export interface EmbeddingConfig {
   model?: string;
   dimensions?: number;
   options?: Record<string, number | boolean | string>;
+  keepAlive?: string;
+  keepAlive?: string;
+  keepAlive?: string;
 }
 
 /** Timing / latency distribution options */
