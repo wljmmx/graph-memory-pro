@@ -39,6 +39,7 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
           body: JSON.stringify({
             input: text,
             model,
+            ...(config.options ? { options: config.options } : {}),
             dimensions,
           }),
           signal: AbortSignal.timeout(30_000),

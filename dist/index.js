@@ -4997,7 +4997,10 @@ __export(typebox_exports, {
 // src/engine/llm.ts
 var RETRY_DELAYS = [2e3, 5e3, 1e4];
 function createCompleteFn(config) {
-  if (!config?.apiKey) {
+  if (!config?.model && !config?.baseURL && !config?.apiKey) {
+    return null;
+  }
+  if (!config?.model && !config?.baseURL) {
     return null;
   }
   return createOpenAICompatibleComplete(config);
@@ -5071,6 +5074,7 @@ function createEmbedFn(config) {
           body: JSON.stringify({
             input: text,
             model,
+            ...config.options ? { options: config.options } : {},
             dimensions
           }),
           signal: AbortSignal.timeout(3e4)
