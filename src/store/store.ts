@@ -407,7 +407,7 @@ export async function mergeNodes(
 
        WHERE target.id <> $keepId AND r IS NOT NULL
 
-       RETURN id(target) AS targetId, type(r) AS relType, r.instruction AS instruction, r.weight AS weight`,
+       RETURN target.id AS targetId, type(r) AS relType, r.instruction AS instruction, r.weight AS weight`,
       { mergeId },
     );
 
@@ -447,7 +447,7 @@ export async function mergeNodes(
 
        WHERE source.id <> $keepId AND r2 IS NOT NULL
 
-       RETURN id(source) AS sourceId, type(r2) AS relType, r2.instruction AS instruction, r2.weight AS weight`,
+       RETURN source.id AS sourceId, type(r2) AS relType, r2.instruction AS instruction, r2.weight AS weight`,
       { mergeId },
     );
 
