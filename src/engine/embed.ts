@@ -41,8 +41,6 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
             model,
             ...(config.options ? { options: config.options } : {}),
             ...(config.keepAlive ? { keep_alive: config.keepAlive } : {}),
-            ...(config.keepAlive ? { keep_alive: config.keepAlive } : {}),
-            ...(config.keepAlive ? { keep_alive: config.keepAlive } : {}),
             dimensions,
           }),
           signal: AbortSignal.timeout(30_000),

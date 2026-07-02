@@ -5,9 +5,10 @@
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
-    "build": "esbuild index.ts --bundle --outfile=dist/index.js --format=esm --platform=node --target=es2022 --external:openclaw --external:neo4j-driver --tsconfig=tsconfig.json",
+    "build": "node build.cjs",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "build:old": "esbuild index.ts --bundle --outfile=dist/index.js --format=esm --platform=node --target=es2022 --external:openclaw --external:neo4j-driver --tsconfig=tsconfig.json"
   },
   "dependencies": {
     "neo4j-driver": "^5.27.0",
@@ -16,7 +17,8 @@
   "devDependencies": {
     "@types/node": "^20.0.0",
     "typescript": "^5.4.0",
-    "vitest": "^1.4.0"
+    "vitest": "^1.4.0",
+    "tsx": "^4.19.0"
   },
   "peerDependencies": {
     "openclaw": "*"

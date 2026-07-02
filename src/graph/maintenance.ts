@@ -1,7 +1,8 @@
 /**
  * graph-memory-pro — 图谱维护
  *
- * ✅ 并发保护：模块级 mutex 防止 session_end 和 gm_maintain 同时执行
+ * ✅ 并发保护：模块级 mutex，含超时机制防止挂死
+ * ✅ 每阶段独立 try-catch，单步失败不影响其他
  */
 
 import type { Driver } from "neo4j-driver";
@@ -20,15 +21,29 @@ export interface MaintenanceResult {
   durationMs: number;
 }
 
-// ─── 并发互斥锁 ────────────────────────────────────────────
+// ─── 并发互斥锁（带超时重置） ──────────────────────────────
 let _maintenanceRunning = false;
+const LOCK_TIMEOUT_MS = 120_000; // 2 min lock max
+let _lockTimestamp = 0;
+
 function tryAcquireLock(): boolean {
-  if (_maintenanceRunning) return false;
+  // Force-release if lock held beyond timeout
+  if (_maintenanceRunning) {
+    if (Date.now() - _lockTimestamp > LOCK_TIMEOUT_MS) {
+      console.warn("[graph-memory-pro] maintenance lock stale, force-releasing");
+      _maintenanceRunning = false;
+    } else {
+      return false;
+    }
+  }
   _maintenanceRunning = true;
+  _lockTimestamp = Date.now();
   return true;
 }
+
 function releaseLock(): void {
   _maintenanceRunning = false;
+  _lockTimestamp = 0;
 }
 
 export async function runMaintenance(
@@ -45,24 +60,57 @@ export async function runMaintenance(
     };
   }
   const start = Date.now();
+
+  // Each phase is independently try-catched so one failure doesn't break the pipeline
+  let dedupResult: DedupResult = { pairs: [], merged: 0 };
+  let pagerankResult: GlobalPageRankResult = { scores: new Map(), topK: [] };
+  let communityResult: CommunityResult = { labels: new Map(), communities: new Map(), count: 0 };
+  let communitySummaries = 0;
+
   try {
-    const dedupResult = await dedup(driver, cfg);
-    const pagerankResult = await computeGlobalPageRank(driver, cfg);
-    const communityResult = await detectCommunities(driver);
-    let communitySummaries = 0;
+    // ── Phase 1: Dedup ──
+    try {
+      dedupResult = await dedup(driver, cfg);
+      console.log(`[graph-memory-pro] dedup: ${dedupResult.merged} merged, ${dedupResult.pairs.length} pairs`);
+    } catch (err) {
+      console.warn(`[graph-memory-pro] dedup failed: ${err}`);
+    }
+
+    // ── Phase 2: PageRank ──
+    try {
+      pagerankResult = await computeGlobalPageRank(driver, cfg);
+      console.log(`[graph-memory-pro] pagerank: ${pagerankResult.topK.length} topK`);
+    } catch (err) {
+      console.warn(`[graph-memory-pro] pagerank failed: ${err}`);
+    }
+
+    // ── Phase 3: Community Detection ──
+    try {
+      communityResult = await detectCommunities(driver);
+      console.log(`[graph-memory-pro] community: ${communityResult.count} communities`);
+    } catch (err) {
+      console.warn(`[graph-memory-pro] community failed: ${err}`);
+    }
+
+    // ── Phase 4: Community Summaries (optional, needs LLM) ──
     if (llm && communityResult.communities.size > 0) {
       try {
         communitySummaries = await summarizeCommunities(driver, communityResult.communities, llm, embedFn);
-      } catch {}
+        console.log(`[graph-memory-pro] community summaries: ${communitySummaries}`);
+      } catch (err) {
+        console.warn(`[graph-memory-pro] community summaries failed: ${err}`);
+      }
     }
-    return {
-      dedup: dedupResult,
-      pagerank: pagerankResult,
-      community: communityResult,
-      communitySummaries,
-      durationMs: Date.now() - start,
-    };
+
   } finally {
     releaseLock();
   }
+
+  return {
+    dedup: dedupResult,
+    pagerank: pagerankResult,
+    community: communityResult,
+    communitySummaries,
+    durationMs: Date.now() - start,
+  };
 }

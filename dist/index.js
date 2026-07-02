@@ -5076,8 +5076,6 @@ function createEmbedFn(config) {
             model,
             ...config.options ? { options: config.options } : {},
             ...config.keepAlive ? { keep_alive: config.keepAlive } : {},
-            ...config.keepAlive ? { keep_alive: config.keepAlive } : {},
-            ...config.keepAlive ? { keep_alive: config.keepAlive } : {},
             dimensions
           }),
           signal: AbortSignal.timeout(3e4)
@@ -5301,7 +5299,7 @@ function logPhase(phase, ms, ctx) {
 }
 
 // src/graph/pagerank.ts
-var ALL_REL_TYPES = ["USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH", "RELATES_TO"];
+var ALL_REL_TYPES = ["NEXT_SESSION", "CONTAINS", "MENTIONS", "USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH", "RELATES_TO"];
 var SHARED_GRAPH_NAME = "gm-shared";
 var _cachedRelTypeHash = null;
 var _cachedTimestamp = 0;
@@ -5797,7 +5795,7 @@ function escapeXml(s) {
 // src/graph/community.ts
 init_db();
 init_store();
-var ALL_REL_TYPES2 = ["USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH", "RELATES_TO"];
+var ALL_REL_TYPES2 = ["NEXT_SESSION", "CONTAINS", "MENTIONS", "USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH", "RELATES_TO"];
 async function getExistingRelTypes2(session) {
   const result = await session.run(`
     MATCH (:Task|Skill|Event)-[r]->(:Task|Skill|Event)
@@ -6018,13 +6016,24 @@ async function dedup(driver, cfg) {
 
 // src/graph/maintenance.ts
 var _maintenanceRunning = false;
+var LOCK_TIMEOUT_MS = 12e4;
+var _lockTimestamp = 0;
 function tryAcquireLock() {
-  if (_maintenanceRunning) return false;
+  if (_maintenanceRunning) {
+    if (Date.now() - _lockTimestamp > LOCK_TIMEOUT_MS) {
+      console.warn("[graph-memory-pro] maintenance lock stale, force-releasing");
+      _maintenanceRunning = false;
+    } else {
+      return false;
+    }
+  }
   _maintenanceRunning = true;
+  _lockTimestamp = Date.now();
   return true;
 }
 function releaseLock() {
   _maintenanceRunning = false;
+  _lockTimestamp = 0;
 }
 async function runMaintenance(driver, cfg, llm, embedFn) {
   if (!tryAcquireLock()) {
@@ -6038,27 +6047,47 @@ async function runMaintenance(driver, cfg, llm, embedFn) {
     };
   }
   const start = Date.now();
+  let dedupResult = { pairs: [], merged: 0 };
+  let pagerankResult = { scores: /* @__PURE__ */ new Map(), topK: [] };
+  let communityResult = { labels: /* @__PURE__ */ new Map(), communities: /* @__PURE__ */ new Map(), count: 0 };
+  let communitySummaries = 0;
   try {
-    const dedupResult = await dedup(driver, cfg);
-    const pagerankResult = await computeGlobalPageRank(driver, cfg);
-    const communityResult = await detectCommunities(driver);
-    let communitySummaries = 0;
+    try {
+      dedupResult = await dedup(driver, cfg);
+      console.log(`[graph-memory-pro] dedup: ${dedupResult.merged} merged, ${dedupResult.pairs.length} pairs`);
+    } catch (err) {
+      console.warn(`[graph-memory-pro] dedup failed: ${err}`);
+    }
+    try {
+      pagerankResult = await computeGlobalPageRank(driver, cfg);
+      console.log(`[graph-memory-pro] pagerank: ${pagerankResult.topK.length} topK`);
+    } catch (err) {
+      console.warn(`[graph-memory-pro] pagerank failed: ${err}`);
+    }
+    try {
+      communityResult = await detectCommunities(driver);
+      console.log(`[graph-memory-pro] community: ${communityResult.count} communities`);
+    } catch (err) {
+      console.warn(`[graph-memory-pro] community failed: ${err}`);
+    }
     if (llm && communityResult.communities.size > 0) {
       try {
         communitySummaries = await summarizeCommunities(driver, communityResult.communities, llm, embedFn);
-      } catch {
+        console.log(`[graph-memory-pro] community summaries: ${communitySummaries}`);
+      } catch (err) {
+        console.warn(`[graph-memory-pro] community summaries failed: ${err}`);
       }
     }
-    return {
-      dedup: dedupResult,
-      pagerank: pagerankResult,
-      community: communityResult,
-      communitySummaries,
-      durationMs: Date.now() - start
-    };
   } finally {
     releaseLock();
   }
+  return {
+    dedup: dedupResult,
+    pagerank: pagerankResult,
+    community: communityResult,
+    communitySummaries,
+    durationMs: Date.now() - start
+  };
 }
 
 // src/graph/reembed.ts

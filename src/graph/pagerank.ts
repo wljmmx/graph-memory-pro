@@ -9,7 +9,7 @@ import type { GmConfig } from "../types.ts";
 import { getSession } from "../store/db.ts";
 import { logPhase, isTimingEnabled } from "../timing.ts";
 
-const ALL_REL_TYPES = ["USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH", "RELATES_TO"];
+const ALL_REL_TYPES = ["NEXT_SESSION", "CONTAINS", "MENTIONS", "USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH", "RELATES_TO"];
 
 // ✅ Shared projection config
 const SHARED_GRAPH_NAME = "gm-shared";
