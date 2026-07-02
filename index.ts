@@ -112,6 +112,7 @@ export default definePluginEntry({
       baseURL: Type.Optional(Type.String()),
       model: Type.Optional(Type.String()),
       dimensions: Type.Optional(Type.Number({ default: 1024 })),
+      keepAlive: Type.Optional(Type.String()),
     })),
     timing: Type.Optional(Type.Object({
       enabled: Type.Boolean({ default: false }),
