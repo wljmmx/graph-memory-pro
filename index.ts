@@ -49,6 +49,24 @@ let _recaller: Recaller | null = null;
 
 // ─── 辅助函数 ──────────────────────────────────────────
 
+import { EMBEDDING_PRESETS } from "./src/types.ts";
+
+function resolveEmbedDimension(cfg: any): number {
+  // 1. User-explicit dimension in config
+  if (cfg?.embedding?.dimensions && typeof cfg.embedding.dimensions === 'number') {
+    return cfg.embedding.dimensions;
+  }
+  // 2. Match by model name from presets
+  if (cfg?.embedding?.model) {
+    const modelKey = Object.keys(EMBEDDING_PRESETS).find(k => cfg.embedding.model.includes(k) || k.includes(cfg.embedding.model));
+    if (modelKey && EMBEDDING_PRESETS[modelKey].dimensions) {
+      return EMBEDDING_PRESETS[modelKey].dimensions;
+    }
+  }
+  // 3. Fallback 1024
+  return 1024;
+}
+
 async function getOrCreateDriver(cfg: GmConfig): Promise<Driver | null> {
   try {
     const d = initDriver(cfg.neo4j);
@@ -137,7 +155,9 @@ export default definePluginEntry({
 
       // 2. 初始化 Schema
       try {
-        await ensureSchema(driver);
+        // 解析 embedding 维度用于向量索引创建
+      const embedDimension = resolveEmbedDimension(pluginConfig);
+      await ensureSchema(driver, embedDimension);
       } catch (err) {
         console.warn(`[graph-memory-pro] Schema init: ${err}`);
       }

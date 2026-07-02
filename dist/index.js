@@ -103,7 +103,7 @@ __export(store_exports, {
   vectorSearchWithScore: () => vectorSearchWithScore
 });
 import neo4j2 from "neo4j-driver";
-async function ensureSchema(driver) {
+async function ensureSchema(driver, dimension = 1024) {
   const session = getSession(driver);
   try {
     for (const label of ["Task", "Skill", "Event"]) {
@@ -154,7 +154,7 @@ async function ensureSchema(driver) {
     try {
       await session.run(`
         CALL db.index.vector.createNodeIndex(
-          'gm_node_embedding_task', ['Task'], 'embedding', 1024, 'cosine'
+          'gm_node_embedding_task', ['Task'], 'embedding', ${dimension}, 'cosine'
         )
       `);
     } catch {
@@ -162,7 +162,7 @@ async function ensureSchema(driver) {
     try {
       await session.run(`
         CALL db.index.vector.createNodeIndex(
-          'gm_node_embedding_skill', ['Skill'], 'embedding', 1024, 'cosine'
+          'gm_node_embedding_skill', ['Skill'], 'embedding', ${dimension}, 'cosine'
         )
       `);
     } catch {
@@ -170,7 +170,7 @@ async function ensureSchema(driver) {
     try {
       await session.run(`
         CALL db.index.vector.createNodeIndex(
-          'gm_node_embedding_event', ['Event'], 'embedding', 1024, 'cosine'
+          'gm_node_embedding_event', ['Event'], 'embedding', ${dimension}, 'cosine'
         )
       `);
     } catch {
@@ -178,8 +178,8 @@ async function ensureSchema(driver) {
     try {
       await session.run(`
         CALL db.index.vector.createNodeIndex(
-          'gm_community_embedding', '\u793E\u533A\u5D4C\u5165',
-          1024, 'cosine'
+          'gm_community_embedding', ['GmCommunity'], 'embedding',
+          ${dimension}, 'cosine'
         )
       `);
     } catch {
@@ -5956,49 +5956,34 @@ init_store();
 async function detectDuplicates(driver, cfg) {
   const session = getSession(driver);
   try {
-    const nodesResult = await session.run(`
-      MATCH (n:Task|Skill|Event {status: 'active'})
-      WHERE n.embedding IS NOT NULL
-      RETURN n.id AS id, n.name AS name, n.embedding AS embedding
-    `);
-    if (nodesResult.records.length < 2) return [];
-    const pairs = [];
-    const seenPairs = /* @__PURE__ */ new Set();
-    for (const record of nodesResult.records) {
-      const nodeId = record.get("id");
-      const nodeName = record.get("name");
-      const embedding = record.get("embedding");
-      const searchResult = await session.run(`
-        CALL db.index.vector.queryNodes('gm_node_embedding_task', 5, $vec)
-        YIELD node, score
-        WITH node, score WHERE node.id <> $nodeId AND node.status = 'active' AND score >= $threshold
-        RETURN node.id AS id, node.name AS name, score
-        UNION ALL
-        CALL db.index.vector.queryNodes('gm_node_embedding_skill', 5, $vec)
-        YIELD node, score
-        WITH node, score WHERE node.id <> $nodeId AND node.status = 'active' AND score >= $threshold
-        RETURN node.id AS id, node.name AS name, score
-        UNION ALL
-        CALL db.index.vector.queryNodes('gm_node_embedding_event', 5, $vec)
-        YIELD node, score
-        WITH node, score WHERE node.id <> $nodeId AND node.status = 'active' AND score >= $threshold
-        RETURN node.id AS id, node.name AS name, score
-      `, { vec: embedding, nodeId, threshold: cfg.dedupThreshold });
-      for (const sr of searchResult.records) {
-        const otherId = sr.get("id");
-        const pairKey = [nodeId, otherId].sort().join("|");
-        if (seenPairs.has(pairKey)) continue;
-        seenPairs.add(pairKey);
-        pairs.push({
-          nodeA: nodeId,
-          nodeB: otherId,
-          nameA: nodeName,
-          nameB: sr.get("name"),
-          similarity: sr.get("score")
-        });
-      }
-    }
-    return pairs.sort((a, b) => b.similarity - a.similarity);
+    const result = await session.run(
+      `MATCH (a:Task|Skill|Event {status: 'active'})
+       WHERE a.embedding IS NOT NULL
+       WITH a
+       MATCH (b:Task|Skill|Event {status: 'active'})
+       WHERE b.embedding IS NOT NULL
+         AND a.id < b.id
+         AND a.type = b.type
+       WITH a, b,
+         a.embedding AS va,
+         b.embedding AS vb
+       WITH a, b, va, vb,
+         reduce(dot = 0.0, i IN range(0, size(va) - 1) | dot + va[i] * vb[i]) AS dotProduct,
+         sqrt(reduce(sq = 0.0, i IN range(0, size(va) - 1) | sq + va[i] * va[i])) AS normA,
+         sqrt(reduce(sq = 0.0, i IN range(0, size(vb) - 1) | sq + vb[i] * vb[i])) AS normB
+       WITH a, b, dotProduct / (normA * normB) AS cosineSimilarity
+       WHERE cosineSimilarity >= $threshold
+       RETURN a.id AS nodeA, a.name AS nameA, b.id AS nodeB, b.name AS nameB, cosineSimilarity AS score
+       ORDER BY score DESC`,
+      { threshold: cfg.dedupThreshold }
+    );
+    return result.records.map((r) => ({
+      nodeA: r.get("nodeA"),
+      nodeB: r.get("nodeB"),
+      nameA: r.get("nameA"),
+      nameB: r.get("nameB"),
+      similarity: r.get("score")
+    }));
   } finally {
     await session.close();
   }
@@ -6032,25 +6017,48 @@ async function dedup(driver, cfg) {
 }
 
 // src/graph/maintenance.ts
+var _maintenanceRunning = false;
+function tryAcquireLock() {
+  if (_maintenanceRunning) return false;
+  _maintenanceRunning = true;
+  return true;
+}
+function releaseLock() {
+  _maintenanceRunning = false;
+}
 async function runMaintenance(driver, cfg, llm, embedFn) {
-  const start = Date.now();
-  const dedupResult = await dedup(driver, cfg);
-  const pagerankResult = await computeGlobalPageRank(driver, cfg);
-  const communityResult = await detectCommunities(driver);
-  let communitySummaries = 0;
-  if (llm && communityResult.communities.size > 0) {
-    try {
-      communitySummaries = await summarizeCommunities(driver, communityResult.communities, llm, embedFn);
-    } catch {
-    }
+  if (!tryAcquireLock()) {
+    console.log("[graph-memory-pro] maintenance already running, skip");
+    return {
+      dedup: { pairs: [], merged: 0 },
+      pagerank: { scores: /* @__PURE__ */ new Map(), topK: [] },
+      community: { labels: /* @__PURE__ */ new Map(), communities: /* @__PURE__ */ new Map(), count: 0 },
+      communitySummaries: 0,
+      durationMs: 0
+    };
   }
-  return {
-    dedup: dedupResult,
-    pagerank: pagerankResult,
-    community: communityResult,
-    communitySummaries,
-    durationMs: Date.now() - start
-  };
+  const start = Date.now();
+  try {
+    const dedupResult = await dedup(driver, cfg);
+    const pagerankResult = await computeGlobalPageRank(driver, cfg);
+    const communityResult = await detectCommunities(driver);
+    let communitySummaries = 0;
+    if (llm && communityResult.communities.size > 0) {
+      try {
+        communitySummaries = await summarizeCommunities(driver, communityResult.communities, llm, embedFn);
+      } catch {
+      }
+    }
+    return {
+      dedup: dedupResult,
+      pagerank: pagerankResult,
+      community: communityResult,
+      communitySummaries,
+      durationMs: Date.now() - start
+    };
+  } finally {
+    releaseLock();
+  }
 }
 
 // src/graph/reembed.ts
@@ -6129,6 +6137,26 @@ function initRoutes(driver, cfg, llm, embed) {
   _embed = embed ?? null;
 }
 
+// src/types.ts
+var EMBEDDING_PRESETS = {
+  "text-embedding-3-small": {
+    model: "text-embedding-3-small",
+    dimensions: 1024,
+    description: "OpenAI text-embedding-3-small"
+  },
+  "nomic-embed-text": {
+    model: "nomic-embed-text",
+    dimensions: 768,
+    description: "Nomic Embed Text (Ollama)"
+  },
+  "qwen3.5-embedding-0.6b": {
+    model: "Qwen3.5-Embedding-0.6B-GGUF",
+    dimensions: 1024,
+    baseURL: "http://192.168.50.5:11434/v1",
+    description: "Qwen3.5 Embedding 0.6B GGUF (Ollama, local)"
+  }
+};
+
 // index.ts
 init_store();
 init_store();
@@ -6139,6 +6167,18 @@ var _llm2 = null;
 var _embed2 = null;
 var _extractor = null;
 var _recaller = null;
+function resolveEmbedDimension(cfg) {
+  if (cfg?.embedding?.dimensions && typeof cfg.embedding.dimensions === "number") {
+    return cfg.embedding.dimensions;
+  }
+  if (cfg?.embedding?.model) {
+    const modelKey = Object.keys(EMBEDDING_PRESETS).find((k) => cfg.embedding.model.includes(k) || k.includes(cfg.embedding.model));
+    if (modelKey && EMBEDDING_PRESETS[modelKey].dimensions) {
+      return EMBEDDING_PRESETS[modelKey].dimensions;
+    }
+  }
+  return 1024;
+}
 async function getOrCreateDriver(cfg) {
   try {
     const d = initDriver(cfg.neo4j);
@@ -6216,7 +6256,8 @@ var graph_memory_pro_default = definePluginEntry({
       if (!driver) return;
       _driver3 = driver;
       try {
-        await ensureSchema(driver);
+        const embedDimension = resolveEmbedDimension(pluginConfig);
+        await ensureSchema(driver, embedDimension);
       } catch (err) {
         console.warn(`[graph-memory-pro] Schema init: ${err}`);
       }

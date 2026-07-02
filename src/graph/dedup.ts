@@ -1,7 +1,8 @@
 /**
  * graph-memory-pro — 向量去重 (Neo4j 版)
  *
- * 利用 Neo4j 向量索引查找相似节点
+ * 利用 Cypher 余弦相似度批量检测重复节点
+ * ✅ 单次查询替代 O(N) 暴力的逐节点 queryNodes 循环
  */
 
 import type { Driver } from "neo4j-driver";
@@ -22,56 +23,44 @@ export interface DedupResult {
   merged: number;
 }
 
+/**
+ * 批量检测重复节点 — 单条 Cypher 查询，服务端计算余弦相似度
+ *
+ * 思路：MATCH 所有 active 带 embedding 的节点 → 按类型同组 → 叉积计算余弦相似度
+ * → 阈值过滤。复杂度 O(N²) 在 Neo4j 内存完成，100 节点 ≈ 5k 对，无网络往返。
+ */
 export async function detectDuplicates(driver: Driver, cfg: GmConfig): Promise<DuplicatePair[]> {
   const session = getSession(driver);
   try {
-    const nodesResult = await session.run(`
-      MATCH (n:Task|Skill|Event {status: 'active'})
-      WHERE n.embedding IS NOT NULL
-      RETURN n.id AS id, n.name AS name, n.embedding AS embedding
-    `);
+    const result = await session.run(
+      `MATCH (a:Task|Skill|Event {status: 'active'})
+       WHERE a.embedding IS NOT NULL
+       WITH a
+       MATCH (b:Task|Skill|Event {status: 'active'})
+       WHERE b.embedding IS NOT NULL
+         AND a.id < b.id
+         AND a.type = b.type
+       WITH a, b,
+         a.embedding AS va,
+         b.embedding AS vb
+       WITH a, b, va, vb,
+         reduce(dot = 0.0, i IN range(0, size(va) - 1) | dot + va[i] * vb[i]) AS dotProduct,
+         sqrt(reduce(sq = 0.0, i IN range(0, size(va) - 1) | sq + va[i] * va[i])) AS normA,
+         sqrt(reduce(sq = 0.0, i IN range(0, size(vb) - 1) | sq + vb[i] * vb[i])) AS normB
+       WITH a, b, dotProduct / (normA * normB) AS cosineSimilarity
+       WHERE cosineSimilarity >= $threshold
+       RETURN a.id AS nodeA, a.name AS nameA, b.id AS nodeB, b.name AS nameB, cosineSimilarity AS score
+       ORDER BY score DESC`,
+      { threshold: cfg.dedupThreshold },
+    );
 
-    if (nodesResult.records.length < 2) return [];
-
-    const pairs: DuplicatePair[] = [];
-    const seenPairs = new Set<string>();
-
-    for (const record of nodesResult.records) {
-      const nodeId = record.get("id");
-      const nodeName = record.get("name");
-      const embedding = record.get("embedding");
-
-      const searchResult = await session.run(`
-        CALL db.index.vector.queryNodes('gm_node_embedding_task', 5, $vec)
-        YIELD node, score
-        WITH node, score WHERE node.id <> $nodeId AND node.status = 'active' AND score >= $threshold
-        RETURN node.id AS id, node.name AS name, score
-        UNION ALL
-        CALL db.index.vector.queryNodes('gm_node_embedding_skill', 5, $vec)
-        YIELD node, score
-        WITH node, score WHERE node.id <> $nodeId AND node.status = 'active' AND score >= $threshold
-        RETURN node.id AS id, node.name AS name, score
-        UNION ALL
-        CALL db.index.vector.queryNodes('gm_node_embedding_event', 5, $vec)
-        YIELD node, score
-        WITH node, score WHERE node.id <> $nodeId AND node.status = 'active' AND score >= $threshold
-        RETURN node.id AS id, node.name AS name, score
-      `, { vec: embedding, nodeId, threshold: cfg.dedupThreshold });
-
-      for (const sr of searchResult.records) {
-        const otherId = sr.get("id");
-        const pairKey = [nodeId, otherId].sort().join("|");
-        if (seenPairs.has(pairKey)) continue;
-        seenPairs.add(pairKey);
-        pairs.push({
-          nodeA: nodeId, nodeB: otherId,
-          nameA: nodeName, nameB: sr.get("name"),
-          similarity: sr.get("score"),
-        });
-      }
-    }
-
-    return pairs.sort((a, b) => b.similarity - a.similarity);
+    return result.records.map((r) => ({
+      nodeA: r.get("nodeA"),
+      nodeB: r.get("nodeB"),
+      nameA: r.get("nameA"),
+      nameB: r.get("nameB"),
+      similarity: r.get("score"),
+    }));
   } finally {
     await session.close();
   }

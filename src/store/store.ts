@@ -12,7 +12,7 @@ import { getSession } from "./db.ts";
 
 // ─── Schema 初始化 ──────────────────────────────────────────
 
-export async function ensureSchema(driver: Driver): Promise<void> {
+export async function ensureSchema(driver: Driver, dimension: number = 1024): Promise<void> {
   const session = getSession(driver);
   try {
     // 约束: 节点 id 唯一
@@ -68,21 +68,21 @@ export async function ensureSchema(driver: Driver): Promise<void> {
     try {
       await session.run(`
         CALL db.index.vector.createNodeIndex(
-          'gm_node_embedding_task', ['Task'], 'embedding', 1024, 'cosine'
+          'gm_node_embedding_task', ['Task'], 'embedding', ${dimension}, 'cosine'
         )
       `);
     } catch { /* may exist */ }
     try {
       await session.run(`
         CALL db.index.vector.createNodeIndex(
-          'gm_node_embedding_skill', ['Skill'], 'embedding', 1024, 'cosine'
+          'gm_node_embedding_skill', ['Skill'], 'embedding', ${dimension}, 'cosine'
         )
       `);
     } catch { /* may exist */ }
     try {
       await session.run(`
         CALL db.index.vector.createNodeIndex(
-          'gm_node_embedding_event', ['Event'], 'embedding', 1024, 'cosine'
+          'gm_node_embedding_event', ['Event'], 'embedding', ${dimension}, 'cosine'
         )
       `);
     } catch { /* may exist */ }
@@ -91,8 +91,8 @@ export async function ensureSchema(driver: Driver): Promise<void> {
     try {
       await session.run(`
         CALL db.index.vector.createNodeIndex(
-          'gm_community_embedding', '社区嵌入',
-          1024, 'cosine'
+          'gm_community_embedding', ['GmCommunity'], 'embedding',
+          ${dimension}, 'cosine'
         )
       `);
     } catch {

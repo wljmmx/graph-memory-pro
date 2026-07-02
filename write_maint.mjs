@@ -1,5 +1,9 @@
-/**
+import fs from 'fs';
+const code = `/**
  * graph-memory-pro — 图谱维护
+ *
+ * 调用时机：session_end（finalize 之后）
+ * 执行顺序：去重 → 全局 PageRank → 社区检测 → 社区描述
  *
  * ✅ 并发保护：模块级 mutex 防止 session_end 和 gm_maintain 同时执行
  */
@@ -22,11 +26,13 @@ export interface MaintenanceResult {
 
 // ─── 并发互斥锁 ────────────────────────────────────────────
 let _maintenanceRunning = false;
+
 function tryAcquireLock(): boolean {
   if (_maintenanceRunning) return false;
   _maintenanceRunning = true;
   return true;
 }
+
 function releaseLock(): void {
   _maintenanceRunning = false;
 }
@@ -44,17 +50,20 @@ export async function runMaintenance(
       durationMs: 0,
     };
   }
+
   const start = Date.now();
   try {
     const dedupResult = await dedup(driver, cfg);
     const pagerankResult = await computeGlobalPageRank(driver, cfg);
     const communityResult = await detectCommunities(driver);
+
     let communitySummaries = 0;
     if (llm && communityResult.communities.size > 0) {
       try {
         communitySummaries = await summarizeCommunities(driver, communityResult.communities, llm, embedFn);
       } catch {}
     }
+
     return {
       dedup: dedupResult,
       pagerank: pagerankResult,
@@ -66,3 +75,6 @@ export async function runMaintenance(
     releaseLock();
   }
 }
+`;
+fs.writeFileSync('/home/wljmmx/.openclaw/workspace/main/workfiles/graph-memory-pro/src/graph/maintenance.ts', code);
+console.log('Written maintenance.ts, size=' + code.length);
