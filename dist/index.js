@@ -6249,7 +6249,8 @@ var graph_memory_pro_default = definePluginEntry({
       apiKey: typebox_exports.Optional(typebox_exports.String()),
       baseURL: typebox_exports.Optional(typebox_exports.String()),
       model: typebox_exports.Optional(typebox_exports.String()),
-      dimensions: typebox_exports.Optional(typebox_exports.Number({ default: 1024 }))
+      dimensions: typebox_exports.Optional(typebox_exports.Number({ default: 1024 })),
+      keepAlive: typebox_exports.Optional(typebox_exports.String())
     })),
     timing: typebox_exports.Optional(typebox_exports.Object({
       enabled: typebox_exports.Boolean({ default: false }),
