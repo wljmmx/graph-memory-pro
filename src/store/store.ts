@@ -633,23 +633,6 @@ export async function communityRepresentatives(
        WHERE n.communityId IN $communityIds
        RETURN n
        ORDER BY n.pagerank DESC, n.validatedCount DESC`,
-n/**
- * Quickly check if any communities exist (cheap count query).
- */
-export async function countCommunities(
-  driver: Driver,
-): Promise<number> {
-  const session = getSession(driver);
-  try {
-    const result = await session.run(
-      `MATCH (c:GmCommunity) RETURN count(c) AS cnt`
-    );
-    return result.records[0]?.get("cnt")?.toNumber?.() ?? 0;
-  } finally {
-    await session.close();
-  }
-}
-
       { communityIds },
     );
     return result.records.map((r) => recordToNode(r.get("n")));

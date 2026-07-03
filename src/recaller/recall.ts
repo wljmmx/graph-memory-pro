@@ -9,7 +9,7 @@ import type { EmbedFn } from "../engine/embed.ts";
 import {
   searchNodes, vectorSearchWithScore,
   graphWalk, communityRepresentatives,
-  communityVectorSearch, nodesByCommunityIds, countCommunities,
+  communityVectorSearch, nodesByCommunityIds,
   saveVector, getVectorHash,
 } from "../store/store.ts";
 import { getCommunityPeers } from "../graph/community.ts";
@@ -148,13 +148,6 @@ export class Recaller {
       if (!vec.length) return { nodes: [], edges: [], tokenEstimate: 0 };
 
       const tCommVec = Date.now();
-    // Skip generalized recall if no communities exist (fast early exit)
-    const communityCount = await countCommunities(this.driver);
-    if (communityCount === 0) {
-      if (isTimingEnabled()) console.log("[gm-timing] recall_generalized skip no_communities");
-      return { nodes: [], edges: [], tokenEstimate: 0 };
-    }
-
       const communityResults = await communityVectorSearch(this.driver, vec);
       logPhase("community_vec_search", Date.now() - tCommVec, { communities: communityResults.length });
       const communityIds = communityResults.slice(0, 3).map(c => c.id);
