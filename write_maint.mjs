@@ -76,5 +76,7 @@ export async function runMaintenance(
   }
 }
 `;
-fs.writeFileSync('/home/wljmmx/.openclaw/workspace/main/workfiles/graph-memory-pro/src/graph/maintenance.ts', code);
+const { resolve } = await import('node:path');
+const targetPath = resolve(process.env.HOME || process.env.USERPROFILE || '.', '.openclaw', 'workspace', 'main', 'workfiles', 'graph-memory-pro', 'src', 'graph', 'maintenance.ts');
+fs.writeFileSync(targetPath, code);
 console.log('Written maintenance.ts, size=' + code.length);

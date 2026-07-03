@@ -128,7 +128,7 @@ export default definePluginEntry({
         // Try multiple config sources
         const { readFileSync } = await import('node:fs');
         const { join } = await import('node:path');
-        const configPath = join(process.env.HOME || '/home/wljmmx', '.openclaw/openclaw.json');
+        const configPath = join(process.env.HOME || process.env.USERPROFILE || '.', '.openclaw', 'openclaw.json');
         const rawCfg = JSON.parse(readFileSync(configPath, 'utf-8'));
         const entryCfg = rawCfg?.plugins?.entries?.['graph-memory-pro'];
         const pluginConfig = (entryCfg?.config ?? entryCfg) as GmConfig | undefined;
