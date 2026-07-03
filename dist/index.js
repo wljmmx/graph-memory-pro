@@ -38,7 +38,7 @@ function closeDriver() {
     _driver = null;
   }
 }
-function getSession(driver) {
+function getSession2(driver) {
   return driver.session({
     defaultAccessMode: neo4j.session.WRITE,
     database: "neo4j"
@@ -104,7 +104,7 @@ __export(store_exports, {
 });
 import neo4j2 from "neo4j-driver";
 async function ensureSchema(driver, dimension = 1024) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     for (const label of ["Task", "Skill", "Event"]) {
       await session.run(
@@ -129,25 +129,25 @@ async function ensureSchema(driver, dimension = 1024) {
     );
     try {
       await session.run(
-        `CREATE FULLTEXT INDEX task_search IF NOT EXISTS FOR (n:Task) ON EACH [n.name, n.description, n.content]`
+        `CREATE FULLTEXT INDEX task_search IF NOT EXISTS FOR (n:Task) ON EACH [n.name, n.description, n.content] OPTIONS { analyzer: "cjk" }`
       );
     } catch {
     }
     try {
       await session.run(
-        `CREATE FULLTEXT INDEX skill_search IF NOT EXISTS FOR (n:Skill) ON EACH [n.name, n.description, n.content]`
+        `CREATE FULLTEXT INDEX skill_search IF NOT EXISTS FOR (n:Skill) ON EACH [n.name, n.description, n.content] OPTIONS { analyzer: "cjk" }`
       );
     } catch {
     }
     try {
       await session.run(
-        `CREATE FULLTEXT INDEX event_search IF NOT EXISTS FOR (n:Event) ON EACH [n.name, n.description, n.content]`
+        `CREATE FULLTEXT INDEX event_search IF NOT EXISTS FOR (n:Event) ON EACH [n.name, n.description, n.content] OPTIONS { analyzer: "cjk" }`
       );
     } catch {
     }
     try {
       await session.run(
-        `CREATE FULLTEXT INDEX conversation_search IF NOT EXISTS FOR (n:ConversationMessage) ON EACH [n.content]`
+        `CREATE FULLTEXT INDEX conversation_search IF NOT EXISTS FOR (n:ConversationMessage) ON EACH [n.content] OPTIONS { analyzer: "cjk" }`
       );
     } catch {
     }
@@ -195,7 +195,7 @@ async function ensureSchema(driver, dimension = 1024) {
   }
 }
 async function upsertNode(driver, node) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     await session.run(
       `MERGE (n:${node.type} {id: $id})
@@ -225,7 +225,7 @@ async function upsertNode(driver, node) {
   }
 }
 async function findById(driver, id) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     const result = await session.run(
       `MATCH (n:Task|Skill|Event {id: $id}) RETURN n`,
@@ -238,7 +238,7 @@ async function findById(driver, id) {
   }
 }
 async function searchNodes(driver, query, limit) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     const fulltextResults = await session.run(`
       CALL db.index.fulltext.queryNodes('task_search', $query, { limit: toInteger($limit) })
@@ -291,7 +291,7 @@ async function searchNodes(driver, query, limit) {
   }
 }
 async function vectorSearchWithScore(driver, vec, topK) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     const result = await session.run(
       `CALL db.index.vector.queryNodes('gm_node_embedding_task', toInteger($topK), $vec)
@@ -320,7 +320,7 @@ async function vectorSearchWithScore(driver, vec, topK) {
   }
 }
 async function graphWalk(driver, seedIds, depth) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     const relTypes = "USED_SKILL|SOLVED_BY|REQUIRES|PATCHES|CONFLICTS_WITH";
     const result = await session.run(
@@ -346,7 +346,7 @@ async function graphWalk(driver, seedIds, depth) {
   }
 }
 async function getNodeCount(driver) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     const result = await session.run(
       "MATCH (n:Task|Skill|Event {status: 'active'}) RETURN count(n) AS c"
@@ -357,7 +357,7 @@ async function getNodeCount(driver) {
   }
 }
 async function getEdgeCount(driver) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     const result = await session.run(
       "MATCH (:Task|Skill|Event)-[r]->(:Task|Skill|Event) RETURN count(r) AS c"
@@ -368,7 +368,7 @@ async function getEdgeCount(driver) {
   }
 }
 async function getNodesByType(driver, type, limit) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     const q = limit ? `MATCH (n:${type} {status: 'active'}) RETURN n ORDER BY n.validatedCount DESC LIMIT toInteger($limit)` : `MATCH (n:${type} {status: 'active'}) RETURN n ORDER BY n.validatedCount DESC`;
     const result = await session.run(q, { limit: limit ?? 0 });
@@ -378,7 +378,7 @@ async function getNodesByType(driver, type, limit) {
   }
 }
 async function getTopNodes(driver, limit) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     const result = await session.run(
       `MATCH (n:Task|Skill|Event {status: 'active'})
@@ -393,7 +393,7 @@ async function getTopNodes(driver, limit) {
   }
 }
 async function upsertEdge(driver, edge) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     await session.run(
       `MATCH (from:Task|Skill|Event {id: $fromId})
@@ -422,7 +422,7 @@ async function upsertEdge(driver, edge) {
   }
 }
 async function mergeNodes(driver, keepId, mergeId) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     const outResult = await session.run(
       `MATCH (merge:Task|Skill|Event {id: $mergeId})
@@ -507,7 +507,7 @@ async function mergeNodes(driver, keepId, mergeId) {
 }
 async function getEdgesForNodes(driver, nodeIds) {
   if (!nodeIds.length) return [];
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     const result = await session.run(
       `MATCH (from:Task|Skill|Event)-[r]->(to:Task|Skill|Event)
@@ -521,7 +521,7 @@ async function getEdgesForNodes(driver, nodeIds) {
   }
 }
 async function updateCommunities(driver, labels) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     const tx = session.beginTransaction();
     try {
@@ -541,7 +541,7 @@ async function updateCommunities(driver, labels) {
   }
 }
 async function getCommunitySummary(driver, communityId) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     const result = await session.run(
       `MATCH (c:GmCommunity {id: $id}) RETURN c`,
@@ -560,7 +560,7 @@ async function getCommunitySummary(driver, communityId) {
   }
 }
 async function getAllCommunitySummaries(driver) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     const result = await session.run(
       "MATCH (c:GmCommunity) RETURN c"
@@ -581,7 +581,7 @@ async function getAllCommunitySummaries(driver) {
   }
 }
 async function upsertCommunitySummary(driver, communityId, summary, memberCount, embedding) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     await session.run(
       `MERGE (c:GmCommunity {id: $id})
@@ -596,7 +596,7 @@ async function upsertCommunitySummary(driver, communityId, summary, memberCount,
   }
 }
 async function pruneCommunitySummaries(driver) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     await session.run(
       `MATCH (c:GmCommunity)
@@ -610,7 +610,7 @@ async function pruneCommunitySummaries(driver) {
   }
 }
 async function communityRepresentatives(driver, communityIds) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     const result = await session.run(
       `MATCH (n:Task|Skill|Event {status: 'active'})
@@ -625,7 +625,7 @@ async function communityRepresentatives(driver, communityIds) {
   }
 }
 async function communityVectorSearch(driver, vec) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     const result = await session.run(
       `CALL db.index.vector.queryNodes('gm_community_embedding', 5, $vec)
@@ -643,7 +643,7 @@ async function communityVectorSearch(driver, vec) {
   }
 }
 async function nodesByCommunityIds(driver, communityIds, limit) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     const result = await session.run(
       `MATCH (n:Task|Skill|Event {status: 'active'})
@@ -659,7 +659,7 @@ async function nodesByCommunityIds(driver, communityIds, limit) {
   }
 }
 async function saveVector(driver, nodeId, _content, vec) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     await session.run(
       `MATCH (n:Task|Skill|Event {id: $nodeId})
@@ -674,7 +674,7 @@ async function getVectorHash(driver, _nodeId) {
   return "";
 }
 async function saveMessage(driver, msg) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     await session.run(
       `MERGE (m:GmMessage {id: $id})
@@ -697,7 +697,7 @@ async function saveMessage(driver, msg) {
   }
 }
 async function getSessionMessages(driver, sessionKey, limit) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     const result = await session.run(
       `MATCH (m:GmMessage {sessionKey: $sessionKey})
@@ -5357,7 +5357,7 @@ async function personalizedPageRank(driver, seedIds, candidateIds, cfg) {
   if (!seedIds.length || !candidateIds.length) {
     return { scores: /* @__PURE__ */ new Map() };
   }
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     const existingTypes = await getExistingRelTypes(session);
     if (existingTypes.length === 0) {
@@ -5427,7 +5427,7 @@ async function runPPR(session, graphName, seedIds, candidateIds, cfg) {
   return { scores };
 }
 async function computeGlobalPageRank(driver, cfg) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     const countResult = await session.run("MATCH (n:Task|Skill|Event {status: 'active'}) RETURN count(n) AS c");
     const nodeCount = countResult.records[0]?.get("c")?.toNumber?.() ?? 0;
@@ -5810,7 +5810,7 @@ function buildRelProjection2(existingTypes) {
   return `{${parts.join(", ")}}`;
 }
 async function detectCommunities(driver, maxIter = 50) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   const graphName = `gm-community-${Date.now()}`;
   try {
     const countResult = await session.run(
@@ -5878,7 +5878,7 @@ async function detectCommunities(driver, maxIter = 50) {
   }
 }
 async function getCommunityPeers(driver, nodeId, limit = 5) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     const result = await session.run(`
       MATCH (n:Task|Skill|Event {id: $nodeId, status: 'active'})
@@ -5906,7 +5906,7 @@ async function summarizeCommunities(driver, communities, llm, embedFn) {
   let generated = 0;
   for (const [communityId, memberIds] of communities) {
     if (memberIds.length === 0) continue;
-    const session = getSession(driver);
+    const session = getSession2(driver);
     let members;
     try {
       const result = await session.run(`
@@ -5952,7 +5952,7 @@ ${members.map((m) => m.name).join(", ")}`;
 init_db();
 init_store();
 async function detectDuplicates(driver, cfg) {
-  const session = getSession(driver);
+  const session = getSession2(driver);
   try {
     const result = await session.run(
       `MATCH (a:Task|Skill|Event {status: 'active'})

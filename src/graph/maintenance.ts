@@ -12,6 +12,41 @@ import type { EmbedFn } from "../engine/embed.ts";
 import { computeGlobalPageRank, type GlobalPageRankResult } from "./pagerank.ts";
 import { detectCommunities, summarizeCommunities, type CommunityResult } from "./community.ts";
 import { dedup, type DedupResult } from "./dedup.ts";
+export interface RepairEdgeResult {
+  relatesToCreated: number;
+  messageCount: number;
+}
+
+/**
+ * 从 MENTIONS 关系推导 RELATES_TO 共现边
+ *
+ * 同一消息同时 MENTIONS 了两个实体 → 实体间建 RELATES_TO。
+ * 一条消息提到 N 个实体 => C(N,2) 条边。
+ * 用 MERGE 避免重复。
+ */
+async function deriveRelatesFromMentions(
+  driver: Driver,
+): Promise<RepairEdgeResult> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(
+      `MATCH (msg:ConversationMessage)-[:MENTIONS]->(a:Task|Skill|Event {status: active})
+       MATCH (msg)-[:MENTIONS]->(b:Task|Skill|Event {status: active})
+       WHERE a.id < b.id
+       WITH DISTINCT a, b
+       MERGE (a)-[r:RELATES_TO]->(b)
+       SET r.weight = COALESCE(r.weight, 0) + 1,
+           r.updatedAt = timestamp()
+       WITH count(DISTINCT r) AS created
+       RETURN created`
+    );
+    const created = result.records[0]?.get("created")?.toNumber?.() ?? 0;
+    console.log(`[graph-memory-pro] repair relates_to: ${created} edges created`);
+    return { relatesToCreated: created, messageCount: 0 };
+  } finally {
+    await session.close();
+  }
+}
 
 export interface MaintenanceResult {
   dedup: DedupResult;
