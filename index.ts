@@ -28,7 +28,8 @@ import type { EmbedFn } from "./src/engine/embed.ts";
 import { createCompleteFn } from "./src/engine/llm.ts";
 import { createEmbedFn } from "./src/engine/embed.ts";
 import { initDriver, closeDriver, verifyWithRetry, getDriver } from "./src/store/db.ts";
-import { ensureSchema, getTopNodes, getNodeCount, getEdgeCount, getSessionMessages, searchNodes, getEdgesForNodes, getSession } from "./src/store/store.ts";
+import { ensureSchema, getTopNodes, getNodeCount, getEdgeCount, getSessionMessages, searchNodes, getEdgesForNodes } from "./src/store/store.ts";
+import { getSession } from "./src/store/db.ts";
 import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
 import { assembleContext } from "./src/format/assemble.ts";
@@ -456,9 +457,10 @@ export { Extractor, extractTriplets } from "./src/extractor/extract.ts";
 
 // ─── Additional re-exports for lcm-graph-extra (Layer 1 fix) ────
 export { personalizedPageRank, computeGlobalPageRank } from "./src/graph/pagerank.js";
-export { communityDetection, summarizeCommunities, getVectorHash, getCommunityPeers } from "./src/graph/community.js";
-export { deduplicateNodes } from "./src/graph/dedup.js";
-export type { GmConfig, NodeType, EdgeType, NodeStatus, GmNode, GmEdge, RecallResult, MaintenanceConfig } from "./src/types.js";
+export { detectCommunities, summarizeCommunities, getCommunityPeers } from "./src/graph/community.js";
+export { getVectorHash } from "./src/store/store.js";
+export { dedup } from "./src/graph/dedup.js";
+export type { GmConfig, NodeType, EdgeType, NodeStatus, GmNode, GmEdge, RecallResult, EmbeddingConfig } from "./src/types.js";
 export { createEmbedFn } from "./src/engine/embed.js";
 export { setTimingEnabled, printAllDistributions, resetAllDistributions, LatencyDistribution } from "./src/timing.js";
 export type { EmbedFn } from "./src/engine/embed.js";

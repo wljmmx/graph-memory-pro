@@ -1,9 +1,12 @@
 /**
  * graph-memory-pro — Embedding 引擎（原生 fetch，无外部依赖）
  *
- * 替代原版 dynamic import("openai")，使用 fetch 直接访问
- * OpenAI-compatible embedding API
- * 所有凭据只从配置对象读取，不做 process.env 回退
+ * 使用 Ollama 原生 API: baseURL/api/embed
+ * 返回格式: data.embeddings[0]
+ * 
+ * 处理逻辑:
+ *   1. 如果 baseURL 包含 /v1 → 删除 /v1，使用 Ollama 原生 API
+ *   2. 如果不包含 /v1 → 直接使用 Ollama 原生 API
  */
 
 import type { EmbeddingConfig } from "../types.ts";
@@ -16,13 +19,17 @@ const RETRY_DELAYS = [1000, 3000, 5000];
 
 /**
  * 内置 embedding 引擎
- * 使用 fetch 直接调用 OpenAI-compatible API
+ * 统一使用 Ollama 原生 API
  */
 export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
   const apiKey = config.apiKey || "";
-  const baseURL = (config.baseURL || "http://192.168.50.5:11434/v1").replace(/\/+$/, "");
+  let baseURL = (config.baseURL || "http://192.168.50.5:11434").replace(/\/+$/, "");
+  
+  if (baseURL.endsWith("/v1")) {
+    baseURL = baseURL.slice(0, -3);
+  }
+  
   const model = config.model || "Qwen3.5-Embedding-0.6B-GGUF";
-  const dimensions = config.dimensions ?? 1024;
 
   return async function embed(text: string): Promise<number[]> {
     const lastErr: Error[] = [];
@@ -30,18 +37,15 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
 
     for (let attempt = 0; attempt <= delays.length; attempt++) {
       try {
-        const response = await fetch(`${baseURL}/embeddings`, {
+        const response = await fetch(`${baseURL}/api/embed`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "Authorization": `Bearer ${apiKey}`,
           },
           body: JSON.stringify({
-            input: text,
             model,
+            prompt: text,
             ...(config.options ? { options: config.options } : {}),
-            ...(config.keepAlive ? { keep_alive: config.keepAlive } : {}),
-            dimensions,
           }),
           signal: AbortSignal.timeout(30_000),
         });
@@ -51,15 +55,13 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
           throw new Error(`Embedding API ${response.status}: ${body.slice(0, 200)}`);
         }
 
-        const data = await response.json() as {
-          data: Array<{ embedding: number[] }>;
-        };
+        const data = await response.json() as any;
 
-        if (!data.data?.[0]?.embedding) {
-          throw new Error("Embedding API returned no embedding data");
+        if (!data.embeddings?.[0]) {
+          throw new Error("Ollama embedding API returned no embedding data");
         }
 
-        return data.data[0].embedding;
+        return data.embeddings[0];
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
         lastErr.push(error);
