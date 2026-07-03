@@ -45,22 +45,22 @@ export async function ensureSchema(driver: Driver, dimension: number = 1024): Pr
     // FULLTEXT 索引：用于全文搜索（替代 CONTAINS）
     try {
       await session.run(
-        `CREATE FULLTEXT INDEX task_search IF NOT EXISTS FOR (n:Task) ON EACH [n.name, n.description, n.content]`
+        `CREATE FULLTEXT INDEX task_search IF NOT EXISTS FOR (n:Task) ON EACH [n.name, n.description, n.content] OPTIONS { analyzer: "cjk" }`
       );
     } catch { /* may exist */ }
     try {
       await session.run(
-        `CREATE FULLTEXT INDEX skill_search IF NOT EXISTS FOR (n:Skill) ON EACH [n.name, n.description, n.content]`
+        `CREATE FULLTEXT INDEX skill_search IF NOT EXISTS FOR (n:Skill) ON EACH [n.name, n.description, n.content] OPTIONS { analyzer: "cjk" }`
       );
     } catch { /* may exist */ }
     try {
       await session.run(
-        `CREATE FULLTEXT INDEX event_search IF NOT EXISTS FOR (n:Event) ON EACH [n.name, n.description, n.content]`
+        `CREATE FULLTEXT INDEX event_search IF NOT EXISTS FOR (n:Event) ON EACH [n.name, n.description, n.content] OPTIONS { analyzer: "cjk" }`
       );
     } catch { /* may exist */ }
     try {
       await session.run(
-        `CREATE FULLTEXT INDEX conversation_search IF NOT EXISTS FOR (n:ConversationMessage) ON EACH [n.content]`
+        `CREATE FULLTEXT INDEX conversation_search IF NOT EXISTS FOR (n:ConversationMessage) ON EACH [n.content] OPTIONS { analyzer: "cjk" }`
       );
     } catch { /* may exist */ }
 
