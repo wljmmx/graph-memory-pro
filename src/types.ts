@@ -123,6 +123,57 @@ export interface GmConfig {
     /** 裁判冷启动阈值（默认 50） */
     judgeWarmupFeedbacks?: number;
   };
+
+  // ── v2.1.2 第三批 在线学习 + 可进化嵌入 + 重要性评分 ────────────
+
+  /** L-1 关联矩阵 M（默认关闭，需显式启用） */
+  associationMatrix?: {
+    enabled?: boolean;
+    /** 学习率 η（默认 0.01） */
+    learningRate?: number;
+    /** Momentum 系数（默认 0.9） */
+    momentum?: number;
+    /** Adam β1（默认 0.9） */
+    adamBeta1?: number;
+    /** Adam β2（默认 0.999） */
+    adamBeta2?: number;
+    /** M 矩阵冷启动阈值（覆盖 warmup.warmupFeedbacks） */
+    warmupFeedbacks?: number;
+  };
+
+  /** R-3 边际效用奖励（默认开启，仅在 L-1 启用时生效） */
+  marginalUtility?: {
+    enabled?: boolean;
+    /** 语义邻域大小（默认 5，从历史 query 中找最相似 N 个） */
+    neighborhoodSize?: number;
+    /** 邻域整体需达到的最小提升（低于则放弃 M 更新，防过拟合） */
+    minImprovement?: number;
+  };
+
+  /** R-4 可进化嵌入（默认开启） */
+  evolvableEmbedding?: {
+    enabled?: boolean;
+    /** content 变化时触发重新嵌入（默认 true） */
+    reembedOnContentChange?: boolean;
+    /** 旧嵌入归档保留条数（默认 3，超出则丢弃最旧） */
+    archiveKeepCount?: number;
+  };
+
+  /** G-3 重要性评分（默认开启） */
+  importance?: {
+    enabled?: boolean;
+    /** 各分量权重（默认 0.3/0.3/0.2/0.2，内部自动归一化） */
+    weights?: {
+      recency?: number;
+      frequency?: number;
+      centrality?: number;
+      source?: number;
+    };
+    /** recency 衰减周期（天，默认 30） */
+    recencyDecayDays?: number;
+    /** frequency 饱和阈值（默认 10 次） */
+    frequencySaturation?: number;
+  };
 }
 
 export type NodeType = "TASK" | "SKILL" | "EVENT";
@@ -199,6 +250,17 @@ export interface GmNode {
   // ── G-4 嵌入模型版本（v2.1.2 新增）─────────────
   /** 嵌入时使用的模型名，用于检测模型迁移 */
   embeddingModel?: string;
+
+  // ── R-4 可进化嵌入（v2.1.2 第三批新增）─────────
+  /** content 的 MD5 hash，用于检测 content 是否实质变化 */
+  embeddingHash?: string;
+  /** 历史嵌入存档（content 变化时旧嵌入归档，最近的在前） */
+  embeddingHistory?: Array<{
+    embedding: number[];
+    embeddingModel?: string;
+    embeddingHash?: string;
+    archivedAt: number;
+  }>;
 }
 
 export interface GmEdge {

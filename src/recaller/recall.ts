@@ -18,6 +18,7 @@ import { personalizedPageRank } from "../graph/pagerank.ts";
 import { logPhase, isTimingEnabled, printAllDistributions, resetAllDistributions } from "../timing.ts";
 import { QueryCache } from "./query-cache.ts";
 import { JudgeManager } from "./judge.ts";
+import { AssociationMatrix } from "./association-matrix.ts";
 
 let _recallCallCount = 0;
 const REPORT_INTERVAL = 50;
@@ -28,6 +29,8 @@ export class Recaller {
   // v2.1.2 第二批：I-1 QueryCache + I-2 JudgeManager
   private queryCache: QueryCache;
   private judgeManager: JudgeManager | null = null;
+  // v2.1.2 第三批：L-1 关联矩阵 M
+  private associationMatrix: AssociationMatrix | null = null;
 
   constructor(private driver: Driver, private cfg: GmConfig) {
     this.queryCache = new QueryCache(cfg.queryCache);
@@ -45,6 +48,13 @@ export class Recaller {
   getQueryCache(): QueryCache { return this.queryCache; }
   /** 暴露 JudgeManager 给外部 */
   getJudgeManager(): JudgeManager | null { return this.judgeManager; }
+  /** 暴露 AssociationMatrix 给外部（统计/持久化） */
+  getAssociationMatrix(): AssociationMatrix | null { return this.associationMatrix; }
+
+  /**
+   * 设置关联矩阵 M（由 index.ts 在 embed 维度确定后注入）
+   */
+  setAssociationMatrix(am: AssociationMatrix): void { this.associationMatrix = am; }
 
   resetTiming(): void {
     _recallCallCount = 0;
@@ -153,12 +163,56 @@ export class Recaller {
       // 累计反馈计数（用于冷启动判断）
       this.judgeManager.incrementFeedback();
 
+      // v2.1.2 第三批 L-1 + R-3：用反馈信号更新关联矩阵 M
+      // 仅在 M 启用且 embed 可用时触发（M 训练需要 query embedding）
+      if (this.associationMatrix?.isEnabled() && this.embed) {
+        try {
+          await this.updateAssociationMatrix(query, feedback.usedNodeIds, feedback.unusedNodeIds);
+        } catch (err) {
+          if (process.env.GM_DEBUG) console.log(`[L-1] M update failed: ${err}`);
+        }
+      }
+
       if (process.env.GM_DEBUG) {
         const coldStart = this.judgeManager.isColdStart();
         console.log(`[judge] ${feedback.usedNodeIds.length}/${feedback.recalledNodeIds.length} used, cold=${coldStart}`);
       }
     } catch (err) {
       console.warn(`[graph-memory-pro] feedback persistence failed: ${err}`);
+    }
+  }
+
+  /**
+   * v2.1.2 第三批：L-1 + R-3 更新关联矩阵 M
+   *
+   * @param query 用户查询
+   * @param usedNodeIds 被使用的节点 id（正反馈）
+   * @param unusedNodeIds 未被使用的节点 id（负反馈）
+   */
+  private async updateAssociationMatrix(
+    query: string,
+    usedNodeIds: string[],
+    unusedNodeIds: string[],
+  ): Promise<void> {
+    if (!this.associationMatrix || !this.embed) return;
+
+    // 计算 query embedding（与召回时一致的嵌入）
+    const queryVec = await this.embed(query);
+    if (!queryVec.length) return;
+
+    // 计算奖励信号 ∈ [-1, 1]
+    // 简化：reward = (used - unused) / total，正负方向 + 大小由反馈比例决定
+    const total = usedNodeIds.length + unusedNodeIds.length;
+    if (total === 0) return;
+    const reward = (usedNodeIds.length - unusedNodeIds.length) / total;
+
+    // R-3 边际效用更新（内部含邻域评估 + 拒绝逻辑）
+    const result = this.associationMatrix.updateWithMarginalUtility(queryVec, reward);
+
+    if (process.env.GM_DEBUG) {
+      console.log(
+        `[L-1] M update: reward=${reward.toFixed(3)}, applied=${result.applied}, gain=${result.neighborhoodGain.toFixed(3)}`,
+      );
     }
   }
 
@@ -177,8 +231,19 @@ export class Recaller {
         logPhase("vec_embed", Date.now() - tEmbed, { dims: vec.length });
 
         if (vec.length) {
+          // v2.1.2 第三批 L-1：query_vec → M @ vec 变换
+          // 冷启动期 transform 直接返回原 vec（M = I）
+          let searchVec: number[] = vec;
+          if (this.associationMatrix?.isEnabled()) {
+            const fbCount = this.judgeManager?.getFeedbackCount() ?? 0;
+            const transformed = this.associationMatrix.transform(vec, fbCount);
+            searchVec = Array.from(transformed);
+            // BatchNorm 统计更新（仅训练期）
+            this.associationMatrix.updateBatchNormStats(vec);
+          }
+
           const tVecSearch = Date.now();
-          const vecResults = await vectorSearchWithScore(this.driver, vec, limit);
+          const vecResults = await vectorSearchWithScore(this.driver, searchVec, limit);
           logPhase("vec_search", Date.now() - tVecSearch, { nodes: vecResults.length });
           vecNodes = vecResults.map(v => v.node).slice(0, limit);
         }
@@ -310,7 +375,10 @@ export class Recaller {
       edges.set(e.id, e);
     }
 
-    // v2.1.2 S-14: 按 stalenessScore + pagerank 综合排序（staleness 低 + pagerank 高 优先）
+    // v2.1.2 S-14 + G-3: 综合排序
+    //   - 高过时节点（stalenessScore > threshold）排到末尾
+    //   - 同 staleness 等级按 score × importanceScore × (1 - stalenessScore) 降序
+    //   - 旧版本（无 importanceScore）回退到 pagerank
     const stalenessThreshold = this.cfg?.staleness?.threshold ?? 0.7;
     nodes.sort((x, y) => {
       const sx = x.stalenessScore ?? 0;
@@ -319,8 +387,14 @@ export class Recaller {
       const xStale = sx > stalenessThreshold ? 1 : 0;
       const yStale = sy > stalenessThreshold ? 1 : 0;
       if (xStale !== yStale) return xStale - yStale;
-      // 同 staleness 等级按 pagerank 降序
-      return y.pagerank - x.pagerank;
+      // G-3: importanceScore × (1 - stalenessScore) 加权排序
+      const ix = x.importanceScore ?? 0;
+      const iy = y.importanceScore ?? 0;
+      const wx = ix * (1 - sx);
+      const wy = iy * (1 - sy);
+      // 优先 importance 加权；若均无 importanceScore → 回退 pagerank
+      if (wx === 0 && wy === 0) return y.pagerank - x.pagerank;
+      return wy - wx;
     });
 
     logPhase("merge_results", Date.now() - tMerge, { nodes: nodes.length, edges: edges.size });

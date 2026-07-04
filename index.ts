@@ -252,6 +252,36 @@ export default definePluginEntry({
       warmupFeedbacks: Type.Optional(Type.Number({ default: 100 })),
       judgeWarmupFeedbacks: Type.Optional(Type.Number({ default: 50 })),
     })),
+    // ── v2.1.2 第三批 在线学习 + 可进化嵌入 + 重要性评分 ────────
+    associationMatrix: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: false })),
+      learningRate: Type.Optional(Type.Number({ default: 0.01 })),
+      momentum: Type.Optional(Type.Number({ default: 0.9 })),
+      adamBeta1: Type.Optional(Type.Number({ default: 0.9 })),
+      adamBeta2: Type.Optional(Type.Number({ default: 0.999 })),
+      warmupFeedbacks: Type.Optional(Type.Number({ default: 100 })),
+    })),
+    marginalUtility: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      neighborhoodSize: Type.Optional(Type.Number({ default: 5 })),
+      minImprovement: Type.Optional(Type.Number({ default: 0.0 })),
+    })),
+    evolvableEmbedding: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      reembedOnContentChange: Type.Optional(Type.Boolean({ default: true })),
+      archiveKeepCount: Type.Optional(Type.Number({ default: 3 })),
+    })),
+    importance: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      weights: Type.Optional(Type.Object({
+        recency: Type.Optional(Type.Number({ default: 0.3 })),
+        frequency: Type.Optional(Type.Number({ default: 0.3 })),
+        centrality: Type.Optional(Type.Number({ default: 0.2 })),
+        source: Type.Optional(Type.Number({ default: 0.2 })),
+      })),
+      recencyDecayDays: Type.Optional(Type.Number({ default: 30 })),
+      frequencySaturation: Type.Optional(Type.Number({ default: 10 })),
+    })),
   }) as any),
   register(api: any) {
     const logger = api.logger ?? console;
@@ -307,6 +337,15 @@ export default definePluginEntry({
         const jm = new JudgeManager(_cfg.judge, _llm ?? undefined);
         _recaller.setJudgeManager(jm);
         logger?.info?.(`[graph-memory-pro] judge enabled (warmup=${_cfg.judge?.judgeWarmupFeedbacks ?? 50})`);
+      }
+
+      // v2.1.2 第三批 L-1：注入 AssociationMatrix（关联矩阵 M）
+      if (_cfg.associationMatrix?.enabled === true) {
+        const { createAssociationMatrix } = await import("./src/recaller/association-matrix.ts");
+        const amDim = resolveEmbedDimension(_cfg);
+        const am = createAssociationMatrix(amDim, _cfg);
+        _recaller.setAssociationMatrix(am);
+        logger?.info?.(`[graph-memory-pro] association-matrix enabled (dim=${amDim}, warmup=${_cfg.associationMatrix?.warmupFeedbacks ?? _cfg.warmup?.warmupFeedbacks ?? 100})`);
       }
 
       _extractor = new Extractor(driver);
@@ -568,6 +607,9 @@ export default definePluginEntry({
               }
             : null;
 
+          // v2.1.2 第三批：L-1 关联矩阵 M 统计
+          const amStats = _recaller?.getAssociationMatrix()?.getStats();
+
           const text = [
             "📊 Graph Memory Pro 统计",
             `节点总数: ${nodeCount}`,
@@ -578,6 +620,7 @@ export default definePluginEntry({
             `PageRank: ${result.pagerank.topK.length} 个节点已排序`,
             `社区: ${result.community.count} 个社区`,
             `社区摘要: ${result.communitySummaries} 个`,
+            result.importance ? `重要性评分: scanned=${result.importance.scanned}, avg=${result.importance.avgScore.toFixed(3)}` : "",
             `耗时: ${result.durationMs}ms`,
             "",
             healthReport ? "🏥 图谱健康" : "",
@@ -598,8 +641,15 @@ export default definePluginEntry({
             judgeStats ? "📋 反馈系统" : "",
             judgeStats ? `累计反馈: ${judgeStats.feedbackCount}` : "",
             judgeStats ? `冷启动期: ${judgeStats.coldStart ? "是（仅启发式规则）" : "否（已启用 LLM）"}` : "",
+            "",
+            amStats ? "🧠 关联矩阵 M (L-1)" : "",
+            amStats ? `维度: ${amStats.dim}` : "",
+            amStats ? `时间步 t: ${amStats.t}` : "",
+            amStats ? `已应用更新: ${amStats.updatesApplied}` : "",
+            amStats ? `被拒更新: ${amStats.updatesRejected} (R-3 边际效用拒绝)` : "",
+            amStats ? `历史样本: ${amStats.historySize}` : "",
           ].filter(Boolean).join("\n");
-          return { content: [{ type: "text", text }], details: { nodeCount, edgeCount, ...result, health: healthReport, cache: cacheStats, judge: judgeStats } };
+          return { content: [{ type: "text", text }], details: { nodeCount, edgeCount, ...result, health: healthReport, cache: cacheStats, judge: judgeStats, associationMatrix: amStats } };
         } catch (err: any) {
           return { content: [{ type: "text", text: `维护失败: ${err.message}` }], details: {} };
         }
@@ -709,3 +759,9 @@ export type { GmFeedback } from "./src/store/store.js";
 export { QueryCache } from "./src/recaller/query-cache.js";
 export { JudgeManager, isMatrixColdStart, getColdStartSearchWeights } from "./src/recaller/judge.js";
 export type { JudgeConfig, JudgeResult, JudgeFeedback, WarmupConfig } from "./src/recaller/judge.js";
+
+// ─── v2.1.2 第三批 在线学习 + 可进化嵌入 + 重要性评分 Re-exports ─────────
+export { AssociationMatrix, createAssociationMatrix } from "./src/recaller/association-matrix.js";
+export type { AssociationMatrixConfig, MarginalUtilityConfig } from "./src/recaller/association-matrix.js";
+export { computeImportanceScores } from "./src/graph/maintenance.js";
+export type { ImportanceConfig } from "./src/graph/maintenance.js";

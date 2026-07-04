@@ -141,7 +141,65 @@ export async function upsertNode(
   const session = getSession(driver);
   try {
     const label = typeToLabel(node.type);
+
+    // v2.1.2 第三批 R-4: 可进化嵌入
+    // 检测 content 实质变化（MD5 hash 对比），变化时：
+    //   1. 将当前 embedding 归档到 embeddingHistory 数组（保留最近 archiveKeepCount 条）
+    //   2. 清空当前 embedding，让下一次 reembed 周期重算
+    //   3. 更新 embeddingHash 为新 content 的 hash
+    const newContentHash = createHash("md5")
+      .update(`${node.name}|${node.description}|${node.content}`)
+      .digest("hex");
+
+    let evolvableApplied = false;
+    if (node.id) {
+      // 读取旧节点的 embedding/embeddingHash/embeddingHistory
+      const existing = await session.run(
+        `MATCH (n:${label} {id: $id})
+         RETURN n.embedding AS embedding,
+                n.embeddingHash AS embeddingHash,
+                n.embeddingModel AS embeddingModel,
+                n.embeddingHistory AS embeddingHistory`,
+        { id: node.id },
+      );
+      const rec = existing.records[0];
+      if (rec) {
+        const oldHash = rec.get("embeddingHash");
+        const oldEmbedding = rec.get("embedding");
+        const oldModel = rec.get("embeddingModel");
+        const oldHistory = rec.get("embeddingHistory") ?? [];
+
+        // hash 不同且旧 embedding 存在 → content 实质变化
+        if (oldHash && oldHash !== newContentHash && oldEmbedding && Array.isArray(oldEmbedding) && oldEmbedding.length > 0) {
+          // 归档旧嵌入
+          const archived = Array.isArray(oldHistory) ? [...oldHistory] : [];
+          archived.unshift({
+            embedding: oldEmbedding,
+            embeddingModel: oldModel ?? null,
+            embeddingHash: oldHash,
+            archivedAt: Date.now(),
+          });
+          // 保留最近 N 条（默认 3）
+          const keepCount = 3;
+          const trimmed = archived.slice(0, keepCount);
+
+          await session.run(
+            `MATCH (n:${label} {id: $id})
+             SET n.embeddingHistory = $history,
+                 n.embedding = null,
+                 n.embeddingHash = $newHash`,
+            { id: node.id, history: trimmed, newHash: newContentHash },
+          );
+          evolvableApplied = true;
+        }
+      }
+    }
+
     // v2.1.2: 持久化 S-1/S-3/S-13/S-14/G-4 新增字段（全部可选，向后兼容）
+    // R-4: 若 evolvable 已应用（content 变化），不覆盖 embeddingHash（保留 null）
+    //      若未应用，写入新 hash（若节点新创建，则记录初始 hash）
+    const finalEmbeddingHash = evolvableApplied ? null : newContentHash;
+
     await session.run(
       `MERGE (n:${label} {id: $id})
        SET n.name = $name,
@@ -158,7 +216,8 @@ export async function upsertNode(
            n.source = COALESCE($source, 'experience'),
            n.state = COALESCE($state, 'current'),
            n.stalenessScore = COALESCE($stalenessScore, 0.0),
-           n.importanceScore = COALESCE($importanceScore, 0.0)
+           n.importanceScore = COALESCE($importanceScore, 0.0),
+           n.embeddingHash = COALESCE($embeddingHash, n.embeddingHash)
        SET n.validTo = $validTo,
            n.supersededBy = $supersededBy,
            n.embeddingModel = $embeddingModel
@@ -184,6 +243,7 @@ export async function upsertNode(
         importanceScore: node.importanceScore ?? null,
         supersededBy: node.supersededBy ?? null,
         embeddingModel: node.embeddingModel ?? null,
+        embeddingHash: finalEmbeddingHash,
       },
     );
   } finally {
@@ -1031,6 +1091,9 @@ function recordToNode(rec: any): GmNode | null {
     stalenessScore: typeof p.stalenessScore === "number" ? p.stalenessScore : (p.stalenessScore?.toNumber?.() ?? undefined),
     importanceScore: typeof p.importanceScore === "number" ? p.importanceScore : (p.importanceScore?.toNumber?.() ?? undefined),
     embeddingModel: p.embeddingModel,
+    // v2.1.2 第三批 R-4
+    embeddingHash: p.embeddingHash,
+    embeddingHistory: Array.isArray(p.embeddingHistory) ? p.embeddingHistory : undefined,
   };
 }
 
