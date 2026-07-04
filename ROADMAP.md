@@ -116,24 +116,23 @@
                 └──────────────────┘
 ```
 
-### 补充模块 G：深度能力（v2.1.10 重新核对 13 份资料后补充）
+### 补充模块 G：深度能力（v2.1.10 重新核对 13 份资料，按性能/长期价值/用户友好度筛选）
 
-经重新核对 13 份资料，发现以下 6 项关键能力未被覆盖，补充到本版本：
+经重新核对 13 份资料并按"长期使用性能、自主进化价值、用户友好度"筛选，保留 4 项，简化 1 项，剔除 1 项（G-1 深度整合，因 LLM 成本高且与 S-4 抽象重复）：
 
-| 编号 | 方案 | 来源 | 核心机制 | 依赖 | 成本 |
-|---|---|---|---|---|---|
-| G-1 | 深度整合阶段（Memory Consolidation） | 综述+TencentDB L4+From Storage to Experience | 周期性 LLM 驱动的深度整合，比 daily maintenance 更深，跨会话语义压缩 | S-4 层次化社区 | 4-5天 |
-| G-2 | 冲突消解策略 | A-TMA 三层故障模型 | S-13/S-14 检测矛盾后，明确消解策略：时态优先 / 来源优先 / 合并 | S-13+S-14 | 2-3天 |
-| G-3 | 重要性评分（importanceScore） | 综述+Mem0 报告 | importanceScore = f(recency, frequency, centrality, source)，与 stalenessScore 互补 | S-1+S-3 | 2-3天 |
-| G-4 | 嵌入模型版本化与迁移 | EvoEmbedding 补充 | embedding 模型升级时（如 nomic → v2），全量嵌入迁移与版本化 | R-4 | 2-3天 |
-| G-5 | 图谱健康指标 | Mem0 报告 | 连通性/密度/聚类系数/孤立节点比例，监控诊断 | 当前 store.ts | 2天 |
-| G-6 | 冷启动策略 | U-Mem + 自进化文章 | M 矩阵冷启动期使用 BM25+向量混合，裁判冷启动期使用规则兜底 | L-1+I-2 | 2-3天 |
+| 编号 | 方案 | 来源 | 核心机制 | 依赖 | 成本 | 决策 |
+|---|---|---|---|---|---|---|
+| ~~G-1~~ | ~~深度整合阶段~~ | ~~综述+TencentDB L4~~ | ~~周期性 LLM 反思整合~~ | ~~S-4~~ | ~~4-5天~~ | ❌ 剔除：LLM 成本高，与 S-4 抽象重复，长期累积抽象节点污染图谱 |
+| G-2 | 冲突消解策略 | A-TMA 三层故障模型 | S-13/S-14 检测矛盾后，纯规则消解：时态优先/来源优先/合并 | S-13+S-14 | 2-3天 | ✅ 保留：S-13/S-14 的逻辑闭环，纯规则无 LLM 成本 |
+| G-3 | 重要性评分（importanceScore） | 综述+Mem0 报告 | importanceScore = f(recency, frequency, centrality, source)，与 stalenessScore 互补 | S-1+S-3 | 2-3天 | ✅ 保留：纯计算无 LLM 成本，召回质量直接受益，R-1 自主调优的基础信号 |
+| G-4 | 嵌入模型版本化（简化版） | EvoEmbedding 补充 | 仅记录 embeddingModel 字段，模型变更时调 reembed.ts | R-4 | 1天 | ⚠️ 简化：剔除双轨运行/版本化历史，仅加字段+复用 reembed |
+| G-5 | 图谱健康指标 | Mem0 报告 | 连通性/密度/聚类系数/孤立节点比例，监控诊断 | 当前 store.ts | 2天 | ✅ 保留：GDS 单次查询性能影响可忽略，运维刚需 |
+| G-6 | 冷启动策略 | U-Mem + 自进化文章 | M 矩阵冷启动期用 BM25+向量混合，裁判冷启动期用规则兜底 | L-1+I-2 | 2-3天 | ✅ 保留：解决冷启动期召回慢/不准问题，无 LLM 成本 |
 
-**选型理由**：
-- **G-1 深度整合**：3 份资料共同指向的能力。当前 maintenance 只做浅层（dedup+PageRank+community），缺周期性的深度 LLM 反思整合
-- **G-2 冲突消解**：S-13/S-14 检测矛盾但不消解，是逻辑断点，必须补
-- **G-3 重要性评分**：与 stalenessScore 互补（一个看新鲜度，一个看价值），缺一不可
-- **G-4/G-5/G-6**：运维和启动期必要能力
+**筛选原则**：
+- **保留**：纯计算/纯规则，无 LLM 成本，长期使用性能稳定
+- **简化**：剔除过度工程化部分，保留核心价值
+- **剔除**：LLM 成本高或与现有机制重复，长期使用反而增加图谱噪声
 
 ### 依赖关系
 
@@ -147,13 +146,13 @@ I-2 (裁判反馈)     ──→  L-1 (M 矩阵)    ──→  R-3 (边际效用
                      ──→  L-3 (边权重调整) ──→  R-4 (可进化嵌入)     ──→  G-4 (嵌入迁移)
                      ──→  L-4 (反向记忆项)  ──→  R-1 (自主调优)
 
-S-4 (层次化社区)    ──→  G-1 (深度整合)  ──→  独立
+S-4 (层次化社区)    ──→  独立
 
 S-5 (因果关系)      ──→  独立
 
 G-5 (图谱健康)      ──→  独立，监控基础
 
-S-10 (Benchmark)   ──→  验证 R-1/R-3/R-4/L-3/L-4/G-1/G-2/G-3 的效果
+S-10 (Benchmark)   ──→  验证 R-1/R-3/R-4/L-3/L-4/G-2/G-3 的效果
 ```
 
 ---
@@ -418,25 +417,13 @@ interface EvolveActionSpace {
 
 ---
 
-### G-1：深度整合阶段（Memory Consolidation）
+### G-1：~~深度整合阶段~~（已剔除）
 
-**目标**：周期性 LLM 驱动的深度整合，比 daily maintenance 更深，跨会话语义压缩。
-
-**实现要点**：
-- 区分两种维护节奏：
-  - **浅维护**（每次对话后）：当前 maintenance.ts 的 dedup+PageRank+community
-  - **深整合**（每周/每月或积累 100 节点后）：LLM 驱动的语义整合
-- 深整合阶段：
-  1. 选定一个层次化社区（S-4 输出）
-  2. LLM 阅读该社区所有节点的 content
-  3. 提取共同模式/抽象总结
-  4. 创建抽象节点（如"X 类问题的通用解法"）
-  5. 将社区成员与抽象节点建立 CONTAINS 关系
-- 借鉴 TencentDB L4 跨会话沉淀 + From Storage to Experience 的 Reflection 阶段
-
-**接入点**：[src/graph/maintenance.ts](file:///workspace/src/graph/maintenance.ts) 新增 deepConsolidate 函数、[src/graph/community.ts](file:///workspace/src/graph/community.ts) 社区遍历
-
-**成本**：4-5 天
+**剔除原因**：
+1. **LLM 成本高**：每个社区都需要一次 LLM 调用做反思整合
+2. **与 S-4 抽象重复**：S-4 层次化社区已提供抽象层，再叠加 LLM 反思属于过度抽象
+3. **污染图谱**：长期使用累积大量"抽象节点"，反而增加召回噪声
+4. **收益不确定**：抽象节点对召回质量提升无直接证据
 
 ---
 
@@ -496,20 +483,19 @@ importanceScore = 0.3 × recency + 0.3 × frequency + 0.2 × centrality + 0.2 ×
 
 ---
 
-### G-4：嵌入模型版本化与迁移
+### G-4：嵌入模型版本化（简化版）
 
-**目标**：R-4 处理内容变化的嵌入演化，本任务处理**模型升级**时的全量迁移。
+**目标**：嵌入模型升级时（如 nomic → v2），能识别并触发迁移。
 
-**实现要点**：
-- 嵌入带 `embeddingModel` 和 `embeddingVersion` 字段
-- 配置变更时检测：当前模型 vs 节点存储的 embeddingModel
-- 不一致时触发批量迁移（复用 reembed.ts）
-- 旧嵌入存档（embeddingHistory，保留 N 版）
-- 迁移期间双轨运行：新查询用新嵌入，未迁移节点用旧嵌入
+**简化方案**（剔除原 G-4 的双轨运行/版本化历史/迁移检测）：
+- 仅在节点上添加 `embeddingModel` 字段（存储嵌入时的模型名）
+- 配置变更时，对比配置的 model 与节点存储的 embeddingModel
+- 不一致时，调用现有 `reembed.ts` 全量重嵌入
+- 无需双轨运行：迁移期间直接重嵌入，旧嵌入被覆盖
 
-**接入点**：[src/types.ts](file:///workspace/src/types.ts) 新增 embeddingModel/embeddingVersion、[src/graph/reembed.ts](file:///workspace/src/graph/reembed.ts) 迁移逻辑、[src/store/store.ts](file:///workspace/src/store/store.ts) 双轨查询
+**接入点**：[src/types.ts](file:///workspace/src/types.ts) 新增 embeddingModel 字段、[src/graph/reembed.ts](file:///workspace/src/graph/reembed.ts) 检测逻辑
 
-**成本**：2-3 天
+**成本**：1 天
 
 ---
 
@@ -595,18 +581,18 @@ G-3 (重要性评分，与 L-2 协同)
 
 **产出**：M 矩阵 + 边际效用奖励 + 可进化嵌入 + 重要性评分
 
-### 第四批：结构升级 + 冲突消解 + 嵌入迁移（依赖第一/二/三批）
+### 第四批：结构升级 + 冲突消解 + 嵌入版本（依赖第一/二/三批）
 
 ```
 S-13 ──→ S-2 (软替换，依赖 S-13)
-S-4 (层次化社区，独立)  ──→  G-1 (深度整合，依赖 S-4)
+S-4 (层次化社区，独立)
 S-13 + S-14 ──→  G-2 (冲突消解，依赖状态+过时)
-R-4 ──→  G-4 (嵌入迁移，依赖 R-4)
+R-4 ──→  G-4 (嵌入版本字段，依赖 R-4)
 L-3 (边权重调整，依赖 I-2)
 L-4 (反向记忆项，依赖 I-2 + L-2)
 ```
 
-**产出**：层次化社区 + 软替换 + 边权重 + 反向记忆 + 深度整合 + 冲突消解 + 嵌入迁移
+**产出**：层次化社区 + 软替换 + 边权重 + 反向记忆 + 冲突消解 + 嵌入版本字段
 
 ### 第五批：验证闭环（依赖前面所有）
 
@@ -724,9 +710,7 @@ S-10 ──→  R-1
 
           "consolidation": {
             "enabled": false,
-            "interval": "weekly",
-            "minNodesThreshold": 100,
-            "llmDriven": true
+            "note": "G-1 已剔除，深度整合由 S-4 层次化社区 + G-3 重要性评分覆盖"
           },
 
           "conflictResolution": {
@@ -747,8 +731,7 @@ S-10 ──→  R-1
 
           "embeddingMigration": {
             "enabled": false,
-            "keepHistoryVersions": 5,
-            "dualTrackDuringMigration": true
+            "note": "简化版：仅加 embeddingModel 字段，模型变更时调 reembed.ts"
           },
 
           "graphHealth": {
@@ -877,6 +860,6 @@ S-10 ──→  R-1
 - **T1 核心方案**：自主调优 + 边际效用奖励 + 可进化嵌入 + Benchmark（4 项）
 - **T2 质量方案**：Schema 升级（时态/来源/状态/过时）（3 项）
 - **T3 引擎扩展**：层次化社区 + 软替换 + 因果关系 + 边权重 + 反向记忆（5 项）
-- **G 深度能力**：深度整合 + 冲突消解 + 重要性评分 + 嵌入迁移 + 图谱健康 + 冷启动（6 项）
-- **编排层**：8 项由 lcm-graph-extra 负责，详见 [ROADMAP-lcm-graph-extra.md](file:///workspace/ROADMAP-lcm-graph-extra.md)
-- **预计实施周期**：5 批次，约 65-85 天
+- **G 深度能力**：冲突消解 + 重要性评分 + 嵌入版本（简化）+ 图谱健康 + 冷启动（5 项，G-1 深度整合已剔除）
+- **编排层**：12 项由 lcm-graph-extra 负责（G-7/G-12 已剔除，G-8 已简化），详见 [ROADMAP-lcm-graph-extra.md](file:///workspace/ROADMAP-lcm-graph-extra.md)
+- **预计实施周期**：5 批次，约 60-75 天
