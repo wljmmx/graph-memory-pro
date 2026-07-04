@@ -122,6 +122,7 @@ async function extractInBackground(
               validatedCount: 0,
               createdAt: now,
               updatedAt: now,
+              embeddingModel: _cfg?.embedding?.model,
             });
           } catch (e) {
             if (process.env.GM_DEBUG) logger?.debug?.(`  [graph-memory-pro] upsertNode failed: ${e}`);
@@ -341,8 +342,11 @@ export default definePluginEntry({
       }
       const pluginConfig = eventCfg as GmConfig;
 
+      // v2.2.0 fix: spread pluginConfig 保留全部 v2.1.2 扩展字段
+      // 之前手动列举只复制了 13 个基础字段，导致 judge/associationMatrix 等
+      // 全部 v2.1.2 配置被静默丢弃（judge 永远启用，associationMatrix 永远禁用）
       _cfg = {
-        neo4j: pluginConfig.neo4j,
+        ...pluginConfig,
         compactTurnCount: pluginConfig.compactTurnCount ?? 6,
         recallMaxNodes: pluginConfig.recallMaxNodes ?? 6,
         recallMaxDepth: pluginConfig.recallMaxDepth ?? 2,
@@ -350,9 +354,6 @@ export default definePluginEntry({
         dedupThreshold: pluginConfig.dedupThreshold ?? 0.90,
         pagerankDamping: pluginConfig.pagerankDamping ?? 0.85,
         pagerankIterations: pluginConfig.pagerankIterations ?? 20,
-        llm: pluginConfig.llm,
-        embedding: pluginConfig.embedding,
-        timing: pluginConfig.timing,
       };
 
       // 1. 连接 Neo4j
@@ -617,6 +618,7 @@ export default definePluginEntry({
             validatedCount: 0,
             createdAt: now,
             updatedAt: now,
+            embeddingModel: _cfg?.embedding?.model,
           });
           return { content: [{ type: "text", text: `已记录知识节点: ${id}` }], details: { id } };
         } catch (err: any) {
@@ -909,7 +911,7 @@ export { Extractor, extractTriplets } from "./src/extractor/extract.ts";
 // ─── Additional re-exports for lcm-graph-extra (Layer 1 fix) ────
 export { personalizedPageRank, computeGlobalPageRank } from "./src/graph/pagerank.js";
 export { detectCommunities, summarizeCommunities, getCommunityPeers } from "./src/graph/community.js";
-export { getVectorHash } from "./src/store/store.js";
+export { getVectorHash, computeEmbeddingHash } from "./src/store/store.js";
 export { dedup } from "./src/graph/dedup.js";
 export type { GmConfig, NodeType, EdgeType, NodeStatus, GmNode, GmEdge, RecallResult, EmbeddingConfig } from "./src/types.js";
 export { createEmbedFn } from "./src/engine/embed.js";

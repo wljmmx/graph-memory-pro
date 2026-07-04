@@ -1,6 +1,6 @@
 import type { Driver } from "neo4j-driver";
 import type { EmbedFn } from "../engine/embed.ts";
-import { createHash } from "node:crypto";
+import { computeEmbeddingHash } from "../store/store.ts";
 
 export interface ReEmbedResult {
   totalScanned: number;
@@ -63,16 +63,14 @@ export async function reEmbedNodes(
 
             const vec = await embedFn(text);
             if (vec && vec.length > 0) {
-              // v2.1.2 G-4: 重嵌入时记录 embeddingModel
-              // 注意：embeddingHash 必须与 store.ts upsertNode 的格式一致
-              // （md5(name|description|content) 全量，非截断），否则会触发误归档
+              // v2.2.0 fix: embeddingHash 统一使用 computeEmbeddingHash (md5(name|desc|content))
               await session.run(
                 "MATCH (n:Task|Skill|Event {id: $nodeId})" +
                 " SET n.embedding = $vec, n.embeddingHash = $hash, n.embeddingModel = $model",
                 {
                   nodeId,
                   vec,
-                  hash: createHash("md5").update(`${name}|${desc}|${content}`).digest("hex"),
+                  hash: computeEmbeddingHash(name, desc, content),
                   model: embeddingModel ?? null,
                 },
               );

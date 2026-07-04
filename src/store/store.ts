@@ -10,6 +10,17 @@ import { createHash } from "crypto";
 import type { GmNode, GmEdge, GmMessage, NodeType, EdgeType, CommunitySummary } from "../types.ts";
 import { getSession } from "./db.ts";
 
+// ─── 共享工具 ───────────────────────────────────────────────
+
+/**
+ * 计算 embedding 一致性 hash（统一格式，所有路径共用）
+ * 格式: md5(name|description|content) 全量，pipe 分隔
+ * 用于检测 content 是否实质变化，避免 R-4 可进化嵌入误触发
+ */
+export function computeEmbeddingHash(name: string, description: string, content: string): string {
+  return createHash("md5").update(`${name}|${description}|${content}`).digest("hex");
+}
+
 // ─── Schema 初始化 ──────────────────────────────────────────
 
 export async function ensureSchema(driver: Driver, dimension: number = 1024): Promise<void> {
@@ -147,9 +158,7 @@ export async function upsertNode(
     //   1. 将当前 embedding 归档到 embeddingHistory 数组（保留最近 archiveKeepCount 条）
     //   2. 清空当前 embedding，让下一次 reembed 周期重算
     //   3. 更新 embeddingHash 为新 content 的 hash
-    const newContentHash = createHash("md5")
-      .update(`${node.name}|${node.description}|${node.content}`)
-      .digest("hex");
+    const newContentHash = computeEmbeddingHash(node.name, node.description, node.content);
 
     let evolvableApplied = false;
     if (node.id) {
@@ -947,17 +956,18 @@ export async function nodesByCommunityIds(
 export async function saveVector(
   driver: Driver,
   nodeId: string,
-  content: string,
   vec: number[],
+  hash: string,
+  embeddingModel?: string,
 ): Promise<void> {
-  const hash = createHash("md5").update(content).digest("hex");
   const session = getSession(driver);
   try {
     await session.run(
       `MATCH (n:Task|Skill|Event {id: $nodeId})
        SET n.embedding = $vec,
-           n.embeddingHash = $hash`,
-      { nodeId, vec, hash },
+           n.embeddingHash = $hash,
+           n.embeddingModel = $model`,
+      { nodeId, vec, hash, model: embeddingModel ?? null },
     );
   } finally {
     await session.close();

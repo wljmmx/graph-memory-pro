@@ -10,7 +10,7 @@ import {
   searchNodes, vectorSearchWithScore,
   graphWalk, communityRepresentatives,
   communityVectorSearch, nodesByCommunityIds,
-  saveVector, getVectorHash,
+  saveVector, getVectorHash, computeEmbeddingHash,
   upsertFeedback, getFeedbackCount,
 } from "../store/store.ts";
 import { getCommunityPeers } from "../graph/community.ts";
@@ -407,19 +407,20 @@ export class Recaller {
 
   async syncEmbed(node: GmNode): Promise<void> {
     if (!this.embed) return;
-    // 构造实际用于嵌入的文本
-    const text = node.name + ": " + node.description + "\n" + node.content.slice(0, 500);
-    // 基于嵌入文本计算 hash，确保与 saveVector 一致
-    const hash = createHash("md5").update(text).digest("hex");
+    // v2.2.0 fix: 使用统一的 computeEmbeddingHash 格式 (md5(name|desc|content))
+    // 之前单独用 md5(text) 与 upsertNode/reEmbedNodes 不一致，导致 R-4 误触发
+    const hash = computeEmbeddingHash(node.name, node.description, node.content);
     const existingHash = await getVectorHash(this.driver, node.id);
     if (existingHash === hash) return;
     // 跳过已有 embedding 且 hash 匹配的节点，避免冗余查询
     if (node.embedding && Array.isArray(node.embedding) && node.embedding.length > 0 && existingHash === hash) return;
     try {
       const tSync = Date.now();
+      // 嵌入文本使用截断格式（与 reEmbedNodes 一致），但 hash 使用全量格式
+      const text = node.name + ": " + node.description + "\n" + node.content.slice(0, 500);
       const vec = await this.embed(text);
       logPhase("vec_embed", Date.now() - tSync, { context: "syncEmbed" });
-      if (vec.length) await saveVector(this.driver, node.id, text, vec);
+      if (vec.length) await saveVector(this.driver, node.id, vec, hash, node.embeddingModel);
     } catch {}
   }
 }

@@ -23,7 +23,7 @@ import { loadAllDatasets, getBuiltinSampleDataset } from "./datasets.ts";
 import { Extractor } from "../extractor/extract.ts";
 import type { CompleteFn } from "../engine/llm.ts";
 import type { EmbedFn } from "../engine/embed.ts";
-import { upsertNode, upsertEdge, saveVector } from "../store/store.ts";
+import { upsertNode, upsertEdge, saveVector, computeEmbeddingHash } from "../store/store.ts";
 
 export interface BenchmarkOptions {
   /** 指定运行的数据集（"all" 或具体名称数组） */
@@ -236,7 +236,8 @@ async function buildGraphFromConversation(
           const text = `${enode.name}: ${enode.description}\n${enode.content.slice(0, 500)}`;
           const vec = await embedFn(text);
           if (vec && vec.length > 0) {
-            await saveVector(driver, id, text, vec);
+            const hash = computeEmbeddingHash(enode.name, enode.description, enode.content);
+            await saveVector(driver, id, vec, hash/* embeddingModel=unknown in benchmark */);
           }
         } catch {
           // embedding 失败不阻塞建图
