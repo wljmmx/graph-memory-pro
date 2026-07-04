@@ -2,16 +2,16 @@
   "id": "graph-memory-pro",
   "name": "Graph Memory Pro",
   "version": "2.2.0",
-  "description": "Neo4j 知识图谱记忆引擎：三元组提取 + GDS 图算法 + 向量索引 + 双路径召回。无槽位插件，通过 registerMemoryCorpusSupplement 暴露给 memory-core，工具 + 后台服务模式运行。",
+  "description": "Neo4j \u77e5\u8bc6\u56fe\u8c31\u8bb0\u5fc6\u5f15\u64ce\uff1a\u4e09\u5143\u7ec4\u63d0\u53d6 + GDS \u56fe\u7b97\u6cd5 + \u5411\u91cf\u7d22\u5f15 + \u53cc\u8def\u5f84\u53ec\u56de\u3002\u65e0\u69fd\u4f4d\u63d2\u4ef6\uff0c\u901a\u8fc7 registerMemoryCorpusSupplement \u66b4\u9732\u7ed9 memory-core\uff0c\u5de5\u5177 + \u540e\u53f0\u670d\u52a1\u6a21\u5f0f\u8fd0\u884c\u3002",
   "author": "Ananas <Wywelljob@gmail.com>",
   "license": "MIT",
   "uiHints": {
     "neo4j": {
-      "label": "Neo4j 数据库连接",
-      "help": "配置 Neo4j 图数据库连接参数"
+      "label": "Neo4j \u6570\u636e\u5e93\u8fde\u63a5",
+      "help": "\u914d\u7f6e Neo4j \u56fe\u6570\u636e\u5e93\u8fde\u63a5\u53c2\u6570"
     },
     "neo4j.password": {
-      "label": "Neo4j 密码",
+      "label": "Neo4j \u5bc6\u7801",
       "sensitive": true
     },
     "llm.apiKey": {
@@ -21,6 +21,119 @@
     "embedding.apiKey": {
       "label": "Embedding API Key",
       "sensitive": true
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "neo4j": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "uri": {
+            "type": "string",
+            "default": "bolt://localhost:7687"
+          },
+          "user": {
+            "type": "string",
+            "default": "neo4j"
+          },
+          "password": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "uri",
+          "user",
+          "password"
+        ]
+      },
+      "compactTurnCount": {
+        "type": "integer",
+        "default": 6,
+        "minimum": 1
+      },
+      "recallMaxNodes": {
+        "type": "integer",
+        "default": 6,
+        "minimum": 1
+      },
+      "recallMaxDepth": {
+        "type": "integer",
+        "default": 2,
+        "minimum": 1
+      },
+      "freshTailCount": {
+        "type": "integer",
+        "default": 10,
+        "minimum": 0
+      },
+      "dedupThreshold": {
+        "type": "number",
+        "default": 0.9,
+        "minimum": 0,
+        "maximum": 1
+      },
+      "pagerankDamping": {
+        "type": "number",
+        "default": 0.85,
+        "minimum": 0,
+        "maximum": 1
+      },
+      "pagerankIterations": {
+        "type": "integer",
+        "default": 20,
+        "minimum": 1
+      },
+      "timing": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "reportEveryN": {
+            "type": "integer",
+            "default": 10,
+            "minimum": 1
+          }
+        }
+      },
+      "llm": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "baseURL": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          }
+        }
+      },
+      "embedding": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "baseURL": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "keepAlive": {
+            "type": "string"
+          },
+          "dimensions": {
+            "type": "integer"
+          },
+          "apiKey": {
+            "type": "string"
+          }
+        }
+      }
     }
   }
 }
