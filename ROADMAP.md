@@ -1,13 +1,15 @@
 # Graph Memory Pro 演进路线图
 
 > 版本：2.1.10
-> 基于 Graph-based Agent Memory 论文（arxiv 2602.05665）、自进化记忆系统实践文章、TencentDB Agent Memory 开源项目三方资料的综合规划
+> 模块定位：**记忆长期管理模块**（记忆提取/存储/检索/衰减/合并/长期沉淀/质量优化/自主进化）
+> 压缩、上下文管理、prompt 组装由宿主/其他模块处理，不在本规划范围
+> 基于 Graph-based Agent Memory 论文、自进化记忆系统实践文章、TencentDB Agent Memory 项目、RL4MEM 自主进化记忆前沿论文（2026）四方资料的综合规划
 
 ---
 
 ## 一、背景与思路来源
 
-本规划融合三份参考资料的设计思路：
+本规划融合四份参考资料的设计思路：
 
 ### 1. Graph-based Agent Memory 论文（结构维度）
 
@@ -35,55 +37,56 @@
 | 反向记忆项 | 主动弱化过度强化的关联 | validatedCount 只增不减 |
 | 自适应学习率 + 衰减 | 长期运行不膨胀 | 无衰减 |
 
-### 3. TencentDB Agent Memory 开源项目（压缩与层次维度）
+### 3. TencentDB Agent Memory 开源项目（层次沉淀维度）
 
-**核心贡献**：提供"短期记忆压缩"与"端到端层次沉淀"的工程范式。
+**核心贡献**：提供长期记忆的端到端层次沉淀工程范式（本规划仅取与"长期记忆管理"职责相关的部分，压缩/画布/上下文卸载属宿主职责，不入本规划）。
 
-**两大支柱**：
+**L0-L3 四层语义金字塔**（本规划仅纳入 L1/L2/L3，L0 原始对话全量保存属宿主上下文管理职责）：
 
-**支柱一：短期记忆压缩 = 上下文卸载 + Mermaid 任务画布**
+| 层级 | 内容 | 价值 | 归属 |
+|---|---|---|---|
+| L0 | 原始对话全量保存 | 信息不丢失 | **宿主**（不入本规划） |
+| L1 | 原子事实自动提取 | 非结构化→结构化 | **本项目**（extract.ts 已具备，待升级） |
+| L2 | 场景分块聚类 | 场景隔离，防串场 | **本项目**（新增 S-6） |
+| L3 | 用户画像融合 | 稳定偏好，个性化 | **本项目**（新增 S-7） |
 
-实测节省 61% Token，任务成功率提升 52%。核心是"完整信息卸载到外部，关键状态以高密度形式留存于上下文"。
+设计哲学："上层提供方向，下层保留证据"，可追溯理念与论文 Bi-Temporal 一致。
 
-| 层级 | 内容 | 位置 |
-|---|---|---|
-| Level 0 | 完整工具返回原文 | refs/*.md |
-| Level 1 | 工具调用级摘要 | offload.jsonl |
-| Level 2 | 任务画布节点 | *.mmd |
-| Level 3 | 任务级索引（目标+状态） | 上下文 |
+### 4. RL4MEM 自主进化记忆前沿论文（自主进化维度，2026）
 
-底层保留证据，高层保留结构。任何一层压缩都可沿索引链路 100% 找回。
+**核心贡献**：让记忆系统从"被动存查"升级为"主动思考记忆"——通过强化学习/LLM 诊断自主决策"什么该记、什么该改、什么该忘"，无需人工编写全部规则。
 
-**支柱二：长期记忆 L0-L3 四层语义金字塔**
+| 论文 | 核心机制 | 关键数据 | 可整合点 |
+|---|---|---|---|
+| **EvolveMem** (arxiv 2605.13941, Liu et al.) | 检索配置暴露为结构化动作空间；EVALUATE–DIAGNOSE–PROPOSE–GUARD 四步循环；revert-on-regression + explore-on-stagnation 安全护栏 | LoCoMo 30.5%→54.3%（+78%）；跨基准正向迁移 | 把召回参数作为可进化动作空间，LLM 诊断失败案例自动调优 |
+| **U-Mem** (arxiv 2602.22406, Wu et al., NUS) | 成本感知 3 层提取级联：自监督→工具验证→专家反馈；语义感知 Thompson 采样平衡探索/利用；**主动获取**外部知识 | 半计算量超 RL 优化；HotpotQA +14.6pp | 提取升级为多级成本感知级联；召回用 Thompson 采样平衡熟悉/探索 |
+| **UMEM** (arxiv 2602.10652, 厦大+阿里+通义) | 语义邻域建模+边际效用奖励+GRPO；**统一提取与管理**；避免"死记硬背"陷阱 | 多轮任务 +10.67%；单调增长曲线 | M 矩阵奖励升级为边际效用；语义邻域聚类防过拟合 |
+| **EvoEmbedding** (南京大学 2026.06) | 可进化检索表示；嵌入随新信息迭代；解决静态嵌入无法识别时效性/冲突 | 解决静态嵌入核心缺陷 | L-1 的 M 矩阵升级为可进化嵌入 |
+| **Dynamic Mixture of Latent Memories** (Yu et al.) | 动态隐式记忆单元组合；运行时自主适配；容量与效率动态平衡 | 动态平衡 | S-6 场景隔离从二值升级为动态记忆混合 |
 
-| 层级 | 内容 | 价值 |
-|---|---|---|
-| L0 | 原始对话全量保存 | 信息不丢失 |
-| L1 | 原子事实自动提取 | 非结构化→结构化 |
-| L2 | 场景分块聚类 | 场景隔离，防串场 |
-| L3 | 用户画像融合 | 稳定偏好，个性化 |
-
-设计哲学："上层提供方向，下层保留证据"。
-
-### 4. 三方融合点
+### 5. 四方融合点
 
 ```
 论文提供"骨架"（图结构如何组织）
 文章提供"神经"（图如何自我优化）
-TencentDB 提供"压缩"（记忆如何低耗呈现）+ 端到端层次沉淀
+TencentDB 提供"沉淀"（端到端层次化）
+RL4MEM 提供"自主进化"（主动思考记忆）
 
-graph-memory-pro = 骨架已备 + 神经缺失 + 压缩缺失
+graph-memory-pro = 骨架已备 + 神经缺失 + 沉淀缺失 + 自主进化缺失
 ```
 
 关键融合洞察：
 
-1. **裁判反馈信号**不仅可驱动 M 矩阵学习，还可驱动**节点衰减**和**边权重调整**——一个反馈源，三个受益点
-2. **Bi-Temporal** 让"反向记忆项"成为可能——不是删除，而是 `validTo = now` 标记失效（与 TencentDB 的"可追溯"理念一致）
-3. **TencentDB 的 L0-L3 端到端层次**与论文的层次化社区互补：前者是原始数据→画像的纵向沉淀，后者是社区→主题→领域的横向抽象，两者可叠加
-4. **上下文卸载 + Mermaid 画布**是项目完全缺失的维度——召回结果直接进 prompt，无 Token 优化意识，长期对话会爆窗口
-5. **场景隔离（L2）**解决项目所有节点混在一个图谱、不同项目记忆互相干扰的问题
-6. **用户画像（L3）**是项目完全缺失的节点类型——只有 TASK/SKILL/EVENT，没有用户偏好的沉淀
-7. **来源区分**让衰减策略可差异化——知识记忆衰减慢，经验记忆衰减快（论文），与 TencentDB 的 L1 原子事实来源标记呼应
+1. **裁判反馈信号**驱动三处：M 矩阵学习、节点衰减、边权重调整——一个反馈源，三个受益点
+2. **Bi-Temporal** 让"反向记忆项"成为可能——不是删除，而是 `validTo = now` 标记失效（与 TencentDB 可追溯理念一致）
+3. **TencentDB L1-L3 纵向沉淀**与论文层次化社区横向抽象互补，两者可叠加
+4. **场景隔离（L2）**解决项目所有节点混在一个图谱、不同项目记忆互相干扰的问题
+5. **用户画像（L3）**是项目完全缺失的节点类型——只有 TASK/SKILL/EVENT，没有用户偏好的沉淀
+6. **来源区分**让衰减策略可差异化——知识记忆衰减慢，经验记忆衰减快
+7. **EvolveMem 动作空间**让召回参数（recallMaxNodes/damping/dedupThreshold/M学习率）从静态配置升级为 LLM 自主调优
+8. **U-Mem 成本感知级联**让 I-2 裁判从单层升级为多级（自监督→工具→专家），成本可控
+9. **UMEM 边际效用奖励**让 M 矩阵奖励从二值（用/没用）升级为边际效用，避免死记硬背
+10. **RL4MEM 整体**让记忆系统从"被动存查"升级为"主动思考记忆"——这是 v2.1.10 的核心范式升级
 
 ---
 
@@ -95,18 +98,17 @@ graph-memory-pro = 骨架已备 + 神经缺失 + 压缩缺失
 |---|---|---|
 | 基础设施 | 反馈闭环与缓存层 | 文章 P0 |
 | 学习能力 | 在线学习与衰减机制 | 文章 + 论文融合 |
-| 结构升级 | 时态建模与层次化 | 论文 |
-| **短期压缩** | **上下文卸载 + Mermaid 画布** | **TencentDB** |
-| **端到端层次** | **L0-L3 渐进式沉淀 + 用户画像** | **TencentDB + 论文** |
-| 智能进化（评估） | 评测集与防过拟合 | 文章教训 |
+| 结构升级 | 时态建模与层次沉淀 | 论文 + TencentDB L1-L3 |
+| **自主进化** | **LLM 诊断调优 + 成本感知级联 + 边际效用奖励 + 可进化嵌入** | **RL4MEM（核心范式升级）** |
 
 **设计原则**：
 
 - **向后兼容**：所有 schema 演进通过可选字段实现，旧数据自动兼容
 - **渐进启用**：新能力默认关闭，通过配置开启
-- **降级安全**：反馈缺失时 M 不更新，裁判不可用时不阻塞召回，卸载文件丢失时回退到全量召回
+- **降级安全**：反馈缺失时 M 不更新，裁判不可用时不阻塞召回，LLM 诊断失败时回退到上一次稳定配置
 - **可观测**：所有学习行为有日志与指标
-- **可追溯**：任何一层压缩都可沿索引链路 100% 找回（TencentDB 理念）
+- **可追溯**：Bi-Temporal + 软替换保留历史，任何变更可回溯（论文 + TencentDB 理念）
+- **自主但不失控**：RL4MEM 的 revert-on-regression 安全护栏，自主调优有回退机制
 
 ---
 
@@ -608,177 +610,287 @@ interface GmNode {
 
 ---
 
-### 模块 O：短期压缩（上下文卸载 + Mermaid 画布）
+### 模块 R：自主进化（RL4MEM 范式升级）
 
-> 来源：TencentDB Agent Memory
-> 价值：实测节省 61% Token，任务成功率提升 52%
-> 定位：项目完全缺失的维度——召回结果直接进 prompt，无 Token 优化意识
+> 来源：EvolveMem / U-Mem / UMEM / EvoEmbedding / Dynamic Mixture 五篇 2026 前沿论文
+> 定位：v2.1.10 核心范式升级——从"被动存查"到"主动思考记忆"
+> 关系：R-1 吸收原 E 模块（评估体系），R-2 升级 I-2 裁判，R-3/R-4 升级 L-1，R-5 升级 S-6
 
-#### O-1 上下文卸载
+#### R-1 自主调优动作空间 + LLM 诊断循环（EvolveMem）
 
-**目标**：召回的原始节点内容卸载到外部文件，上下文只保留摘要+索引。
+**目标**：把召回参数从静态配置升级为 LLM 自主调优的动作空间，无需人工调参。
 
-**问题背景**：当前 [assemble.ts](file:///workspace/src/format/assemble.ts) 把召回节点的完整 content 直接拼进 system prompt，节点多时 token 消耗大，长期对话会爆窗口。
+**问题背景**：当前 [types.ts](file:///workspace/src/types.ts) 的 recallMaxNodes/recallMaxDepth/pagerankDamping/dedupThreshold 等参数是静态配置，不同任务类型（事实查询 vs 多跳推理）需要不同策略，静态配置无法最优。
 
-**四层递进存储**（参考 TencentDB）：
+**EvolveMem 四步循环**（EVALUATE–DIAGNOSE–PROPOSE–GUARD）：
 
-| 层级 | 内容 | 位置 |
-|---|---|---|
-| Level 0 | 完整节点 content | refs/{nodeId}.md |
-| Level 1 | 节点级摘要（name+description） | offload.jsonl |
-| Level 2 | 图结构节点（Mermaid 节点） | canvas.mmd |
-| Level 3 | 任务级索引（query+召回节点ID列表） | 上下文 |
+1. **EVALUATE**：在评测集/历史反馈上评估当前配置的表现（吸收原 E-1/E-2/E-3）
+2. **DIAGNOSE**：LLM 读取失败案例，归类根因（如"向量搜索召回过多噪声""PPR 深度不足"）
+3. **PROPOSE**：LLM 提出针对性配置调整（如"recallMaxNodes 6→10，dedupThreshold 0.90→0.85"）
+4. **GUARD**：应用调整，若回退则自动 revert；若停滞则探索新维度（explore-on-stagnation）
 
-**实现要点**：
-
-- 新增 `src/format/offload.ts`
-- 召回后：完整 content 写 `refs/{nodeId}.md`
-- 上下文中只保留：节点 ID + name + 一句话 description + refs 路径
-- Agent 需要细节时通过 `gm_load_ref` 工具按 nodeId 加载
-- 卸载文件丢失时回退到全量召回（降级安全）
-
-**新增工具**：
+**动作空间**（结构化）：
 
 ```typescript
-// gm_load_ref: 按需加载卸载的原始内容
-registerTool("gm_load_ref", {
-  description: "加载已卸载的节点完整内容",
-  params: { nodeId: "string" },
-  handler: async (params) => loadOffloadedRef(params.nodeId)
-});
+interface EvolveActionSpace {
+  recallMaxNodes: number;        // 3-15
+  recallMaxDepth: number;        // 1-4
+  pagerankDamping: number;      // 0.7-0.95
+  pagerankIterations: number;    // 10-50
+  dedupThreshold: number;        // 0.80-0.98
+  freshTailCount: number;        // 5-20
+  associativeLearningRate: number; // 0.001-0.1
+  vectorSearchTopK: number;      // 5-30
+  // 可进化出原配置不存在的维度
+}
 ```
 
-**接入点**：`src/format/assemble.ts` 改造为支持"摘要模式"
+**安全护栏**（EvolveMem 核心贡献）：
+
+- **revert-on-regression**：新配置在评测集上退步 > 阈值 → 自动回退到上一稳定配置
+- **explore-on-stagnation**：连续 N 轮无改进 → 探索原动作空间外的新维度
+- **配置版本快照**：每次变更存快照，可回溯（与 S-1 Bi-Temporal 呼应）
+
+**接入点**：
+
+- 新增 `src/evolution/diagnose.ts` LLM 诊断模块
+- 新增 `src/evolution/action_space.ts` 动作空间定义
+- 新增 `src/evolution/guard.ts` 安全护栏
+- `src/graph/maintenance.ts` 维护周期末尾触发诊断循环
 
 **配置项**：
 
 ```json
 {
-  "offload": {
+  "evolve": {
     "enabled": false,
-    "dir": ".graph-memory/refs",
-    "summaryMode": "description"  // "name" | "description" | "off"
+    "intervalRounds": 10,       // 每 N 次维护触发一次诊断
+    "revertThreshold": 0.02,    // 退步 > 2pp 触发回退
+    "stagnationRounds": 5,      // 连续 N 轮无改进触发探索
+    "configSnapshotKeep": 20    // 保留最近 N 个配置快照
   }
 }
 ```
 
-**预计成本**：2-3 天
+**吸收原 E 模块**：
+
+- E-1 评测集构建 → R-1 的 EVALUATE 阶段
+- E-2 随机抽样评测 → R-1 的 EVALUATE 防过拟合
+- E-3 评测指标（P@1/P@3/MRR/Recall@K/Latency/Feedback Coverage）→ R-1 的评估指标
+
+**预计成本**：5-7 天
 
 ---
 
-#### O-2 Mermaid 任务画布
+#### R-2 成本感知提取级联（U-Mem）
 
-**目标**：把召回的图结构用 Mermaid Flowchart 表示，提供可导航的任务地图。
+**目标**：把 I-2 单层 LLM 裁判升级为多级成本感知级联，低成本信号优先，按需升级。
 
-**问题背景**：当前召回结果以 XML 列表形式进 prompt（[assemble.ts](file:///workspace/src/format/assemble.ts)），Agent 能看到"有什么节点"但看不到"节点间关系如何"，需要读 content 才能推断关系。
+**问题背景**：当前规划的 I-2 裁判每次都调 LLM，成本高。不同难度案例需要不同强度的验证——简单案例自监督即可，复杂案例才需工具/专家。
 
-**实现要点**：
+**U-Mem 三层级联**：
 
-- 召回后生成 Mermaid Flowchart：
-  ```mermaid
-  flowchart TD
-    T1[Task: 用户认证]
-    S1[Skill: JWT]
-    E1[Event: 登录失败]
-    T1 -->|USED_SKILL| S1
-    E1 -->|SOLVED_BY| S1
-  ```
-- 上下文中用 Mermaid 替代 XML 关系列表
-- 节点详情仍走 O-1 卸载机制
-- 每个节点带 nodeId，可点击加载详情
+| 层级 | 信号源 | 成本 | 触发条件 |
+|---|---|---|---|
+| Tier 1 | 自监督（启发式规则：节点是否在回复中被引用） | 极低 | 默认 |
+| Tier 2 | 教师模型（更强的 LLM 判断） | 中 | Tier 1 置信度 < 0.7 |
+| Tier 3 | 工具验证（代码解释器/搜索验证事实） | 高 | Tier 2 置信度 < 0.6 或涉及事实性声明 |
 
-**接入点**：`src/format/assemble.ts` 新增 Mermaid 输出模式
+**语义感知 Thompson 采样**（U-Mem 核心贡献）：
+
+- 用 Thompson 采样平衡"召回熟悉节点"（利用）vs"召回新节点"（探索）
+- 缓解冷启动偏差——新部署时多探索，积累后多利用
+- 每个节点维护 Beta 分布参数（α=命中，β=未命中）
+
+```typescript
+// 召回时按 Thompson 采样给节点加扰动
+for (const node of candidates) {
+  const sampled = betaSample(node.alpha, node.beta);  // Thompson 采样
+  node.score = node.baseScore * 0.8 + sampled * 0.2;  // 平滑混合
+}
+```
+
+**主动知识获取**（U-Mem 主动维度）：
+
+- 当所有候选节点置信度都低时，记忆系统主动寻求外部输入（如调用工具验证、请求澄清）
+- 区别于传统被动接收——这是"主动思考记忆"的核心体现
+
+**接入点**：
+
+- 升级 `src/recaller/judge.ts`（原 I-2）为级联结构
+- 新增 `src/evolution/thompson.ts` Thompson 采样
+- `src/recaller/recall.ts` 召回时应用采样
 
 **配置项**：
 
 ```json
 {
-  "canvas": {
+  "judgeCascade": {
     "enabled": false,
-    "format": "mermaid",  // "mermaid" | "xml" | "both"
-    "maxNodes": 20
+    "tier1Confidence": 0.7,
+    "tier2Confidence": 0.6,
+    "thompsonExploration": 0.2,
+    "activeAcquisition": false
   }
 }
 ```
 
-**预计成本**：2-3 天
+**预计成本**：3-5 天
 
 ---
 
-#### O-3 压缩效果度量
+#### R-3 语义邻域建模 + 边际效用奖励（UMEM）
 
-**目标**：度量 Token 节省比例，验证压缩效果（参考 TencentDB 的 61% 数据）。
+**目标**：把 L-1 M 矩阵的奖励从二值（用/没用）升级为边际效用，避免死记硬背。
 
-**实现要点**：
+**问题背景**：文章进化出的 M 矩阵用二值反馈，容易过拟合到特定案例（文章明确教训：500 题 88.4% → 全量 30.1%）。UMEM 的边际效用奖励可解决此问题。
 
-- 记录每次召回的：
-  - 原始 token 数（全量 content）
-  - 压缩后 token 数（摘要 + Mermaid）
-  - 节省比例
-- 累计统计：P50/P99 节省比例
-- 验证：压缩后任务成功率不降
+**语义邻域建模**（UMEM 核心贡献）：
 
-**接入点**：`src/timing.ts` 新增 token 节省统计
+- 把 query 转成"语义指纹"（embedding）
+- 找到相似 query 形成邻域簇
+- 在整个邻域上验证经验，而非单一案例
+- 强制学习普适规律，抛弃实例特定噪声
 
-**预计成本**：1 天
+```typescript
+// 语义邻域：找到与当前 query 相似的 N 个历史 query
+const neighborhood = await findSemanticNeighbors(queryVec, history, k=5);
+// 在邻域上评估 M 更新的边际效用
+const marginalUtility = evaluateOnNeighborhood(mUpdate, neighborhood);
+if (marginalUtility > threshold) applyUpdate(mUpdate);  // 只在邻域整体提升时更新
+```
 
----
+**边际效用奖励**（替代二值）：
 
-### 模块 E：智能进化（评估与防过拟合）
+- 奖励 = 该记忆对邻域内所有 query 的边际贡献
+- 用 GRPO（Group Relative Policy Optimization）优化 M
+- 确保提取的记忆是普适规律，而非实例噪声
 
-#### E-1 标准评测集构建
+**统一提取与管理**（UMEM 哲学）：
 
-**目标**：为后续进化提供评测基准，没有评测集就无法验证改进。
+- 不再把 extract（提取）和 management（管理）分离
+- L-1 的 M 矩阵学习与 I-1 提取统一优化
+- 单调增长曲线——长期演进不退化
 
-**关键教训**（来自文章）：评测目标比进化策略更重要。
+**接入点**：
 
-**实现要点**：
+- 升级 `src/recaller/associative.ts`（原 L-1）的奖励计算
+- 新增 `src/evolution/neighborhood.ts` 语义邻域
+- 新增 `src/evolution/grpo.ts` GRPO 优化（轻量版，避免重训练）
 
-- 从 I-3 反馈数据中提取"成功召回案例"和"失败召回案例"
-- 标注 query → 正确节点 ID 的映射
-- 形成 graph-memory 专属评测集（初始目标 200 条）
-- 评测指标：P@1、P@3、MRR
+**配置项**：
 
-**预计成本**：3-5 天（数据积累 + 标注）
+```json
+{
+  "marginalUtility": {
+    "enabled": false,
+    "neighborhoodSize": 5,
+    "updateThreshold": 0.05,
+    "grpoEnabled": false
+  }
+}
+```
 
----
-
-#### E-2 随机抽样评测机制
-
-**目标**：防止过拟合到特定评测集。
-
-**关键教训**（来自文章）：
-
-- 500 题上"进步"了 0.8，全量上退步了 19
-- 同一个算法每次面对不同的题目——想过拟合也没有固定目标可以拟合
-
-**实现要点**：
-
-- 每次评测随机抽不同的子集（如从 200 条中抽 50 条）
-- 全量验证集作为最终把关
-- 监控"小集涨 + 大集跌"的过拟合信号
-- 触发阈值：小集提升 > 2pp 且大集下降 > 1pp → 标记为过拟合
-
-**预计成本**：1-2 天
+**预计成本**：4-6 天
 
 ---
 
-#### E-3 评测指标扩展
+#### R-4 可进化嵌入（EvoEmbedding）
 
-**目标**：建立多维度的评测体系。
+**目标**：让节点嵌入随信息更新而迭代，解决静态嵌入无法识别时效性/冲突的核心缺陷。
 
-**指标维度**：
+**问题背景**：当前 [store.ts](file:///workspace/src/store/store.ts) 的 embedding 在节点创建时计算一次，节点内容更新后不重算。导致：①时效性信息无法反映在嵌入中；②冲突事实（v1 和 v2 矛盾）的嵌入混在一起。
 
-| 指标 | 含义 | 目标 |
-|---|---|---|
-| P@1 | 第一个结果就是正确的概率 | > 60% |
-| P@3 | 前三个结果包含正确的概率 | > 80% |
-| MRR | 平均倒数排名 | > 0.7 |
-| Recall@K | 召回率 | > 90% |
-| Latency P99 | 99 分位延迟 | < 500ms |
-| Feedback Coverage | 有反馈的召回比例 | > 70% |
+**可进化嵌入机制**：
 
-**预计成本**：1 天
+- 节点 content 更新时（upsertNode），触发嵌入重算
+- 维护"嵌入版本"（embeddingVersion），跟踪演化历史
+- 冲突消解：当新事实与旧事实矛盾（通过 S-1 Bi-Temporal 检测），新嵌入覆盖旧嵌入，旧嵌入存档
+
+```typescript
+// upsertNode 时检查内容是否实质变化
+if (contentChanged(node, newNode) || factsConflict(node, newNode)) {
+  const newEmbedding = await embedFn(newNode.text);
+  node.embeddingHistory = node.embeddingHistory || [];
+  node.embeddingHistory.push({ version: node.embeddingVersion, embedding: node.embedding, validTo: now });
+  node.embedding = newEmbedding;
+  node.embeddingVersion = (node.embeddingVersion || 0) + 1;
+}
+```
+
+**与 R-3 协同**：
+
+- R-3 的语义邻域基于当前 embeddingVersion
+- R-4 的嵌入演化反馈给 R-1 诊断（嵌入漂移可能提示概念演化）
+
+**接入点**：
+
+- 升级 `src/store/store.ts` upsertNode 嵌入演化
+- 升级 `src/engine/embed.ts` 支持版本化嵌入
+- `src/graph/reembed.ts` 批量重嵌入时考虑冲突消解
+
+**配置项**：
+
+```json
+{
+  "evoEmbedding": {
+    "enabled": false,
+    "reembedOnContentChange": true,
+    "conflictDetection": true,
+    "keepHistoryVersions": 5
+  }
+}
+```
+
+**预计成本**：3-4 天
+
+---
+
+#### R-5 动态记忆混合（Dynamic Mixture of Latent Memories）
+
+**目标**：把 S-6 场景隔离从二值（全局/本场景）升级为动态记忆单元组合，运行时自主适配。
+
+**问题背景**：S-6 的场景隔离是硬隔离——要么全局记忆，要么本场景记忆。但实际任务可能需要"70% 本场景 + 20% 相似场景 + 10% 全局"的动态混合。
+
+**动态混合机制**（Dynamic Mixture 核心贡献）：
+
+- 每个场景维护一个"记忆单元"（latent memory unit）
+- 召回时根据当前任务特征，动态混合多个单元
+- 容量与效率动态平衡——简单任务用小单元，复杂任务聚合多单元
+
+```typescript
+// 动态混合召回
+const units = [
+  { sceneId: currentScene, weight: 0.7 },      // 本场景主导
+  { sceneId: similarScene, weight: 0.2 },        // 相似场景辅助
+  { sceneId: null, weight: 0.1 },                // 全局兜底
+];
+const recalled = await dynamicMixRecall(queryVec, units);
+```
+
+**权重学习**：
+
+- 混合权重通过 R-1 的诊断循环学习（哪个场景组合效果好）
+- 初始均匀分布，逐步收敛到最优组合
+
+**接入点**：
+
+- 升级 S-6 `src/recaller/recall.ts` 的场景过滤为动态混合
+- 新增 `src/evolution/mixture.ts` 记忆单元管理
+
+**配置项**：
+
+```json
+{
+  "dynamicMixture": {
+    "enabled": false,
+    "maxUnits": 5,
+    "weightLearning": true
+  }
+}
+```
+
+**预计成本**：3-5 天
 
 ---
 
@@ -852,16 +964,40 @@ v2.1.10 新增配置项（全部默认关闭，渐进启用）：
             "maxPreferences": 20
           },
 
-          "offload": {
+          "evolve": {
             "enabled": false,
-            "dir": ".graph-memory/refs",
-            "summaryMode": "description"
+            "intervalRounds": 10,
+            "revertThreshold": 0.02,
+            "stagnationRounds": 5,
+            "configSnapshotKeep": 20
           },
 
-          "canvas": {
+          "judgeCascade": {
             "enabled": false,
-            "format": "mermaid",
-            "maxNodes": 20
+            "tier1Confidence": 0.7,
+            "tier2Confidence": 0.6,
+            "thompsonExploration": 0.2,
+            "activeAcquisition": false
+          },
+
+          "marginalUtility": {
+            "enabled": false,
+            "neighborhoodSize": 5,
+            "updateThreshold": 0.05,
+            "grpoEnabled": false
+          },
+
+          "evoEmbedding": {
+            "enabled": false,
+            "reembedOnContentChange": true,
+            "conflictDetection": true,
+            "keepHistoryVersions": 5
+          },
+
+          "dynamicMixture": {
+            "enabled": false,
+            "maxUnits": 5,
+            "weightLearning": true
           }
         }
       }
@@ -904,17 +1040,13 @@ v2.1.10 内部按依赖关系分批实施：
 15. **S-4 层次化社区** → 独立
 16. **S-6 场景隔离召回过滤** → 依赖 S-6 schema
 
-### 第五批：短期压缩（依赖前面所有）
+### 第五批：自主进化（依赖前面所有，v2.1.10 核心范式升级）
 
-17. **O-1 上下文卸载** → 依赖召回稳定
-18. **O-2 Mermaid 任务画布** → 依赖 O-1
-19. **O-3 压缩效果度量** → 依赖 O-1/O-2
-
-### 第六批：评估体系（依赖前面所有）
-
-20. **E-1 评测集构建** → 依赖 I-3 反馈数据
-21. **E-2 随机抽样评测** → 依赖 E-1
-22. **E-3 评测指标扩展** → 依赖 E-1
+17. **R-2 成本感知提取级联** → 升级 I-2 裁判为多级级联
+18. **R-4 可进化嵌入** → 升级 store.ts 嵌入演化
+19. **R-3 语义邻域 + 边际效用奖励** → 升级 L-1 M 矩阵奖励
+20. **R-1 自主调优动作空间 + LLM 诊断循环** → 吸收 E 模块，依赖 R-2/R-3/R-4
+21. **R-5 动态记忆混合** → 升级 S-6 场景隔离为动态混合
 
 ---
 
@@ -923,18 +1055,21 @@ v2.1.10 内部按依赖关系分批实施：
 | 风险 | 来源 | 对策 |
 |---|---|---|
 | 裁判反馈延迟/缺失 | 文章场景同步，项目异步 | I-2 设计兜底：无反馈时不更新 M |
-| M 矩阵过拟合特定对话模式 | 文章明确教训 | E-2 随机抽样评测 |
-| 裁判准确率上限（90%） | 文章数据 | L-1 用 Momentum 平滑噪声 |
+| M 矩阵过拟合特定对话模式 | 文章明确教训 | R-3 语义邻域 + 边际效用奖励防过拟合 |
+| 裁判准确率上限（90%） | 文章数据 | L-1 用 Momentum 平滑噪声；R-2 多级级联分层验证 |
 | M 只对向量搜索有效 | 原创 | 明确边界：graphWalk/PPR 不受 M 影响 |
 | Schema 演进破坏旧数据 | 论文 | S-1 所有新字段可选，向后兼容 |
 | 衰减误删活跃节点 | 原创 | archived 而非删除，可恢复 |
 | 层次化社区计算成本高 | 原创 | 限制 hierarchyDepth ≤ 3，缓存中间结果 |
-| 反馈数据积累慢 | 原创 | 冷启动期用 BM25 + 向量搜索兜底 |
-| **卸载文件丢失** | TencentDB | O-1 回退到全量召回（降级安全） |
-| **Mermaid 画布节点过多** | TencentDB | O-2 限制 maxNodes，超出走 PPR 截断 |
-| **场景隔离误判全局记忆** | TencentDB L2 | S-6 默认 soft 模式（全局+本场景） |
-| **用户画像过拟合历史偏好** | TencentDB L3 | S-7 画像带时间衰减，旧偏好降权 |
-| **压缩后任务成功率下降** | TencentDB | O-3 度量验证，压缩率与成功率双指标监控 |
+| 反馈数据积累慢 | 原创 | 冷启动期用 BM25 + 向量搜索兜底；R-2 Thompson 采样多探索 |
+| 场景隔离误判全局记忆 | TencentDB L2 | S-6 默认 soft 模式（全局+本场景）；R-5 动态混合替代硬隔离 |
+| 用户画像过拟合历史偏好 | TencentDB L3 | S-7 画像带时间衰减，旧偏好降权 |
+| **LLM 诊断误调优导致回退** | EvolveMem | R-1 revert-on-regression 自动回退上一稳定配置 |
+| **自主进化陷入停滞** | EvolveMem | R-1 explore-on-stagnation 探索新动作维度 |
+| **成本感知级联触发过频** | U-Mem | R-2 Tier 1 默认自监督，仅置信度低时升级 |
+| **嵌入演化历史膨胀** | EvoEmbedding | R-4 限制 keepHistoryVersions，旧版本归档 |
+| **动态混合权重不收敛** | Dynamic Mixture | R-5 权重学习限幅，初始均匀分布逐步收敛 |
+| **GRPO 轻量化实现偏差** | UMEM | R-3 grpoEnabled 默认关闭，先验证边际效用奖励效果 |
 
 ---
 
@@ -956,35 +1091,67 @@ v2.1.10 发布需满足：
 - [ ] S-5 因果关系：支持 CAUSED_BY/LEADS_TO
 - [ ] S-6 场景隔离：召回支持 sceneId 过滤，不串场
 - [ ] S-7 用户画像：可从历史对话蒸馏偏好，召回时参考画像
-- [ ] O-1 上下文卸载：完整 content 写外部文件，上下文只留摘要+索引
-- [ ] O-2 Mermaid 画布：召回结果可用 Mermaid Flowchart 呈现
-- [ ] O-3 压缩效果度量：可统计 token 节省比例
+- [ ] R-1 自主调优：LLM 诊断循环可运行，revert-on-regression 生效
+- [ ] R-2 成本感知级联：3 层级联按置信度触发，Tier 1 命中率 > 60%
+- [ ] R-3 边际效用奖励：M 更新基于邻域评估，过拟合信号可检测
+- [ ] R-4 可进化嵌入：节点 content 变更触发重嵌入，冲突可检测
+- [ ] R-5 动态记忆混合：多场景权重可学习，召回结果按权重混合
 
 ### 性能验收
 
 - [ ] 召回延迟 P99 < 500ms（含缓存命中场景）
 - [ ] 维护周期不因衰减/边调整显著延长（< 30%）
 - [ ] M 矩阵内存占用 < 50MB（1024×1024 × 4 字节 ≈ 4MB）
-- [ ] **O-1/O-2 压缩后 token 节省 > 40%（参考 TencentDB 61% 基准）**
-- [ ] **O-1/O-2 压缩后任务成功率不下降（误差 < 2pp）**
+- [ ] R-1 诊断循环单次开销 < 30s（含 LLM 调用）
+- [ ] R-2 级联整体成本 < 单层 LLM 裁判的 50%
+- [ ] R-4 嵌入重算仅在 content 实质变化时触发（非每次 upsert）
 
 ### 兼容性验收
 
 - [ ] 旧数据（无新字段）可正常读写
 - [ ] 关闭新功能时行为与 v2.2.0 一致
 - [ ] 现有 HTTP API 不破坏向后兼容
-- [ ] **O-1 卸载文件丢失时可回退到全量召回**
-- [ ] **S-6 场景隔离关闭时行为与无 sceneId 一致**
+- [ ] R-1 关闭时回退到静态配置（与当前一致）
+- [ ] R-2 关闭时回退到单层 I-2 裁判
+- [ ] R-3/R-4 关闭时回退到 L-1 基础 M 矩阵
+- [ ] R-5 关闭时回退到 S-6 硬隔离
+- [ ] S-6 场景隔离关闭时行为与无 sceneId 一致
 
 ---
 
 ## 八、参考资料
 
-### 论文
+### 论文（结构维度）
 
 - **Graph-based Agent Memory: Taxonomy, Techniques, and Applications** (arxiv 2602.05665)
   - 提供记忆分类体系、Bi-Temporal 建模、层次化结构、超图等结构化框架
   - 核心论点：所有记忆形式都是"图记忆"的特殊情形
+
+### 论文（自主进化维度，RL4MEM）
+
+- **EvolveMem: Self-Evolving Memory Architecture via AutoResearch for LLM Agents** (arxiv 2605.13941, Liu et al., 2026.05)
+  - 检索配置暴露为结构化动作空间；EVALUATE–DIAGNOSE–PROPOSE–GUARD 四步循环
+  - revert-on-regression + explore-on-stagnation 安全护栏
+  - LoCoMo 30.5%→54.3%（+78%）；跨基准正向迁移
+  - 代码：https://github.com/aiming-lab/SimpleMem
+
+- **Towards Autonomous Memory Agents (U-Mem)** (arxiv 2602.22406, Wu et al., NUS, 2026)
+  - 成本感知 3 层提取级联：自监督→工具验证→专家反馈
+  - 语义感知 Thompson 采样平衡探索/利用
+  - 半计算量超 RL 优化；HotpotQA +14.6pp
+
+- **UMEM: Unified Memory Extraction and Management Framework** (arxiv 2602.10652, 厦大+阿里+通义, 2026.02)
+  - 语义邻域建模 + 边际效用奖励 + GRPO
+  - 统一提取与管理，避免"死记硬背"陷阱
+  - 多轮任务 +10.67%；单调增长曲线
+
+- **EvoEmbedding: Evolvable Representations for Long-Context Retrieval and Agentic Memory** (南京大学, 2026.06)
+  - 可进化检索表示，嵌入随新信息迭代
+  - 解决静态嵌入无法识别时效性/冲突的核心缺陷
+
+- **Dynamic Mixture of Latent Memories for Self-Evolving Agents** (Yu et al., 2026)
+  - 动态隐式记忆单元组合，运行时自主适配
+  - 记忆容量与检索效率的动态平衡
 
 ### 实践文章
 
@@ -997,19 +1164,20 @@ v2.1.10 发布需满足：
 ### 开源项目
 
 - **TencentDB Agent Memory**（腾讯云数据库团队，2026.05 开源）
-  - 提供短期记忆压缩（上下文卸载 + Mermaid 画布）与 L0-L3 四层渐进式记忆架构
-  - 关键数据：节省 61% Token，任务成功率提升 52%，长期记忆准确率 48% → 76%
-  - 设计哲学："上层提供方向，下层保留证据"，任何一层压缩可 100% 找回
+  - 提供 L0-L3 四层渐进式记忆架构（本规划仅纳入 L1/L2/L3）
+  - 关键数据：长期记忆准确率 48% → 76%
+  - 设计哲学："上层提供方向，下层保留证据"，可追溯理念
   - 代码：https://github.com/Tencent/TencentDB-Agent-Memory
 
 ### 项目内相关文件
 
-- [src/recaller/recall.ts](file:///workspace/src/recaller/recall.ts) — 召回主逻辑，I-1/I-2/L-1 接入点
-- [src/store/store.ts](file:///workspace/src/store/store.ts) — 数据层，I-3/S-1/S-2/S-3 接入点
-- [src/graph/maintenance.ts](file:///workspace/src/graph/maintenance.ts) — 维护逻辑，L-2/L-3 接入点
+- [src/recaller/recall.ts](file:///workspace/src/recaller/recall.ts) — 召回主逻辑，I-1/I-2/L-1/R-2/R-5 接入点
+- [src/store/store.ts](file:///workspace/src/store/store.ts) — 数据层，I-3/S-1/S-2/S-3/R-4 接入点
+- [src/graph/maintenance.ts](file:///workspace/src/graph/maintenance.ts) — 维护逻辑，L-2/L-3/R-1 接入点
 - [src/graph/community.ts](file:///workspace/src/graph/community.ts) — 社区检测，S-4 接入点
-- [src/types.ts](file:///workspace/src/types.ts) — 类型定义，S-1/S-3/S-5 接入点
+- [src/types.ts](file:///workspace/src/types.ts) — 类型定义，S-1/S-3/S-5/R-1 动作空间 接入点
 - [src/extractor/extract.ts](file:///workspace/src/extractor/extract.ts) — 三元组提取，S-3/S-5 接入点
+- [src/engine/embed.ts](file:///workspace/src/engine/embed.ts) — Embedding 引擎，R-4 接入点
 
 ---
 
@@ -1018,4 +1186,6 @@ v2.1.10 发布需满足：
 - **规划版本**：2.1.10
 - **基于版本**：2.2.0（当前已发布）
 - **规划日期**：2026-07-04
+- **模块定位**：记忆长期管理模块（压缩/上下文管理由宿主处理，不入本规划）
+- **核心范式升级**：从"被动存查"到"主动思考记忆"（RL4MEM 自主进化）
 - **预计实施周期**：根据优先级矩阵渐进推进，单版本内完成所有模块
