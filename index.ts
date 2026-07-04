@@ -198,6 +198,35 @@ export default definePluginEntry({
       extractorIntervalMs: Type.Optional(Type.Number({ default: 60_000 })),
       maintenanceIntervalMs: Type.Optional(Type.Number({ default: 6 * 3600_000 })),
     })),
+    // ── v2.1.2 第一批 Schema 升级 + 监控基础 ────────────
+    temporal: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      defaultSource: Type.Optional(Type.Union([
+        Type.Literal("experience"),
+        Type.Literal("knowledge"),
+        Type.Literal("imported"),
+      ])),
+    })),
+    state: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      filterSupersededInRecall: Type.Optional(Type.Boolean({ default: false })),
+    })),
+    staleness: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      threshold: Type.Optional(Type.Number({ default: 0.7 })),
+      mode: Type.Optional(Type.Union([
+        Type.Literal("heuristic"),
+        Type.Literal("llm"),
+      ])),
+    })),
+    causalEdges: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      extract: Type.Optional(Type.Boolean({ default: true })),
+    })),
+    graphHealth: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      alertOnAnomaly: Type.Optional(Type.Boolean({ default: true })),
+    })),
   }) as any),
   register(api: any) {
     const logger = api.logger ?? console;
@@ -474,7 +503,7 @@ export default definePluginEntry({
     api.registerTool({
       name: "gm_maintain",
       label: "Graph Memory Maintain",
-      description: "手动触发 Graph Memory Pro 图谱维护（去重 + PageRank + 社区检测）并返回统计信息",
+      description: "手动触发 Graph Memory Pro 图谱维护（去重 + PageRank + 社区检测 + 过时检测 + 健康检查）并返回统计信息",
       parameters: Type.Object({}),
       async execute() {
         if (!_driver || !_cfg) {
@@ -486,6 +515,16 @@ export default definePluginEntry({
             getEdgeCount(_driver),
           ]);
           const result = await runMaintenance(_driver, _cfg, _llm ?? undefined, _embed ?? undefined);
+
+          // v2.1.2 G-5: 维护后追加健康报告
+          let healthReport: any = null;
+          try {
+            const { healthCheck } = await import("./src/graph/maintenance.ts");
+            healthReport = await healthCheck(_driver);
+          } catch (err: any) {
+            // 健康检查失败不影响主流程
+          }
+
           const text = [
             "📊 Graph Memory Pro 统计",
             `节点总数: ${nodeCount}`,
@@ -497,8 +536,18 @@ export default definePluginEntry({
             `社区: ${result.community.count} 个社区`,
             `社区摘要: ${result.communitySummaries} 个`,
             `耗时: ${result.durationMs}ms`,
-          ].join("\n");
-          return { content: [{ type: "text", text }], details: { nodeCount, edgeCount, ...result } };
+            "",
+            healthReport ? "🏥 图谱健康" : "",
+            healthReport ? `活跃节点: ${healthReport.nodes.active}/${healthReport.nodes.total}` : "",
+            healthReport ? `孤立节点: ${healthReport.isolatedNodes}` : "",
+            healthReport ? `高过时节点: ${healthReport.highStaleNodes}` : "",
+            healthReport ? `社区数: ${healthReport.communities}` : "",
+            healthReport ? `平均 PageRank: ${healthReport.avgPageRank.toFixed(4)}` : "",
+            healthReport && healthReport.anomalies.length > 0
+              ? `⚠️ 异常: ${healthReport.anomalies.join("; ")}`
+              : (healthReport ? "✅ 无异常" : ""),
+          ].filter(Boolean).join("\n");
+          return { content: [{ type: "text", text }], details: { nodeCount, edgeCount, ...result, health: healthReport } };
         } catch (err: any) {
           return { content: [{ type: "text", text: `维护失败: ${err.message}` }], details: {} };
         }

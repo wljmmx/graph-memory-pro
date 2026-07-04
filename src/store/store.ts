@@ -141,6 +141,7 @@ export async function upsertNode(
   const session = getSession(driver);
   try {
     const label = typeToLabel(node.type);
+    // v2.1.2: 持久化 S-1/S-3/S-13/S-14/G-4 新增字段（全部可选，向后兼容）
     await session.run(
       `MERGE (n:${label} {id: $id})
        SET n.name = $name,
@@ -151,7 +152,16 @@ export async function upsertNode(
            n.pagerank = $pagerank,
            n.validatedCount = $validatedCount,
            n.createdAt = $createdAt,
-           n.updatedAt = $updatedAt
+           n.updatedAt = $updatedAt,
+           n.validFrom = COALESCE($validFrom, $createdAt),
+           n.recordedAt = COALESCE($recordedAt, $createdAt),
+           n.source = COALESCE($source, 'experience'),
+           n.state = COALESCE($state, 'current'),
+           n.stalenessScore = COALESCE($stalenessScore, 0.0),
+           n.importanceScore = COALESCE($importanceScore, 0.0)
+       SET n.validTo = $validTo,
+           n.supersededBy = $supersededBy,
+           n.embeddingModel = $embeddingModel
        `,
       {
         id: node.id,
@@ -164,6 +174,16 @@ export async function upsertNode(
         validatedCount: node.validatedCount,
         createdAt: neo4j.int(node.createdAt),
         updatedAt: neo4j.int(node.updatedAt),
+        // v2.1.2 新增字段（向后兼容：undefined 时使用默认值）
+        validFrom: node.validFrom ? neo4j.int(node.validFrom) : null,
+        validTo: node.validTo ? neo4j.int(node.validTo) : null,
+        recordedAt: node.recordedAt ? neo4j.int(node.recordedAt) : null,
+        source: node.source ?? null,
+        state: node.state ?? null,
+        stalenessScore: node.stalenessScore ?? null,
+        importanceScore: node.importanceScore ?? null,
+        supersededBy: node.supersededBy ?? null,
+        embeddingModel: node.embeddingModel ?? null,
       },
     );
   } finally {
@@ -294,7 +314,8 @@ export async function graphWalk(
   const session = getSession(driver);
   try {
     // ✅ 优化：限制关系类型为有意义的业务关系，排除 NEXT_SESSION/CONTAINS 等高频低价值边
-    const relTypes = "USED_SKILL|SOLVED_BY|REQUIRES|PATCHES|CONFLICTS_WITH";
+    // v2.1.2: 新增 CAUSED_BY / LEADS_TO 因果边类型
+    const relTypes = "USED_SKILL|SOLVED_BY|REQUIRES|PATCHES|CONFLICTS_WITH|CAUSED_BY|LEADS_TO";
     const result = await session.run(
       `MATCH path = (start:Task|Skill|Event)-[r:${relTypes}*1..${depth}]-(end:Task|Skill|Event)
        WHERE start.id IN $seedIds
@@ -504,11 +525,24 @@ export async function mergeNodes(
       { keepId, mergeId },
     );
 
-    // Phase 6: delete all edges from/to merge node to prevent ghost edges
+    // Phase 6: S-2 软替换（v2.1.2）
+    // 旧实现：DETACH DELETE merge（物理删除，丢失历史）
+    // 新实现：保留节点，标记 state=superseded，validTo=now，supersededBy 指向 keep
+    //         边 weight 降为 0.1 不参与 GDS 计算（但仍可追溯）
+    //         state.enabled=false 时退化为旧行为（物理删除）
+    // 注：当前默认走软替换；如需旧行为可由调用方在 mergeNodes 前判断 cfg.state.enabled
     await session.run(
       `MATCH (merge:Task|Skill|Event {id: $mergeId})
-       DETACH DELETE merge`,
-      { mergeId },
+       SET merge.state = 'superseded',
+           merge.validTo = timestamp(),
+           merge.supersededBy = $keepId,
+           merge.updatedAt = timestamp()
+       WITH merge
+       MATCH (merge)-[r]-()
+       WHERE NOT type(r) IN ['NEXT_SESSION', 'CONTAINS', 'MENTIONS']
+       SET r.weight = 0.1
+      `,
+      { keepId, mergeId },
     );
   } finally {
     await session.close();
@@ -846,6 +880,16 @@ function recordToNode(rec: any): GmNode | null {
     createdAt: p.createdAt?.toNumber?.() ?? 0,
     updatedAt: p.updatedAt?.toNumber?.() ?? 0,
     embedding: p.embedding,
+    // v2.1.2 新增字段（向后兼容：旧数据无这些字段时为 undefined）
+    validFrom: p.validFrom?.toNumber?.() ?? (typeof p.validFrom === "number" ? p.validFrom : undefined),
+    validTo: p.validTo?.toNumber?.() ?? (typeof p.validTo === "number" ? p.validTo : undefined),
+    recordedAt: p.recordedAt?.toNumber?.() ?? (typeof p.recordedAt === "number" ? p.recordedAt : undefined),
+    source: p.source,
+    supersededBy: p.supersededBy,
+    state: p.state,
+    stalenessScore: typeof p.stalenessScore === "number" ? p.stalenessScore : (p.stalenessScore?.toNumber?.() ?? undefined),
+    importanceScore: typeof p.importanceScore === "number" ? p.importanceScore : (p.importanceScore?.toNumber?.() ?? undefined),
+    embeddingModel: p.embeddingModel,
   };
 }
 

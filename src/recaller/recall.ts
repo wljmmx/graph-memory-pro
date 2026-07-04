@@ -193,11 +193,34 @@ export class Recaller {
     const edges = new Map<string, GmEdge>();
 
     for (const n of [...a.nodes, ...b.nodes]) {
-      if (!seen.has(n.id)) { seen.add(n.id); nodes.push(n); }
+      if (!seen.has(n.id)) {
+        seen.add(n.id);
+
+        // v2.1.2 S-14: 召回时过滤/降权过时节点
+        // - state=superseded 且 filterSupersededInRecall=true → 跳过
+        // - stalenessScore > threshold → 标记（仍保留，由 G-3 importance 二次排序时降权）
+        if (this.cfg?.state?.filterSupersededInRecall && n.state === "superseded") {
+          continue;
+        }
+        nodes.push(n);
+      }
     }
     for (const e of [...a.edges, ...b.edges]) {
       edges.set(e.id, e);
     }
+
+    // v2.1.2 S-14: 按 stalenessScore + pagerank 综合排序（staleness 低 + pagerank 高 优先）
+    const stalenessThreshold = this.cfg?.staleness?.threshold ?? 0.7;
+    nodes.sort((x, y) => {
+      const sx = x.stalenessScore ?? 0;
+      const sy = y.stalenessScore ?? 0;
+      // 高过时节点排到末尾
+      const xStale = sx > stalenessThreshold ? 1 : 0;
+      const yStale = sy > stalenessThreshold ? 1 : 0;
+      if (xStale !== yStale) return xStale - yStale;
+      // 同 staleness 等级按 pagerank 降序
+      return y.pagerank - x.pagerank;
+    });
 
     logPhase("merge_results", Date.now() - tMerge, { nodes: nodes.length, edges: edges.size });
 

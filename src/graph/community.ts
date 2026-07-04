@@ -12,7 +12,8 @@ import type { CompleteFn } from "../engine/llm.ts";
 import type { EmbedFn } from "../engine/embed.ts";
 import { updateCommunities, upsertCommunitySummary, pruneCommunitySummaries } from "../store/store.ts";
 
-const ALL_REL_TYPES = ["NEXT_SESSION", "CONTAINS", "MENTIONS", "USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH", "RELATES_TO"];
+// v2.1.2: 新增 CAUSED_BY / LEADS_TO 因果边类型
+const ALL_REL_TYPES = ["NEXT_SESSION", "CONTAINS", "MENTIONS", "USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH", "RELATES_TO", "CAUSED_BY", "LEADS_TO"];
 
 async function getExistingRelTypes(session: any): Promise<string[]> {
   const result = await session.run(`
