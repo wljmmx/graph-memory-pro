@@ -90,6 +90,39 @@ export interface GmConfig {
     /** 异常告警（孤立节点突增等） */
     alertOnAnomaly?: boolean;
   };
+
+  // ── v2.1.2 第二批 反馈闭环 + 冷启动 ────────────
+
+  /** I-1 历史查询缓存（默认开启，LRU + cosine 相似复用） */
+  queryCache?: {
+    enabled?: boolean;
+    maxSize?: number;
+    ttlMs?: number;
+    similarityThreshold?: number;
+  };
+
+  /** I-2 LLM 裁判反馈（Tier 1 启发式，默认开启） */
+  judge?: {
+    enabled?: boolean;
+    asyncMode?: boolean;
+    judgeWarmupFeedbacks?: number;
+    heuristicMatch?: "id" | "name" | "both";
+  };
+
+  /** I-3 反馈持久化（默认开启） */
+  feedback?: {
+    enabled?: boolean;
+    /** 反馈保留天数（TTL，默认 90 天） */
+    retentionDays?: number;
+  };
+
+  /** G-6 冷启动策略 */
+  warmup?: {
+    /** M 矩阵冷启动阈值（累计反馈数，默认 100） */
+    warmupFeedbacks?: number;
+    /** 裁判冷启动阈值（默认 50） */
+    judgeWarmupFeedbacks?: number;
+  };
 }
 
 export type NodeType = "TASK" | "SKILL" | "EVENT";

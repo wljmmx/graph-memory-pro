@@ -11,10 +11,13 @@ import {
   graphWalk, communityRepresentatives,
   communityVectorSearch, nodesByCommunityIds,
   saveVector, getVectorHash,
+  upsertFeedback, getFeedbackCount,
 } from "../store/store.ts";
 import { getCommunityPeers } from "../graph/community.ts";
 import { personalizedPageRank } from "../graph/pagerank.ts";
 import { logPhase, isTimingEnabled, printAllDistributions, resetAllDistributions } from "../timing.ts";
+import { QueryCache } from "./query-cache.ts";
+import { JudgeManager } from "./judge.ts";
 
 let _recallCallCount = 0;
 const REPORT_INTERVAL = 50;
@@ -22,10 +25,26 @@ const REPORT_INTERVAL = 50;
 export class Recaller {
   private embed: EmbedFn | null = null;
   private timingCallCount = 0;
+  // v2.1.2 第二批：I-1 QueryCache + I-2 JudgeManager
+  private queryCache: QueryCache;
+  private judgeManager: JudgeManager | null = null;
 
-  constructor(private driver: Driver, private cfg: GmConfig) {}
+  constructor(private driver: Driver, private cfg: GmConfig) {
+    this.queryCache = new QueryCache(cfg.queryCache);
+  }
 
   setEmbedFn(fn: EmbedFn): void { this.embed = fn; }
+
+  /**
+   * 设置 JudgeManager（由外部 index.ts 在 LLM 就绪后注入）
+   * 若不调用则不启用 I-2 反馈
+   */
+  setJudgeManager(jm: JudgeManager): void { this.judgeManager = jm; }
+
+  /** 暴露 QueryCache 给外部（健康检查/统计） */
+  getQueryCache(): QueryCache { return this.queryCache; }
+  /** 暴露 JudgeManager 给外部 */
+  getJudgeManager(): JudgeManager | null { return this.judgeManager; }
 
   resetTiming(): void {
     _recallCallCount = 0;
@@ -43,9 +62,36 @@ export class Recaller {
     _recallCallCount++;
     this.timingCallCount++;
 
+    // v2.1.2 I-1: 历史查询缓存（精确匹配 → 直接返回）
+    const cached = this.queryCache.get(query);
+    if (cached) {
+      logPhase("recall_cache_hit", 0, { query: query.slice(0, 50) });
+      return cached;
+    }
+
     const precise = await this.recallPrecise(query, limit);
     const generalized = await this.recallGeneralized(query, limit);
     const merged = this.mergeResults(precise, generalized);
+
+    // v2.1.2 I-1: 缓存写入（若启用 embed 则尝试相似匹配）
+    let queryEmbedding: number[] | undefined;
+    if (this.embed) {
+      try {
+        queryEmbedding = await this.embed(query);
+        // 相似匹配：找到相似查询时降权返回
+        const similar = this.queryCache.getSimilar(queryEmbedding);
+        if (similar) {
+          logPhase("recall_cache_similar_hit", 0, {
+            similarity: similar.similarity.toFixed(3),
+          });
+          // 这里不直接返回相似结果，因为已经做了完整召回
+          // 相似命中仅作为统计，下次相同 query 时直接命中精确缓存
+        }
+      } catch {
+        // embed 失败不影响主流程
+      }
+    }
+    this.queryCache.put(query, merged, queryEmbedding);
 
     const totalMs = Date.now() - t0;
     logPhase("recall_total", totalMs, { nodes: merged.nodes.length, edges: merged.edges.length });
@@ -59,6 +105,61 @@ export class Recaller {
     }
 
     return merged;
+  }
+
+  /**
+   * v2.1.2 第二批：处理一轮对话的反馈
+   *
+   * 调用时机：用户接收到 assistant 回复后
+   * - I-2: 判断召回节点是否被使用
+   * - I-3: 持久化反馈到 Neo4j
+   *
+   * @param query 用户原始查询
+   * @param recalledNodes 召回的节点（来自 recall() 返回）
+   * @param assistantReply assistant 回复内容
+   * @param sessionId 会话 ID（可选）
+   */
+  async processFeedback(
+    query: string,
+    recalledNodes: GmNode[],
+    assistantReply: string,
+    sessionId?: string,
+  ): Promise<void> {
+    if (!this.judgeManager) return;
+
+    try {
+      const feedback = await this.judgeManager.processTurn(
+        query,
+        recalledNodes,
+        assistantReply,
+        sessionId,
+      );
+      // 异步模式下 feedback 为 null（fire-and-forget）
+      if (!feedback) return;
+
+      // I-3: 持久化反馈
+      const feedbackId = `${createHash("md5").update(query + Date.now()).digest("hex").slice(0, 16)}`;
+      await upsertFeedback(this.driver, {
+        id: feedbackId,
+        query,
+        recalledNodeIds: feedback.recalledNodeIds,
+        usedNodeIds: feedback.usedNodeIds,
+        unusedNodeIds: feedback.unusedNodeIds,
+        timestamp: feedback.timestamp,
+        sessionId,
+        matchedBy: feedback.matchedBy,
+      });
+
+      // 累计反馈计数（用于冷启动判断）
+      this.judgeManager.incrementFeedback();
+
+      if (process.env.GM_DEBUG) {
+        const coldStart = this.judgeManager.isColdStart();
+        console.log(`[judge] ${feedback.usedNodeIds.length}/${feedback.recalledNodeIds.length} used, cold=${coldStart}`);
+      }
+    } catch (err) {
+      console.warn(`[graph-memory-pro] feedback persistence failed: ${err}`);
+    }
   }
 
   private async recallPrecise(query: string, limit: number): Promise<RecallResult> {

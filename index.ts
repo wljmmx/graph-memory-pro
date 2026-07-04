@@ -227,6 +227,31 @@ export default definePluginEntry({
       enabled: Type.Optional(Type.Boolean({ default: true })),
       alertOnAnomaly: Type.Optional(Type.Boolean({ default: true })),
     })),
+    // ── v2.1.2 第二批 反馈闭环 + 冷启动 ────────────
+    queryCache: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      maxSize: Type.Optional(Type.Number({ default: 100 })),
+      ttlMs: Type.Optional(Type.Number({ default: 30 * 60 * 1000 })),
+      similarityThreshold: Type.Optional(Type.Number({ default: 0.95 })),
+    })),
+    judge: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      asyncMode: Type.Optional(Type.Boolean({ default: true })),
+      judgeWarmupFeedbacks: Type.Optional(Type.Number({ default: 50 })),
+      heuristicMatch: Type.Optional(Type.Union([
+        Type.Literal("id"),
+        Type.Literal("name"),
+        Type.Literal("both"),
+      ])),
+    })),
+    feedback: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      retentionDays: Type.Optional(Type.Number({ default: 90 })),
+    })),
+    warmup: Type.Optional(Type.Object({
+      warmupFeedbacks: Type.Optional(Type.Number({ default: 100 })),
+      judgeWarmupFeedbacks: Type.Optional(Type.Number({ default: 50 })),
+    })),
   }) as any),
   register(api: any) {
     const logger = api.logger ?? console;
@@ -275,6 +300,15 @@ export default definePluginEntry({
       // 4. 初始化 Recaller / Extractor
       _recaller = new Recaller(driver, _cfg);
       if (_embed) _recaller.setEmbedFn(_embed);
+
+      // v2.1.2 第二批 I-2：注入 JudgeManager
+      if (_cfg.judge?.enabled !== false) {
+        const { JudgeManager } = await import("./src/recaller/judge.ts");
+        const jm = new JudgeManager(_cfg.judge, _llm ?? undefined);
+        _recaller.setJudgeManager(jm);
+        logger?.info?.(`[graph-memory-pro] judge enabled (warmup=${_cfg.judge?.judgeWarmupFeedbacks ?? 50})`);
+      }
+
       _extractor = new Extractor(driver);
 
       if (_cfg.timing?.enabled) {
@@ -525,6 +559,15 @@ export default definePluginEntry({
             // 健康检查失败不影响主流程
           }
 
+          // v2.1.2 第二批：缓存 + 反馈统计
+          const cacheStats = _recaller?.getQueryCache()?.getStats();
+          const judgeStats = _recaller?.getJudgeManager()
+            ? {
+                feedbackCount: _recaller.getJudgeManager()!.getFeedbackCount(),
+                coldStart: _recaller.getJudgeManager()!.isColdStart(),
+              }
+            : null;
+
           const text = [
             "📊 Graph Memory Pro 统计",
             `节点总数: ${nodeCount}`,
@@ -546,8 +589,17 @@ export default definePluginEntry({
             healthReport && healthReport.anomalies.length > 0
               ? `⚠️ 异常: ${healthReport.anomalies.join("; ")}`
               : (healthReport ? "✅ 无异常" : ""),
+            "",
+            cacheStats ? "💾 查询缓存" : "",
+            cacheStats ? `容量: ${cacheStats.size}/${cacheStats.capacity}` : "",
+            cacheStats ? `命中率: ${cacheStats.hitRate}` : "",
+            cacheStats ? `相似命中: ${cacheStats.similarityHits}` : "",
+            "",
+            judgeStats ? "📋 反馈系统" : "",
+            judgeStats ? `累计反馈: ${judgeStats.feedbackCount}` : "",
+            judgeStats ? `冷启动期: ${judgeStats.coldStart ? "是（仅启发式规则）" : "否（已启用 LLM）"}` : "",
           ].filter(Boolean).join("\n");
-          return { content: [{ type: "text", text }], details: { nodeCount, edgeCount, ...result, health: healthReport } };
+          return { content: [{ type: "text", text }], details: { nodeCount, edgeCount, ...result, health: healthReport, cache: cacheStats, judge: judgeStats } };
         } catch (err: any) {
           return { content: [{ type: "text", text: `维护失败: ${err.message}` }], details: {} };
         }
@@ -584,6 +636,52 @@ export default definePluginEntry({
       },
     });
 
+    // v2.1.2 第二批 I-2/I-3: 反馈提交工具
+    // Agent 在收到 assistant 回复后调用，记录哪些召回节点被实际使用
+    api.registerTool({
+      name: "gm_feedback",
+      label: "Graph Memory Feedback",
+      description: "Submit feedback on which recalled nodes were actually used in the assistant reply. Triggers I-2 heuristic judge + I-3 persistence.",
+      parameters: Type.Object({
+        query: Type.String({ description: "Original user query" }),
+        recalledNodeIds: Type.Array(Type.String(), { description: "Node IDs returned by recall" }),
+        assistantReply: Type.String({ description: "Assistant's reply content" }),
+        sessionId: Type.Optional(Type.String()),
+      }),
+      async execute(_callId: string, params: any) {
+        if (!_driver || !_recaller) {
+          return { content: [{ type: "text", text: "Graph Memory Pro not connected" }], details: {} };
+        }
+        try {
+          // 加载召回的节点（用于裁判判断）
+          const { findById } = await import("./src/store/store.ts");
+          const driver = _driver;
+          const recalledNodes = (await Promise.all(
+            (params.recalledNodeIds as string[]).map(id => findById(driver, id)),
+          )).filter(Boolean) as any[];
+
+          // 调用 Recaller.processFeedback（I-2 判断 + I-3 持久化）
+          await _recaller.processFeedback(
+            params.query,
+            recalledNodes,
+            params.assistantReply,
+            params.sessionId,
+          );
+
+          const jm = _recaller.getJudgeManager();
+          const text = [
+            "✅ Feedback submitted",
+            `Recalled: ${recalledNodes.length} nodes`,
+            `Cold start: ${jm?.isColdStart() ? "yes (heuristic only)" : "no"}`,
+            `Total feedbacks: ${jm?.getFeedbackCount() ?? 0}`,
+          ].join("\n");
+          return { content: [{ type: "text", text }], details: { submitted: true } };
+        } catch (err: any) {
+          return { content: [{ type: "text", text: `Feedback failed: ${err.message}` }], details: {} };
+        }
+      },
+    });
+
   },
 });
 
@@ -604,3 +702,10 @@ export type { GmConfig, NodeType, EdgeType, NodeStatus, GmNode, GmEdge, RecallRe
 export { createEmbedFn } from "./src/engine/embed.js";
 export { setTimingEnabled, printAllDistributions, resetAllDistributions, LatencyDistribution } from "./src/timing.js";
 export type { EmbedFn } from "./src/engine/embed.js";
+
+// ─── v2.1.2 第二批 反馈闭环 + 冷启动 Re-exports ─────────────────────────
+export { upsertFeedback, getFeedbackCount, getNodeFeedbackStats } from "./src/store/store.js";
+export type { GmFeedback } from "./src/store/store.js";
+export { QueryCache } from "./src/recaller/query-cache.js";
+export { JudgeManager, isMatrixColdStart, getColdStartSearchWeights } from "./src/recaller/judge.js";
+export type { JudgeConfig, JudgeResult, JudgeFeedback, WarmupConfig } from "./src/recaller/judge.js";
