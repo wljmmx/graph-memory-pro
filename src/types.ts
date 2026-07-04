@@ -218,6 +218,38 @@ export interface GmConfig {
     /** importanceScore 下限（默认 0.2） */
     importanceFloor?: number;
   };
+
+  // ── v2.1.2 第五批 Benchmark + 自主调优 ────────────
+
+  /** S-10 Benchmark 评测（默认关闭） */
+  benchmark?: {
+    enabled?: boolean;
+    /** 数据目录（默认 benchmarks/data） */
+    dataDir?: string;
+    /** 单次评测最大样本数（0 = 全部） */
+    maxCases?: number;
+    /** 评测前是否先用对话历史建图谱 */
+    buildGraph?: boolean;
+    /** 单样本超时（ms） */
+    caseTimeoutMs?: number;
+  };
+
+  /** R-1 自主调优 EvolveMem（默认关闭） */
+  autoTuner?: {
+    enabled?: boolean;
+    /** revert-on-regression 阈值（默认 0.02 = 2pp） */
+    regressionThreshold?: number;
+    /** explore-on-stagnation 阈值（默认 5 轮） */
+    stagnationThreshold?: number;
+    /** 最大调优轮次（默认 10） */
+    maxRounds?: number;
+    /** 单次评测最大样本数（默认 50） */
+    benchmarkMaxCases?: number;
+    /** 是否启用 LLM 诊断（默认 true，false 则仅用启发式） */
+    llmDiagnosis?: boolean;
+    /** 冷启动阈值（累计反馈 < 此值时不触发，默认 100） */
+    warmupFeedbacks?: number;
+  };
 }
 
 export type NodeType = "TASK" | "SKILL" | "EVENT";

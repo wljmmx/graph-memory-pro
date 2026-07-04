@@ -310,6 +310,23 @@ export default definePluginEntry({
       stalenessPenalty: Type.Optional(Type.Number({ default: 0.1 })),
       importanceFloor: Type.Optional(Type.Number({ default: 0.2 })),
     })),
+    // ── v2.1.2 第五批 Benchmark + 自主调优 ────────────
+    benchmark: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: false })),
+      dataDir: Type.Optional(Type.String()),
+      maxCases: Type.Optional(Type.Number({ default: 0 })),
+      buildGraph: Type.Optional(Type.Boolean({ default: true })),
+      caseTimeoutMs: Type.Optional(Type.Number({ default: 30_000 })),
+    })),
+    autoTuner: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: false })),
+      regressionThreshold: Type.Optional(Type.Number({ default: 0.02 })),
+      stagnationThreshold: Type.Optional(Type.Number({ default: 5 })),
+      maxRounds: Type.Optional(Type.Number({ default: 10 })),
+      benchmarkMaxCases: Type.Optional(Type.Number({ default: 50 })),
+      llmDiagnosis: Type.Optional(Type.Boolean({ default: true })),
+      warmupFeedbacks: Type.Optional(Type.Number({ default: 100 })),
+    })),
   }) as any),
   register(api: any) {
     const logger = api.logger ?? console;
@@ -763,6 +780,88 @@ export default definePluginEntry({
       },
     });
 
+    // v2.1.2 第五批 S-10: Benchmark 评测工具
+    // Agent 触发标准评测（LoCoMo / LongMemEval），输出量化指标
+    api.registerTool({
+      name: "gm_benchmark",
+      label: "Graph Memory Benchmark",
+      description: "Run S-10 Benchmark evaluation (LoCoMo + LongMemEval) on the current graph memory. Outputs P@1 / P@3 / MRR / F1 / P99 latency / token consumption. Use to quantify recall quality before/after tuning.",
+      parameters: Type.Object({
+        datasets: Type.Optional(Type.Union([
+          Type.Literal("all"),
+          Type.Array(Type.String()),
+        ])),
+        maxCases: Type.Optional(Type.Number({ description: "Max cases per dataset (0 = all)" })),
+        buildGraph: Type.Optional(Type.Boolean({ description: "Build graph from conversation history before evaluation (default true)" })),
+      }),
+      async execute(_callId: string, params: any) {
+        if (!_recaller || !_cfg) {
+          return { content: [{ type: "text", text: "Graph Memory Pro not connected" }], details: {} };
+        }
+        try {
+          const { runBenchmark, formatAggregateReport } = await import("./src/benchmark/runner.ts");
+          const result = await runBenchmark(_recaller, _driver, _cfg, {
+            datasets: params.datasets ?? "all",
+            maxCases: params.maxCases ?? _cfg.benchmark?.maxCases ?? 0,
+            buildGraph: params.buildGraph ?? _cfg.benchmark?.buildGraph ?? true,
+            caseTimeoutMs: _cfg.benchmark?.caseTimeoutMs ?? 30_000,
+            dataDir: _cfg.benchmark?.dataDir,
+            llm: _llm ?? undefined,
+          });
+          const text = formatAggregateReport(result);
+          return { content: [{ type: "text", text }], details: result.aggregate };
+        } catch (err: any) {
+          return { content: [{ type: "text", text: `Benchmark failed: ${err.message}` }], details: {} };
+        }
+      },
+    });
+
+    // v2.1.2 第五批 R-1: 自主调优（EvolveMem）工具
+    // Agent 触发一次 EvolveMem 四步循环：EVALUATE → DIAGNOSE → PROPOSE → GUARD
+    api.registerTool({
+      name: "gm_tune",
+      label: "Graph Memory Auto-Tune",
+      description: "Run one EvolveMem auto-tuning cycle (R-1). Evaluates current config on benchmark, diagnoses failures via LLM/heuristic, proposes parameter adjustments, and guards against regressions. Requires benchmark + autoTuner enabled.",
+      parameters: Type.Object({
+        rounds: Type.Optional(Type.Number({ description: "Number of tune cycles to run (default 1, max bounded by config maxRounds)" })),
+      }),
+      async execute(_callId: string, params: any) {
+        if (!_recaller || !_cfg) {
+          return { content: [{ type: "text", text: "Graph Memory Pro not connected" }], details: {} };
+        }
+        if (_cfg.autoTuner?.enabled !== true) {
+          return { content: [{ type: "text", text: "AutoTuner disabled. Set autoTuner.enabled=true in config." }], details: {} };
+        }
+        try {
+          const { AutoTuner } = await import("./src/evolution/auto-tuner.ts");
+          const tuner = new AutoTuner(_cfg.autoTuner, _llm ?? undefined);
+          tuner.setInitialAction(_cfg);
+
+          const rounds = Math.max(1, Math.min(params.rounds ?? 1, _cfg.autoTuner?.maxRounds ?? 10));
+          const results: any[] = [];
+          for (let i = 0; i < rounds; i++) {
+            const r = await tuner.runTuneCycle(_recaller, _driver, _cfg);
+            results.push(r);
+            if (!r.applied) break;
+          }
+
+          const lines = [
+            "🔧 EvolveMem Auto-Tuning",
+            `Rounds executed: ${results.length}`,
+            "",
+            ...results.map((r, i) =>
+              `Round ${i + 1}: ${r.applied ? "applied" : "skipped"} — ${r.reason}${r.isImprovement ? " ✨ improvement" : ""}${r.metrics ? ` | P@1=${(r.metrics.p1 * 100).toFixed(1)}%` : ""}`,
+            ),
+            "",
+            `Current action: ${JSON.stringify(tuner.getCurrentAction())}`,
+          ];
+          return { content: [{ type: "text", text: lines.join("\n") }], details: { rounds: results, finalAction: tuner.getCurrentAction() } };
+        } catch (err: any) {
+          return { content: [{ type: "text", text: `Auto-tune failed: ${err.message}` }], details: {} };
+        }
+      },
+    });
+
   },
 });
 
@@ -804,3 +903,19 @@ export { resolveConflicts, adjustEdgeWeights, applyReverseMemory } from "./src/g
 export type { ConflictResolutionConfig, EdgeWeightsConfig, ReverseMemoryConfig } from "./src/graph/maintenance.js";
 export { detectAndMigrateEmbeddings } from "./src/graph/reembed.js";
 export type { MigrationResult } from "./src/graph/reembed.js";
+
+// ─── v2.1.2 第五批 Benchmark + 自主调优 Re-exports ─────────
+export { runBenchmark, formatAggregateReport } from "./src/benchmark/runner.ts";
+export type { BenchmarkOptions, BenchmarkRunResult } from "./src/benchmark/runner.ts";
+export {
+  computeP1, computeP3, computeMRR, computeF1, computeP99Latency, computeAvgTokenEstimate,
+  evaluateCase, buildReport, formatReport,
+} from "./src/benchmark/types.ts";
+export type { BenchmarkCase, BenchmarkDataset, BenchmarkReport, CaseResult } from "./src/benchmark/types.ts";
+export { loadAllDatasets, loadLoCoMo, loadLongMemEval, getBuiltinSampleDataset } from "./src/benchmark/datasets.ts";
+export {
+  AutoTuner, extractActionSpace, applyActionSpace, clampAction, ACTION_BOUNDS, DEFAULT_AUTOTUNER_CONFIG,
+} from "./src/evolution/auto-tuner.ts";
+export type {
+  EvolveActionSpace, AutoTunerConfig, TuneCycleResult, DiagnosisResult, ConfigSnapshot,
+} from "./src/evolution/auto-tuner.ts";
