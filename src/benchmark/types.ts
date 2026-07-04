@@ -166,12 +166,17 @@ function tokenize(text: string): string[] {
 
 /**
  * 计算 P99 延迟
+ *
+ * 使用 nearest-rank 方法：N=100 时返回 index 98（即第 99 个最小值）
+ * 修复旧实现 Math.floor(N*0.99) 在 N=100 时返回 index 99（P100）的 off-by-one 问题
  */
 export function computeP99Latency(results: CaseResult[]): number {
   if (results.length === 0) return 0;
   const latencies = results.map(r => r.latencyMs).sort((a, b) => a - b);
-  const idx = Math.floor(latencies.length * 0.99);
-  return latencies[Math.min(idx, latencies.length - 1)];
+  const n = latencies.length;
+  // 标准 nearest-rank：ceil(N * 99/100) - 1，clamp 到 [0, N-1]
+  const idx = Math.min(Math.max(0, Math.ceil(n * 0.99) - 1), n - 1);
+  return latencies[idx];
 }
 
 /**

@@ -152,29 +152,37 @@ export class JudgeManager {
   /**
    * 处理一轮对话的反馈
    *
+   * 调用方可选传入 onFeedback 回调，用于在反馈判定完成后执行持久化等操作。
+   * - 同步模式：await judge → 调用 onFeedback → 返回 JudgeFeedback
+   * - 异步模式：fire-and-forget 启动后台任务（任务内部仍会调用 onFeedback），立即返回 null
+   *
+   * 这样无论同步/异步模式，onFeedback（持久化 + 计数 + M 更新）都会被执行，
+   * 修复了旧实现中 asyncMode=true 时整条反馈链路断裂的致命缺陷。
+   *
    * @param query 用户查询
    * @param recalledNodes 召回的节点
    * @param assistantReply assistant 回复
    * @param sessionId 会话 ID（可选）
-   * @returns 反馈记录（用于 I-3 持久化）
+   * @param onFeedback 反馈完成回调（用于 I-3 持久化 + 计数 + L-1 M 更新）
+   * @returns 同步模式返回 JudgeFeedback；异步模式返回 null（但 onFeedback 仍会被调用）
    */
   async processTurn(
     query: string,
     recalledNodes: GmNode[],
     assistantReply: string,
     sessionId?: string,
+    onFeedback?: (feedback: JudgeFeedback) => Promise<void>,
   ): Promise<JudgeFeedback | null> {
     if (!this.cfg.enabled) return null;
 
-    // 异步模式：不阻塞主流程
+    // 异步模式：fire-and-forget，但内部仍会执行 onFeedback
     if (this.cfg.asyncMode) {
-      // 异步执行但不 await（fire-and-forget）
-      this.processTurnAsync(query, recalledNodes, assistantReply, sessionId)
+      this.processTurnAsync(query, recalledNodes, assistantReply, sessionId, onFeedback)
         .catch(err => console.warn(`[graph-memory-pro] judge async failed: ${err}`));
       return null;
     }
 
-    return this.processTurnAsync(query, recalledNodes, assistantReply, sessionId);
+    return this.processTurnAsync(query, recalledNodes, assistantReply, sessionId, onFeedback);
   }
 
   private async processTurnAsync(
@@ -182,9 +190,10 @@ export class JudgeManager {
     recalledNodes: GmNode[],
     assistantReply: string,
     sessionId?: string,
+    onFeedback?: (feedback: JudgeFeedback) => Promise<void>,
   ): Promise<JudgeFeedback> {
     const result = await this.judge(recalledNodes, assistantReply);
-    return {
+    const feedback: JudgeFeedback = {
       query,
       recalledNodeIds: recalledNodes.map(n => n.id),
       usedNodeIds: result.usedNodeIds,
@@ -193,6 +202,15 @@ export class JudgeManager {
       sessionId,
       matchedBy: result.matchedBy,
     };
+    // 无论同步/异步，都执行 onFeedback（持久化 + 计数 + M 更新）
+    if (onFeedback) {
+      try {
+        await onFeedback(feedback);
+      } catch (err) {
+        console.warn(`[graph-memory-pro] feedback handler failed: ${err}`);
+      }
+    }
+    return feedback;
   }
 }
 

@@ -60,6 +60,8 @@ export interface MaintenanceResult {
   conflictResolution?: { scanned: number; resolved: number; superseded: number; merged: number };
   edgeWeights?: { scanned: number; strengthened: number; decayed: number };
   reverseMemory?: { watchlistAdded: number; watchlistRemoved: number; decayed: number };
+  /** G-4 嵌入版本迁移结果（Phase 11，v2.1.2 第四批补全） */
+  embeddingMigration?: { distribution: Map<string, number>; cleared: number; migrated: number };
   durationMs: number;
 }
 
@@ -102,6 +104,7 @@ export async function runMaintenance(
       conflictResolution: undefined,
       edgeWeights: undefined,
       reverseMemory: undefined,
+      embeddingMigration: undefined,
       durationMs: 0,
     };
   }
@@ -116,6 +119,7 @@ export async function runMaintenance(
   let conflictResult: { scanned: number; resolved: number; superseded: number; merged: number } | undefined;
   let edgeWeightsResult: { scanned: number; strengthened: number; decayed: number } | undefined;
   let reverseMemoryResult: { watchlistAdded: number; watchlistRemoved: number; decayed: number } | undefined;
+  let migrationResultValue: { distribution: Map<string, number>; cleared: number; migrated: number } | undefined;
 
   try {
     // ── Phase 0: Derive RELATES_TO from MENTIONS co-occurrence ──
@@ -271,6 +275,29 @@ export async function runMaintenance(
         console.warn(`[graph-memory-pro] reverse memory failed: ${err}`);
       }
     }
+    _lockTimestamp = Date.now();
+
+    // ── Phase 11: G-4 嵌入版本迁移（v2.1.2 第四批） ──
+    // 检测节点 embeddingModel 分布，若存在不一致（旧模型遗留）则触发重嵌入
+    // 仅在配置了 embedding.model 且启用了 evolvableEmbedding 时执行
+    if (cfg?.evolvableEmbedding?.enabled !== false && cfg?.embedding?.model && embedFn) {
+      try {
+        const { detectAndMigrateEmbeddings } = await import("./reembed.ts");
+        const migrationResult = await detectAndMigrateEmbeddings(driver, embedFn, cfg.embedding.model);
+        if (migrationResult.cleared > 0 || migrationResult.migrationTriggered) {
+          console.log(
+            `[graph-memory-pro] embedding-migration: model=${migrationResult.configuredModel}, needs=${migrationResult.needsMigration}, cleared ${migrationResult.cleared}, triggered=${migrationResult.migrationTriggered}`,
+          );
+        }
+        migrationResultValue = {
+          distribution: migrationResult.modelDistribution,
+          cleared: migrationResult.cleared,
+          migrated: migrationResult.needsMigration,
+        };
+      } catch (err) {
+        console.warn(`[graph-memory-pro] embedding migration failed: ${err}`);
+      }
+    }
 
   } finally {
     releaseLock();
@@ -285,6 +312,7 @@ export async function runMaintenance(
     conflictResolution: conflictResult,
     edgeWeights: edgeWeightsResult,
     reverseMemory: reverseMemoryResult,
+    embeddingMigration: migrationResultValue,
     durationMs: Date.now() - start,
   };
 }
@@ -734,7 +762,12 @@ export async function resolveConflicts(
               loserId = bId;
               decision = "confidence";
             } else {
-              // 策略 4: 合并（同 type + 名相同 → 保留 validatedCount 高的为主，合并 content）
+              // 策略 4: 合并（同 type + 名相同 → 按 validatedCount 选择 winner，合并 content）
+              // 修复旧实现 a 总是 winner 的偏向：比较 validatedCount/stalenessScore 综合选择
+              const aScore = aValidated * (1 - aStaleness);
+              const bScore = bValidated * (1 - bStaleness);
+              const mergeWinnerId = bScore > aScore ? bId : aId;
+              const mergeLoserId = bScore > aScore ? aId : bId;
               const mergedContent = [rec.get("aContent"), rec.get("bContent")]
                 .filter(Boolean)
                 .join("\n---\n");
@@ -758,8 +791,8 @@ export async function resolveConflicts(
                        r2.updatedAt = timestamp()
                  DETACH DELETE loser`,
                 {
-                  winnerId,
-                  loserId,
+                  winnerId: mergeWinnerId,
+                  loserId: mergeLoserId,
                   mergedContent,
                   totalValidated: aValidated + bValidated,
                 },
@@ -862,10 +895,10 @@ export async function adjustEdgeWeights(
 
   try {
     // 查询被使用节点与召回节点之间的边（强化）
-    // 简化：查询所有 JUDGED 关系中 verdict=used 的反馈涉及的节点对
+    // 仅强化 used-used 节点对之间的边（修复旧实现 j2 未过滤 verdict 导致 used-unused 边也被强化的缺陷）
     const strengthenResult = await session.run(
       `MATCH (f:GmFeedback)-[j1:JUDGED {verdict: 'used'}]->(used:Task|Skill|Event)
-       MATCH (f)-[j2:JUDGED]->(recalled:Task|Skill|Event)
+       MATCH (f)-[j2:JUDGED {verdict: 'used'}]->(recalled:Task|Skill|Event)
        WHERE recalled.id <> used.id
        MATCH (used)-[r]-(recalled)
        WHERE NOT type(r) IN ['NEXT_SESSION', 'CONTAINS']

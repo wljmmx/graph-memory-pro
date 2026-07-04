@@ -22,7 +22,8 @@ import { evaluateCase, buildReport, formatReport } from "./types.ts";
 import { loadAllDatasets, getBuiltinSampleDataset } from "./datasets.ts";
 import { Extractor } from "../extractor/extract.ts";
 import type { CompleteFn } from "../engine/llm.ts";
-import { upsertNode, upsertEdge } from "../store/store.ts";
+import type { EmbedFn } from "../engine/embed.ts";
+import { upsertNode, upsertEdge, saveVector } from "../store/store.ts";
 
 export interface BenchmarkOptions {
   /** 指定运行的数据集（"all" 或具体名称数组） */
@@ -35,6 +36,8 @@ export interface BenchmarkOptions {
   buildGraph?: boolean;
   /** 单样本超时（ms，默认 30000） */
   caseTimeoutMs?: number;
+  /** 嵌入函数（建图时为节点生成 embedding，避免 benchmark 偏向 FTS） */
+  embedFn?: EmbedFn;
   /** LLM 完成函数（建图谱时需要） */
   llm?: CompleteFn;
 }
@@ -75,6 +78,7 @@ export async function runBenchmark(
     buildGraph = true,
     caseTimeoutMs = 30_000,
     llm,
+    embedFn,
   } = opts;
 
   // 1. 加载数据集
@@ -116,7 +120,7 @@ export async function runBenchmark(
     for (const dataset of targetDatasets) {
       for (const testCase of dataset.cases) {
         if (!testCase.conversation) continue;
-        await buildGraphFromConversation(extractor, driver, llm, testCase);
+        await buildGraphFromConversation(extractor, driver, llm, testCase, embedFn);
       }
     }
   }
@@ -195,6 +199,7 @@ async function buildGraphFromConversation(
   driver: Driver,
   llm: CompleteFn,
   testCase: BenchmarkCase,
+  embedFn?: EmbedFn,
 ): Promise<void> {
   if (!testCase.conversation || testCase.conversation.length === 0) return;
 
@@ -225,6 +230,18 @@ async function buildGraphFromConversation(
         createdAt: now,
         updatedAt: now,
       });
+      // 为节点生成 embedding，避免 benchmark 仅靠 FTS 召回（修复建图无 embedding 缺陷）
+      if (embedFn) {
+        try {
+          const text = `${enode.name}: ${enode.description}\n${enode.content.slice(0, 500)}`;
+          const vec = await embedFn(text);
+          if (vec && vec.length > 0) {
+            await saveVector(driver, id, text, vec);
+          }
+        } catch {
+          // embedding 失败不阻塞建图
+        }
+      }
     }
     for (const eedge of result.edges) {
       const fromId = nodeIdMap.get(eedge.fromName);

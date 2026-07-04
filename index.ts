@@ -379,9 +379,17 @@ export default definePluginEntry({
       // v2.1.2 第二批 I-2：注入 JudgeManager
       if (_cfg.judge?.enabled !== false) {
         const { JudgeManager } = await import("./src/recaller/judge.ts");
+        const { getFeedbackCount } = await import("./src/store/store.ts");
         const jm = new JudgeManager(_cfg.judge, _llm ?? undefined);
+        // 从 DB 恢复累计反馈计数，避免 Gateway 重启后永久卡在冷启动期
+        try {
+          const persistedCount = await getFeedbackCount(driver);
+          for (let i = 0; i < persistedCount; i++) jm.incrementFeedback();
+          logger?.info?.(`[graph-memory-pro] judge enabled (warmup=${_cfg.judge?.judgeWarmupFeedbacks ?? 50}, persisted=${persistedCount})`);
+        } catch (err) {
+          logger?.warn?.(`[graph-memory-pro] judge feedback count restore failed: ${err}`);
+        }
         _recaller.setJudgeManager(jm);
-        logger?.info?.(`[graph-memory-pro] judge enabled (warmup=${_cfg.judge?.judgeWarmupFeedbacks ?? 50})`);
       }
 
       // v2.1.2 第三批 L-1：注入 AssociationMatrix（关联矩阵 M）
@@ -718,7 +726,8 @@ export default definePluginEntry({
           return { content: [{ type: "text", text: "Embedding engine not configured" }], details: {} };
         }
         try {
-          const result = await reEmbedNodes(_driver, _embed);
+          // 传入 embeddingModel，避免清空所有节点的 embeddingModel 字段（G-4 修复）
+          const result = await reEmbedNodes(_driver, _embed, 50, _cfg.embedding?.model);
           const lines = [
             "Re-Embed done",
             `Scanned: ${result.totalScanned} nodes`,
@@ -807,6 +816,7 @@ export default definePluginEntry({
             caseTimeoutMs: _cfg.benchmark?.caseTimeoutMs ?? 30_000,
             dataDir: _cfg.benchmark?.dataDir,
             llm: _llm ?? undefined,
+            embedFn: _embed ?? undefined,
           });
           const text = formatAggregateReport(result);
           return { content: [{ type: "text", text }], details: result.aggregate };
@@ -834,8 +844,21 @@ export default definePluginEntry({
         }
         try {
           const { AutoTuner } = await import("./src/evolution/auto-tuner.ts");
+          // 持久化 AutoTuner 状态到本地文件，跨 gm_tune 调用保留 snapshots/bestMetrics
+          // 修复 R-1 设计缺陷：旧实现每次新建 AutoTuner，导致 revert-on-regression 永不触发
+          const { readFile, writeFile, mkdir } = await import("node:fs/promises");
+          const { join } = await import("node:path");
+          const statePath = join(
+            process.env.HOME || process.env.USERPROFILE || ".",
+            ".openclaw", "graph-memory-pro", "auto-tuner-state.json",
+          );
           const tuner = new AutoTuner(_cfg.autoTuner, _llm ?? undefined);
           tuner.setInitialAction(_cfg);
+          // 尝试从持久化文件恢复状态
+          try {
+            const saved = await readFile(statePath, "utf-8");
+            if (saved.trim()) tuner.deserialize(saved);
+          } catch { /* 首次运行无状态文件 */ }
 
           const rounds = Math.max(1, Math.min(params.rounds ?? 1, _cfg.autoTuner?.maxRounds ?? 10));
           const results: any[] = [];
@@ -844,18 +867,28 @@ export default definePluginEntry({
             results.push(r);
             if (!r.applied) break;
           }
+          // 持久化最新状态
+          try {
+            await mkdir(join(statePath, "..").replace(/\/[^/]+$/, ""), { recursive: true }).catch(() => {});
+            await writeFile(statePath, tuner.serialize()).catch(() => {});
+          } catch { /* 持久化失败不影响调优结果 */ }
 
           const lines = [
             "🔧 EvolveMem Auto-Tuning",
             `Rounds executed: ${results.length}`,
+            `Total tune rounds (persisted): ${tuner.getTuneRound()}`,
+            `Snapshots: ${tuner.getSnapshots().length}`,
             "",
             ...results.map((r, i) =>
               `Round ${i + 1}: ${r.applied ? "applied" : "skipped"} — ${r.reason}${r.isImprovement ? " ✨ improvement" : ""}${r.metrics ? ` | P@1=${(r.metrics.p1 * 100).toFixed(1)}%` : ""}`,
             ),
             "",
             `Current action: ${JSON.stringify(tuner.getCurrentAction())}`,
+            "",
+            "⚠️ 注意：调优结果需手动应用到 GmConfig 并重启 Recaller 才生效。",
+            "   可通过 applyActionSpace(cfg, tuner.getCurrentAction()) 生成新配置。",
           ];
-          return { content: [{ type: "text", text: lines.join("\n") }], details: { rounds: results, finalAction: tuner.getCurrentAction() } };
+          return { content: [{ type: "text", text: lines.join("\n") }], details: { rounds: results, finalAction: tuner.getCurrentAction(), totalRounds: tuner.getTuneRound(), snapshots: tuner.getSnapshots().length } };
         } catch (err: any) {
           return { content: [{ type: "text", text: `Auto-tune failed: ${err.message}` }], details: {} };
         }

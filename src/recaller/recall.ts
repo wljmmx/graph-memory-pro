@@ -138,45 +138,48 @@ export class Recaller {
     if (!this.judgeManager) return;
 
     try {
+      // 把"持久化 + 计数 + M 更新"打包进 onFeedback 回调，
+      // 这样无论同步/异步模式，反馈链路都会完整执行（修复旧实现的致命断裂缺陷）
       const feedback = await this.judgeManager.processTurn(
         query,
         recalledNodes,
         assistantReply,
         sessionId,
+        async (fb) => {
+          // I-3: 持久化反馈
+          const feedbackId = `${createHash("md5").update(query + fb.timestamp + (sessionId ?? "")).digest("hex").slice(0, 16)}`;
+          await upsertFeedback(this.driver, {
+            id: feedbackId,
+            query,
+            recalledNodeIds: fb.recalledNodeIds,
+            usedNodeIds: fb.usedNodeIds,
+            unusedNodeIds: fb.unusedNodeIds,
+            timestamp: fb.timestamp,
+            sessionId,
+            matchedBy: fb.matchedBy,
+          });
+
+          // 累计反馈计数（用于冷启动判断）
+          this.judgeManager!.incrementFeedback();
+
+          // v2.1.2 第三批 L-1 + R-3：用反馈信号更新关联矩阵 M
+          // 仅在 M 启用且 embed 可用时触发（M 训练需要 query embedding）
+          if (this.associationMatrix?.isEnabled() && this.embed) {
+            try {
+              await this.updateAssociationMatrix(query, fb.usedNodeIds, fb.unusedNodeIds);
+            } catch (err) {
+              if (process.env.GM_DEBUG) console.log(`[L-1] M update failed: ${err}`);
+            }
+          }
+
+          if (process.env.GM_DEBUG) {
+            const coldStart = this.judgeManager!.isColdStart();
+            console.log(`[judge] ${fb.usedNodeIds.length}/${fb.recalledNodeIds.length} used, cold=${coldStart}`);
+          }
+        },
       );
-      // 异步模式下 feedback 为 null（fire-and-forget）
-      if (!feedback) return;
-
-      // I-3: 持久化反馈
-      const feedbackId = `${createHash("md5").update(query + Date.now()).digest("hex").slice(0, 16)}`;
-      await upsertFeedback(this.driver, {
-        id: feedbackId,
-        query,
-        recalledNodeIds: feedback.recalledNodeIds,
-        usedNodeIds: feedback.usedNodeIds,
-        unusedNodeIds: feedback.unusedNodeIds,
-        timestamp: feedback.timestamp,
-        sessionId,
-        matchedBy: feedback.matchedBy,
-      });
-
-      // 累计反馈计数（用于冷启动判断）
-      this.judgeManager.incrementFeedback();
-
-      // v2.1.2 第三批 L-1 + R-3：用反馈信号更新关联矩阵 M
-      // 仅在 M 启用且 embed 可用时触发（M 训练需要 query embedding）
-      if (this.associationMatrix?.isEnabled() && this.embed) {
-        try {
-          await this.updateAssociationMatrix(query, feedback.usedNodeIds, feedback.unusedNodeIds);
-        } catch (err) {
-          if (process.env.GM_DEBUG) console.log(`[L-1] M update failed: ${err}`);
-        }
-      }
-
-      if (process.env.GM_DEBUG) {
-        const coldStart = this.judgeManager.isColdStart();
-        console.log(`[judge] ${feedback.usedNodeIds.length}/${feedback.recalledNodeIds.length} used, cold=${coldStart}`);
-      }
+      // feedback 在同步模式下有值（已通过回调处理），异步模式下为 null（回调已在后台执行）
+      void feedback;
     } catch (err) {
       console.warn(`[graph-memory-pro] feedback persistence failed: ${err}`);
     }

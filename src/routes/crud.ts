@@ -83,7 +83,7 @@ async function handleRefreshStaleness(): Promise<{ status: number; body: any }> 
   try {
     const { computeStalenessScores } = await import("../graph/maintenance.ts");
     const result = await computeStalenessScores(_driver, {
-      halfLifeDays: _cfg?.temporal ? 90 : 90,
+      halfLifeDays: 90,
       threshold: _cfg?.staleness?.threshold ?? 0.7,
     });
     return { status: 200, body: result };

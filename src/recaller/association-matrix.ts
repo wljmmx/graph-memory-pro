@@ -341,8 +341,9 @@ export class AssociationMatrix {
       // 计算"如果应用更新"的邻域整体提升
       // 简化：用 reward 信号在邻域上的加权平均作为提升估计
       // reward > 0 → 邻域整体提升；reward < 0 → 抑制
+      // 权重 = similarity（相似邻居权重更大，符合"邻域整体提升"语义）
       const neighborhoodGain = neighbors.length > 0
-        ? neighbors.reduce((sum, s) => sum + reward * (1 - s.similarity), 0) / neighbors.length
+        ? neighbors.reduce((sum, s) => sum + reward * s.similarity, 0) / neighbors.length
         : reward;
 
       // 邻域整体提升未达阈值 → 拒绝更新（防过拟合）
