@@ -32,7 +32,11 @@ export function createCompleteFn(config?: LlmConfig): CompleteFn | null {
  */
 function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
   const apiKey = config.apiKey || "";
-  const baseURL = (config.baseURL || "https://api.openai.com/v1").replace(/\/+$/, "");
+  // 清洗 baseURL：去除反引号/首尾空格/尾部斜杠（防止 markdown 标记误入 JSON）
+  const baseURL = (config.baseURL || "https://api.openai.com/v1")
+    .replace(/`/g, "")
+    .trim()
+    .replace(/\/+$/, "");
   const model = config.model || "gpt-4o-mini";
 
   return async function complete(system: string, user: string): Promise<string> {

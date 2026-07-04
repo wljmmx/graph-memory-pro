@@ -3,10 +3,12 @@
  *
  * 使用 Ollama 原生 API: baseURL/api/embed
  * 返回格式: data.embeddings[0]
- * 
+ *
  * 处理逻辑:
  *   1. 如果 baseURL 包含 /v1 → 删除 /v1，使用 Ollama 原生 API
  *   2. 如果不包含 /v1 → 直接使用 Ollama 原生 API
+ *   3. 清洗 baseURL 中的反引号/首尾空格（防止 markdown 代码块标记误入 JSON）
+ *   4. 传递 keep_alive 参数到 Ollama（默认 5m，可配置 1h/-1 永久）
  */
 
 import type { EmbeddingConfig } from "../types.ts";
@@ -18,18 +20,32 @@ export type EmbedFn = (text: string) => Promise<number[]>;
 const RETRY_DELAYS = [1000, 3000, 5000];
 
 /**
+ * 清洗 baseURL：去除反引号、首尾空格、尾部斜杠
+ * 防止 markdown 代码块标记 ` ` 误入 JSON 配置
+ */
+function sanitizeBaseURL(url: string): string {
+  return url
+    .replace(/`/g, "")        // 去除反引号
+    .trim()                    // 去除首尾空格
+    .replace(/\/+$/, "");      // 去除尾部斜杠
+}
+
+/**
  * 内置 embedding 引擎
  * 统一使用 Ollama 原生 API
  */
 export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
   const apiKey = config.apiKey || "";
-  let baseURL = (config.baseURL || "http://localhost:11434").replace(/\/+$/, "");
-  
+  let baseURL = sanitizeBaseURL(config.baseURL || "http://localhost:11434");
+
   if (baseURL.endsWith("/v1")) {
     baseURL = baseURL.slice(0, -3);
   }
-  
+
   const model = config.model || "Qwen3.5-Embedding-0.6B-GGUF";
+  // Ollama keep_alive 参数：默认 "5m"，可配置 "1h"/"30m"/-1（永久驻留）
+  // 不传时 Ollama 默认 5m 后卸载模型，导致下次调用冷启动延迟
+  const keepAlive = config.keepAlive || "5m";
 
   return async function embed(text: string): Promise<number[]> {
     const lastErr: Error[] = [];
@@ -46,6 +62,7 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
           body: JSON.stringify({
             model,
             prompt: text,
+            keep_alive: keepAlive,
             ...(config.options ? { options: config.options } : {}),
           }),
           signal: AbortSignal.timeout(30_000),
