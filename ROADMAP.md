@@ -53,173 +53,32 @@
 
 **选型理由**：S-1/S-3/S-13/S-14 是 schema 层升级，让图谱有"时间感"和"质量感"。S-1 是 S-13 和 S-14 的前置依赖。
 
-### T3：编排层协作（引擎层提供基础 API，编排逻辑在 lcm-graph-extra）
+### T3：引擎层扩展（原不入引擎中属于引擎层的 5 项，移除成本/复杂度考量后重新纳入）
 
-| 方案 | 引擎层提供 | lcm-graph-extra 实现 |
+以下 5 项在上一版评估中因"成本/复杂度"被排除。重新评估后，它们完全属于引擎层职责范围，应纳入 v2.1.10。
+
+| 编号 | 方案 | 论文 | 核心机制 | 纳入原因 | 依赖 | 成本 |
+|---|---|---|---|---|---|---|
+| S-4 | 层次化社区 | 综述论文 | 2-3 层社区抽象，自顶向下导航 | 社区检测是引擎层核心能力，层次化是自然延伸 | 当前 community.ts | 3-5天 |
+| S-2 | 软替换 | 综述论文 | DETACH DELETE → SET state='superseded' | mergeNodes 是引擎层操作，软删除是其升级 | S-13 状态追踪 | 2-3天 |
+| S-5 | 因果关系 | 综述论文 | 新增 CAUSED_BY / LEADS_TO 边类型 | 边类型定义在引擎层，不需要跨轮推理，单轮即可提取 | 当前 extract.ts | 2-3天 |
+| L-3 | 边权重调整 | 文章 | 根据裁判反馈调整边 weight | GDS 投影和边权重在引擎层，反馈驱动权重是合理升级 | I-2 裁判反馈 | 3-4天 |
+| L-4 | 反向记忆项 | 文章 | 弱化"频繁召回但无效"的节点 | 召回逻辑在引擎层，衰减是 L-2 的扩展 | I-2 裁判反馈 + L-2 衰减 | 2-3天 |
+
+### 编排层（lcm-graph-extra 负责）
+
+以下 4 项的数据/决策不在引擎层，由 lcm-graph-extra 负责。详见 [ROADMAP-lcm-graph-extra.md](file:///workspace/ROADMAP-lcm-graph-extra.md)。
+
+| 方案 | 论文 | 归属原因 |
 |---|---|---|
-| S-9 GAM 情节缓冲 | `consolidateBuffer(nodes)` API | 缓冲管理、语义边界检测、触发策略 |
-| S-11 A-MEM Zettelkasten | `linkNodes(fromId, toId, type)` / `evolveNode(id)` API | Note 构建、Link 触发策略、Evolve 调度 |
-| S-6 场景隔离 | `sceneId` 字段 | 场景划分、隔离策略、跨场景关联 |
-| R-2 U-Mem 级联 | `judgeRecall()` 启发式规则（Tier 1） | Tier 2/3 级联决策、Thompson 采样 |
-
-### 不入引擎：逐项详细说明
-
-以下 9 项被评估为不入本版本引擎层，每项按"方案价值 → 为什么不在引擎层做 → 如果要做应该在哪做 → 引擎层能提供什么"四段分析。
+| S-12 跨轨迹抽象 | From Storage to Experience | 输入是原始对话轨迹，图谱里只有提取后的节点 |
+| S-8 记忆回顾总结 | 用户需求 | 自然语言摘要 + UI 展示 |
+| S-7 用户画像 | TencentDB L3 | 蒸馏需要对话历史，引擎层提供存储 API |
+| R-5 动态混合 | Dynamic Mixture | 场景权重决策在编排层 |
 
 ---
 
-#### S-12 跨轨迹抽象（From Storage to Experience 论文）
-
-**方案价值**：从多个独立对话中发现"这个问题多次出现"的固定模式，蒸馏为经验节点，提升召回。
-
-**为什么不在引擎层做**：跨轨迹抽象的核心输入是**原始对话轨迹**（conversation transcripts），不是图谱节点。论文的 Storage→Reflection→Experience 三阶段中，Storage 和 Reflection 需要访问完整的对话历史、消息序列、用户反馈——这些数据不在 Neo4j 图谱中，而在宿主系统（lcm-graph-extra）的对话管理模块中。引擎层只看到提取后的节点，看不到原始对话，无法做模式发现。
-
-**如果要做应该在哪做**：lcm-graph-extra。它管理对话生命周期，拥有完整的对话历史，是跨对话模式发现的天然位置。发现模式后，可通过 `upsertNode` 将经验节点写入图谱。
-
-**引擎层能提供什么**：提供 `createExperienceNode(pattern)` API，接收编排层蒸馏好的经验模式，存入图谱。引擎层不负责蒸馏，只负责存储。
-
----
-
-#### S-8 记忆回顾总结
-
-**方案价值**：支持"本周学会了什么""今年有什么特别记忆"等人类可读的记忆回顾。
-
-**为什么不在引擎层做**：回顾总结的四个环节——①自然语言查询理解（"本周"→时间范围、 "学会了什么"→语义意图）②时间范围聚合（需要理解对话上下文而非节点时间戳）③LLM 生成自然语言摘要（编排层职责）④展示界面（UI）——全部在编排层。引擎层能做的只是"查询某个时间范围内的节点"，但用户说"本周"时，需要编排层知道当前对话的上下文时间。
-
-**如果要做应该在哪做**：lcm-graph-extra。它管理对话会话，知道"当前是第几周"，能调用 `Recaller.searchNodes` 获取数据，再用 LLM 生成摘要。TencentDB 的"本周总结"功能就是在编排层实现的。
-
-**引擎层能提供什么**：`getNodesByTimeRange(from, to)` API，按 createdAt/recordedAt 过滤节点。这是纯数据查询，不涉及摘要生成。
-
----
-
-#### S-7 用户画像（TencentDB L3）
-
-**方案价值**：从历史对话中蒸馏用户偏好（技术栈、代码风格、工作习惯），用于个性化召回。
-
-**为什么不在引擎层做**：画像蒸馏需要三个条件——①完整的对话历史（而非仅提取后的节点）②跨会话的用户行为追踪（同一个用户在不同会话中的偏好一致性）③偏好变化的时态建模（"上个月喜欢 React，这个月转向 Vue"）。这三项数据都不在 Neo4j 图谱中。图谱只存储提取后的 TASK/SKILL/EVENT 节点，没有原始对话，没有用户身份映射，没有行为序列。
-
-**如果要做应该在哪做**：lcm-graph-extra。它管理用户会话，追踪用户行为，可以在对话间隙蒸馏画像。蒸馏完成后，将画像存储为 `GmProfile` 节点写入图谱（引擎层提供 `upsertProfile` API），召回时通过 `Recaller` 的 `profileWeight` 参数影响召回排序。
-
-**引擎层能提供什么**：
-- `upsertProfile(profile)` — 存储画像节点
-- `getProfile(userId)` — 查询画像
-- `Recaller` 支持 `profileWeight` 参数 — 召回时按画像偏好加权
-
----
-
-#### S-4 层次化社区
-
-**方案价值**：在现有单层社区检测上叠加 2-3 层抽象，形成社区→主题→领域的层次树，支持自顶向下导航召回。
-
-**为什么不在引擎层做**：三个原因——
-
-1. **计算成本线性增长**：每层社区检测需要一次 GDS graph.project + labelPropagation.stream，当前单层已耗时数秒，3 层意味着 3 倍时间。GDS 投影创建是 Neo4j 中最昂贵的操作之一。
-
-2. **收益不确定**：当前单层社区检测已满足召回需求（community.ts 的 `getCommunityPeers` 和 `summarizeCommunities`）。层次化社区的额外价值在于"自顶向下导航"，但 graph-memory-pro 的召回路径是"精确召回→图游走→PPR→社区补充"，不是"从顶层社区向下钻取"。要利用层次化，需要重构整个召回链路——这属于架构变更，不属于功能增强。
-
-3. **当前社区层数已够用**：单层社区在 100-1000 节点规模下已能提供有效的聚类。层次化社区在 10000+ 节点规模下才有显著优势，而 graph-memory-pro 的典型部署规模在 1000-5000 节点。
-
-**如果要做应该在哪做**：在 graph-memory-pro 的社区检测模块中做，但属于 v3.0.0 架构升级，不适合 v2.1.10 功能增强。
-
-**引擎层能提供什么**：当前 `detectCommunities` + `summarizeCommunities` 已提供单层社区能力。层次化是同一个模块的升级，但需要更大的版本跨度。
-
----
-
-#### S-2 软替换（替代 DETACH DELETE）
-
-**方案价值**：mergeNodes 时保留旧节点（标记为 superseded），而非物理删除，支持历史回溯。
-
-**为什么不在引擎层做**：三个原因——
-
-1. **查询复杂度全面上升**：当前所有查询（`MATCH (n:Task|Skill|Event)`）不需要过滤 state。引入软删除后，每个查询都要加 `WHERE n.state = 'current'` 或 `WHERE n.state IS NULL OR n.state = 'current'`（兼容旧数据）。这涉及 store.ts 中约 20+ 处 Cypher 查询的修改，且容易遗漏。
-
-2. **与 S-13 部分重叠**：S-13 已经引入了 state 字段（current/superseded/transitional）。如果 S-13 已实现，软替换就是 state 的自然延伸。但 S-13 的 state 是标注当前节点的状态，而软替换要求旧节点保留并标记——这需要修改 mergeNodes 的核心逻辑（当前是 DETACH DELETE），还要处理旧节点的边如何处理（一并保留？重新连线到新节点？）。
-
-3. **当前方案可接受**：mergeNodes 的 DETACH DELETE 配合 S-13 的 state 追踪，已经能区分"当前有效"和"已被替代"。如果未来需要完整的历史回溯，可以在 S-13 稳定后，将 DETACH DELETE 改为 SET state = 'superseded'——这是一个小改动，但需要 S-13 先行。
-
-**如果要做应该在哪做**：在 graph-memory-pro 的 mergeNodes 中做，但需要 S-13 先落地、查询全部适配后。建议放在 v2.2.0 而非 v2.1.10。
-
-**引擎层能提供什么**：S-13 的 state 字段已经为软替换打下了基础。v2.1.10 完成后，S-2 的改动量很小（改 mergeNodes 中一行 Cypher + 给所有查询加 state 过滤）。
-
----
-
-#### S-5 因果关系（CAUSED_BY / LEADS_TO）
-
-**方案价值**：新增两种边类型，表达"事件 A 导致事件 B"（CAUSED_BY，EVENT→EVENT）和"任务导致事件"（LEADS_TO，TASK→EVENT），支持故障溯源场景。
-
-**为什么不在引擎层做**：两个原因——
-
-1. **提取难度与收益不匹配**：当前 6 种关系类型（USED_SKILL、SOLVED_BY、REQUIRES、PATCHES、CONFLICTS_WITH、RELATES_TO）的提取依赖 LLM 从对话中识别。因果关系需要 LLM 理解"因为 A 所以 B"的因果链，这在单轮对话中很少出现——多数因果链跨越多轮对话，需要上下文理解。在不引入跨轮推理的情况下，提取准确率极低。
-
-2. **涟漪效应大**：新增边类型需要修改 5 个文件——extract.ts（提取 prompt 和验证）、pagerank.ts（ALL_REL_TYPES）、community.ts（ALL_REL_TYPES）、maintenance.ts（deriveRelatesFromMentions）、types.ts（EdgeType 枚举）。每个文件改动不大，但验证成本高（需要确认 GDS 投影、PageRank 计算、社区检测在新边类型下行为正确）。
-
-**如果要做应该在哪做**：在 graph-memory-pro 的 extract.ts 中做（边类型定义在引擎层），但需要先验证提取准确率。建议在 S-10 Benchmark 建立后，用评测数据验证因果关系提取的准确率，再决定是否引入。
-
-**引擎层能提供什么**：当前 6 种关系类型已覆盖核心场景。如果用户反馈"故障溯源"是高频需求，可以在 v2.2.0 中引入。
-
----
-
-#### R-5 动态记忆混合（Dynamic Mixture of Latent Memories 论文）
-
-**方案价值**：把场景隔离从"二值"（全局/本场景）升级为"动态加权混合"（70% 本场景 + 20% 相似场景 + 10% 全局）。
-
-**为什么不在引擎层做**：动态混合的核心决策——"哪些场景相关、各自权重多少"——是编排层逻辑。引擎层不知道"当前用户在哪个场景""哪些场景相似""权重应该怎么分配"。这些信息来自 lcm-graph-extra 的会话管理。
-
-**如果要做应该在哪做**：lcm-graph-extra。它知道当前场景，可以调用 `Recaller` 多次（每次传不同 sceneId 和 weight），然后合并结果。引擎层提供按 sceneId 过滤的能力，编排层做混合决策。
-
-**引擎层能提供什么**：`sceneId` 字段 + `Recaller` 支持 `sceneId` 参数。动态混合是编排层对引擎层 API 的组合调用。
-
----
-
-#### L-3 边权重调整
-
-**方案价值**：根据 I-2 裁判反馈，调整边的 weight（被用到的边加权重，未被用到的边减权重）。
-
-**为什么不在引擎层做**：两个原因——
-
-1. **权重调整需要重建 GDS 投影**：边的 weight 影响 PageRank 和社区检测。调整 weight 后，GDS 投影需要重建（或至少重新计算）。GDS 投影创建是 Neo4j 中最昂贵的操作之一，频繁重建会导致维护周期显著延长。
-
-2. **反馈信号稀疏**：边的反馈信号比节点稀疏得多。用户可能 100 次召回中只有 5 次需要特定的边，导致边权重调整的统计显著性不足。在反馈稀疏的情况下，边权重调整的噪声比信号大。
-
-**如果要做应该在哪做**：在 graph-memory-pro 的 maintenance.ts 中做，但需要反馈数据积累到足够量（建议至少 500 次裁判反馈），且需要设计增量更新机制（避免每次重建投影）。
-
-**引擎层能提供什么**：当前维护周期已包含 PageRank 和社区检测。边权重调整是这两个模块的升级，但需要更充分的反馈数据积累。
-
----
-
-#### L-4 反向记忆项
-
-**方案价值**：主动弱化过度强化的关联（"这个节点总是被召回，但实际上不太有用"），防止热门节点挤压冷门节点的召回空间。
-
-**为什么不在引擎层做**：两个原因——
-
-1. **与 L-2 衰减耦合，但信号不同**：L-2 节点衰减基于"不活跃"（长时间未使用），L-4 反向记忆项基于"过度活跃但无用"（频繁召回但从未被裁判标记为有效）。这两种信号需要不同的检测机制——L-2 看时间，L-4 看"召回频次 vs 有效频次"的比值。在当前反馈数据量下（I-2 刚刚建立），这个比值在统计上不可靠。
-
-2. **召回多样性已有保障**：当前 recall.ts 的多路召回（FTS + 向量 + 图游走 + PPR + 社区）天然提供了多样性——热门节点可能在向量搜索中排名高，但在图游走中可能被冷门邻居替代。引入反向记忆项可能破坏这种天然平衡。
-
-**如果要做应该在哪做**：在 graph-memory-pro 的 recall.ts 中做，但需要——①I-2 裁判反馈积累 > 500 条 ②建立"召回频次 vs 有效频次"的统计基线 ③设计降权策略（不是删除，而是降权）。
-
-**引擎层能提供什么**：当前 L-2 衰减已提供节点活跃度管理。L-4 是 L-2 的扩展，但需要更多数据积累。
-
----
-
-### 不入引擎总结
-
-| 编号 | 不入原因类别 | 核心判断 |
-|---|---|---|
-| S-12 | **数据不在引擎层** | 跨轨迹抽象的输入是原始对话，不是图谱节点 |
-| S-8 | **功能在编排层** | 自然语言摘要生成 + UI 展示 ≠ 引擎层职责 |
-| S-7 | **蒸馏在编排层，存储在引擎层** | 画像蒸馏需要对话历史，引擎层只提供存储 API |
-| S-4 | **成本/收益不匹配** | 3x 计算成本，典型规模下收益不明显 |
-| S-2 | **依赖 S-13 先落地** | S-13 的 state 字段是前提，v2.2.0 更合适 |
-| S-5 | **提取准确率待验证** | 因果链提取需要跨轮推理，先建 Benchmark 再决定 |
-| R-5 | **决策在编排层** | 场景权重分配是编排层逻辑，引擎层提供 sceneId 过滤 |
-| L-3 | **反馈稀疏** | 边反馈比节点稀疏得多，需要 >500 条反馈才有统计意义 |
-| L-4 | **数据积累不足** | 需要召回频次 vs 有效频次的统计基线，当前反馈量不足 |
-
----
-
-## 三、v2.1.10 聚焦方案（T1+T2 共 7 项）
+## 三、v2.1.10 聚焦方案（T1+T2+T3 共 12 项）
 
 ### 架构总览
 
@@ -240,29 +99,40 @@
 ┌──────────┐    ┌──────────────────┐    ┌──────────────────┐
 │ 提取层    │    │ 存储层 (Neo4j)    │    │ 召回层            │
 │ extract  │───▶│ + S-1 时态字段    │◀───│ Recaller         │
-│          │    │ + S-3 来源标记    │    │ + L-1 M 矩阵     │
-│          │    │ + S-13 状态追踪   │    │ + R-4 可进化嵌入  │
-│          │    │ + S-14 过时检测   │    │                  │
-└──────────┘    └──────────────────┘    └──────────────────┘
-                             │
-                    ┌────────▼─────────┐
-                    │  S-10 Benchmark   │ ← 量化验证一切
-                    │  (LoCoMo/        │
-                    │   LongMemEval)   │
-                    └──────────────────┘
+│ + S-5    │    │ + S-3 来源标记    │    │ + L-1 M 矩阵     │
+│ 因果边   │    │ + S-13 状态追踪   │    │ + R-4 可进化嵌入  │
+│          │    │ + S-14 过时检测   │    │ + L-4 反向记忆项  │
+│          │    │ + S-2 软替换      │    │                  │
+└──────────┘    └────────┬─────────┘    └──────────────────┘
+                         │
+                ┌────────▼─────────┐
+                │ 维护层            │
+                │ + S-4 层次化社区  │
+                │ + L-3 边权重调整  │
+                └────────┬─────────┘
+                         │
+                ┌────────▼─────────┐
+                │  S-10 Benchmark   │ ← 量化验证一切
+                └──────────────────┘
 ```
 
 ### 依赖关系
 
 ```
 S-1 (Bi-Temporal)  ──→  S-13 (状态追踪)  ──→  S-14 (过时检测)
+                     ──→  S-2 (软替换)
+
 S-3 (来源标记)     ──→  L-2 (节点衰减)
 
 I-2 (裁判反馈)     ──→  L-1 (M 矩阵)    ──→  R-3 (边际效用奖励)
-                                         ──→  R-4 (可进化嵌入)
-                                         ──→  R-1 (自主调优)
+                     ──→  L-3 (边权重调整) ──→  R-4 (可进化嵌入)
+                     ──→  L-4 (反向记忆项)  ──→  R-1 (自主调优)
 
-S-10 (Benchmark)   ──→  验证 R-1/R-3/R-4 的效果
+S-4 (层次化社区)    ──→  独立，基于当前 community.ts
+
+S-5 (因果关系)      ──→  独立，扩展 extract.ts + types.ts
+
+S-10 (Benchmark)   ──→  验证 R-1/R-3/R-4/L-3/L-4 的效果
 ```
 
 ---
@@ -443,15 +313,100 @@ interface EvolveActionSpace {
 
 ---
 
+### T3-1：层次化社区（S-4）
+
+**目标**：在现有单层社区检测上叠加 2-3 层抽象，形成社区→主题→领域的层次树。
+
+**实现要点**：
+- 在 community.ts 中新增 `detectHierarchicalCommunities(driver, depth=3)`
+- 每层：将上一层社区代表节点作为输入，再次运行 Label Propagation
+- 社区代表节点：该社区中 PageRank 最高的节点
+- 召回时支持自顶向下导航：从顶层社区钻取到底层节点
+
+**接入点**：[src/graph/community.ts](file:///workspace/src/graph/community.ts) 新增函数、[src/recaller/recall.ts](file:///workspace/src/recaller/recall.ts) 召回时钻取
+
+**成本**：3-5 天
+
+---
+
+### T3-2：软替换（S-2）
+
+**目标**：mergeNodes 时保留旧节点（标记为 superseded），而非物理删除。
+
+**前置条件**：S-13 状态追踪已落地。
+
+**实现要点**：
+- mergeNodes Phase 6：将 `DETACH DELETE` 改为 `SET n.state = 'superseded', n.validTo = timestamp()`
+- 所有查询（store.ts 约 20+ 处）添加 `WHERE n.state IS NULL OR n.state = 'current'` 过滤
+- 旧节点的边保留，但 weight 降为 0.1（不参与 GDS 计算）
+
+**接入点**：[src/store/store.ts](file:///workspace/src/store/store.ts) mergeNodes 修改、所有 MATCH 查询加 state 过滤
+
+**成本**：2-3 天
+
+---
+
+### T3-3：因果关系（S-5）
+
+**目标**：新增 CAUSED_BY（EVENT→EVENT）和 LEADS_TO（TASK→EVENT）边类型。
+
+**实现要点**：
+- [types.ts](file:///workspace/src/types.ts) EdgeType 枚举新增 `CAUSED_BY`、`LEADS_TO`
+- [extract.ts](file:///workspace/src/extractor/extract.ts) 提取 prompt 新增因果识别规则
+- [pagerank.ts](file:///workspace/src/graph/pagerank.ts) ALL_REL_TYPES 新增
+- [community.ts](file:///workspace/src/graph/community.ts) ALL_REL_TYPES 新增
+- [maintenance.ts](file:///workspace/src/graph/maintenance.ts) deriveRelatesFromMentions 适配
+
+**提取规则**：因果边不需要跨轮推理。"因为 X 所以 Y"的因果链在单轮对话中即可识别——LLM 判断"这个消息里的事件 A 直接导致了事件 B"。
+
+**接入点**：5 个文件（types.ts/extract.ts/pagerank.ts/community.ts/maintenance.ts）
+
+**成本**：2-3 天
+
+---
+
+### T3-4：边权重调整（L-3）
+
+**目标**：根据 I-2 裁判反馈，调整边的 weight。
+
+**实现要点**：
+- 维护周期新增边权重调整阶段
+- 规则：被裁判标记为"有效"的召回路径上的边 weight × 1.1，未使用的边 weight × 0.95
+- 与 GDS 投影协同：边权重调整后，在下一个维护周期重建投影时生效（不是每次调整都重建）
+- 冷启动：初始所有边 weight = 1.0，累计 100 次反馈后启用
+
+**接入点**：[src/graph/maintenance.ts](file:///workspace/src/graph/maintenance.ts) 新增阶段、[src/store/store.ts](file:///workspace/src/store/store.ts) 新增 updateEdgeWeight
+
+**成本**：3-4 天
+
+---
+
+### T3-5：反向记忆项（L-4）
+
+**目标**：弱化"频繁召回但从未被裁判标记为有效"的节点。
+
+**实现要点**：
+- 维护周期计算每个节点的"召回频次 vs 有效频次"比值
+- 比值 > 10（召回 10 次以上但从未有效）→ stalenessScore += 0.1
+- 与 S-14 过时检测协同：stalenessScore 高的节点在召回时降权
+- 冷启动：累计 100 次反馈后启用
+
+**接入点**：[src/graph/maintenance.ts](file:///workspace/src/graph/maintenance.ts) 新增阶段、[src/recaller/recall.ts](file:///workspace/src/recaller/recall.ts) 召回时降权
+
+**成本**：2-3 天
+
+---
+
 ## 五、实施顺序
 
 ### 第一批：Schema 升级（无依赖，可并行）
 
 ```
 S-1 + S-3  ──→  S-13 + S-14
+S-5 (因果关系，独立)
 ```
 
-**产出**：types.ts 扩展 6 个字段，store.ts 持久化，向后兼容
+**产出**：types.ts 扩展 8 个字段 + 2 种边类型
 
 ### 第二批：反馈闭环（依赖第一批的 S-1）
 
@@ -469,7 +424,18 @@ L-1 + R-3  ──→  R-4
 
 **产出**：M 矩阵 + 边际效用奖励 + 可进化嵌入
 
-### 第四批：验证闭环（依赖前面所有）
+### 第四批：结构升级与质量保障（依赖第一/二/三批）
+
+```
+S-13 ──→ S-2 (软替换，依赖 S-13)
+S-4 (层次化社区，独立)
+L-3 (边权重调整，依赖 I-2)
+L-4 (反向记忆项，依赖 I-2 + L-2)
+```
+
+**产出**：层次化社区 + 软替换 + 边权重 + 反向记忆
+
+### 第五批：验证闭环（依赖前面所有）
 
 ```
 S-10 ──→  R-1
@@ -552,6 +518,35 @@ S-10 ──→  R-1
             "enabled": false,
             "dataset": "locomo",
             "outputDir": "benchmarks/results"
+          },
+
+          "hierarchicalCommunity": {
+            "enabled": false,
+            "depth": 3,
+            "minMembersPerCommunity": 3
+          },
+
+          "softDelete": {
+            "enabled": false
+          },
+
+          "causalEdges": {
+            "enabled": false,
+            "extract": true
+          },
+
+          "edgeWeightTuning": {
+            "enabled": false,
+            "warmupFeedbacks": 100,
+            "boostFactor": 1.1,
+            "decayFactor": 0.95
+          },
+
+          "inverseMemory": {
+            "enabled": false,
+            "warmupFeedbacks": 100,
+            "stalenessIncrement": 0.1,
+            "triggerRatio": 10
           }
         }
       }
@@ -668,4 +663,6 @@ S-10 ──→  R-1
 - **上层编排**：lcm-graph-extra
 - **T1 核心方案**：自主调优 + 边际效用奖励 + 可进化嵌入 + Benchmark（4 项）
 - **T2 质量方案**：Schema 升级（时态/来源/状态/过时）（3 项）
-- **预计实施周期**：4 批次，约 30-40 天
+- **T3 引擎扩展**：层次化社区 + 软替换 + 因果关系 + 边权重 + 反向记忆（5 项）
+- **编排层**：8 项由 lcm-graph-extra 负责，详见 [ROADMAP-lcm-graph-extra.md](file:///workspace/ROADMAP-lcm-graph-extra.md)
+- **预计实施周期**：5 批次，约 50-65 天
