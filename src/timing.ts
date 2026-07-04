@@ -35,13 +35,19 @@ const DEFAULT_THRESHOLDS = [5, 10, 20, 50, 100, 200, 500, 1000, 2000];
 export class LatencyDistribution {
   private samples: number[] = [];
   private readonly thresholds: number[];
+  private readonly maxSamples: number;
 
-  constructor(thresholds: number[] = DEFAULT_THRESHOLDS) {
+  constructor(thresholds: number[] = DEFAULT_THRESHOLDS, maxSamples: number = 1000) {
     this.thresholds = [...thresholds].sort((a, b) => a - b);
+    this.maxSamples = maxSamples;
   }
 
   record(ms: number): void {
     this.samples.push(ms);
+    // 防止内存泄漏：超过上限时移除最旧的样本
+    if (this.samples.length > this.maxSamples) {
+      this.samples.shift();
+    }
   }
 
   reset(): void {

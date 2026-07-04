@@ -41,6 +41,7 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
+            ...(apiKey ? { "Authorization": `Bearer ${apiKey}` } : {}),
           },
           body: JSON.stringify({
             model,

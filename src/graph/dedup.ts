@@ -47,6 +47,7 @@ export async function detectDuplicates(driver: Driver, cfg: GmConfig): Promise<D
          reduce(dot = 0.0, i IN range(0, size(va) - 1) | dot + va[i] * vb[i]) AS dotProduct,
          sqrt(reduce(sq = 0.0, i IN range(0, size(va) - 1) | sq + va[i] * va[i])) AS normA,
          sqrt(reduce(sq = 0.0, i IN range(0, size(vb) - 1) | sq + vb[i] * vb[i])) AS normB
+       WHERE size(va) = size(vb) AND normA > 0 AND normB > 0
        WITH a, b, dotProduct / (normA * normB) AS cosineSimilarity
        WHERE cosineSimilarity >= $threshold
        RETURN a.id AS nodeA, a.name AS nameA, b.id AS nodeB, b.name AS nameB, cosineSimilarity AS score

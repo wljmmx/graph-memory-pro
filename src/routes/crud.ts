@@ -87,10 +87,17 @@ async function handleGetNode(params: { id: string }): Promise<{ status: number; 
   }
 }
 
+/** 安全解析整数参数 */
+function safeParseInt(value: string | undefined, defaultValue: number, max?: number): number {
+  const parsed = Number.parseInt(value ?? String(defaultValue), 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return defaultValue;
+  return max ? Math.min(parsed, max) : parsed;
+}
+
 async function handleSearch(params: { query?: string; limit?: string }): Promise<{ status: number; body: any }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   const q = params.query || "";
-  const limit = Math.min(parseInt(params.limit || "10"), 50);
+  const limit = safeParseInt(params.limit, 10, 50);
   if (!q.trim()) return { status: 400, body: { error: "query required" } };
   try {
     const nodes = await searchNodes(_driver, q, limit);
@@ -104,7 +111,7 @@ async function handleSearch(params: { query?: string; limit?: string }): Promise
 
 async function handleTop(params: { limit?: string }): Promise<{ status: number; body: any }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
-  const limit = Math.min(parseInt(params.limit || "20"), 100);
+  const limit = safeParseInt(params.limit, 20, 100);
   try {
     const nodes = await getTopNodes(_driver, limit);
     return { status: 200, body: { nodes } };
@@ -119,7 +126,7 @@ async function handleNodesByType(params: { type: string; limit?: string }): Prom
   if (!["TASK", "SKILL", "EVENT"].includes(type)) {
     return { status: 400, body: { error: `Invalid type: ${type}. Must be TASK, SKILL, or EVENT` } };
   }
-  const limit = params.limit ? Math.min(parseInt(params.limit), 50) : undefined;
+  const limit = params.limit ? safeParseInt(params.limit, 10, 50) : undefined;
   try {
     const nodes = await getNodesByType(_driver, type, limit);
     return { status: 200, body: { type, nodes } };

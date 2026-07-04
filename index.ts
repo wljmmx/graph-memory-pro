@@ -28,15 +28,13 @@ import type { EmbedFn } from "./src/engine/embed.ts";
 import { createCompleteFn } from "./src/engine/llm.ts";
 import { createEmbedFn } from "./src/engine/embed.ts";
 import { initDriver, closeDriver, verifyWithRetry, getDriver } from "./src/store/db.ts";
-import { ensureSchema, getTopNodes, getNodeCount, getEdgeCount, getSessionMessages, searchNodes, getEdgesForNodes } from "./src/store/store.ts";
-import { getSession } from "./src/store/db.ts";
+import { ensureSchema, getNodeCount, getEdgeCount, searchNodes, getEdgesForNodes, upsertNode, upsertEdge } from "./src/store/store.ts";
 import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
 import { assembleContext } from "./src/format/assemble.ts";
 import { runMaintenance } from "./src/graph/maintenance.ts";
 import { reEmbedNodes } from "./src/graph/reembed.ts";
 import { initRoutes, getRoutes } from "./src/routes/crud.ts";
-import { sanitizeToolUseResultPairing } from "./src/format/transcript-repair.ts";
 import { setTimingEnabled, printAllDistributions, resetAllDistributions } from "./src/timing.ts";
 
 // ─── 全局状态 ──────────────────────────────────────────
@@ -224,17 +222,69 @@ export default definePluginEntry({
         // 检查是否使用本地 ollama（通过消息内容推断）
         extractLlm = _llm;
 
-        // 提取三元组
+        // 提取三元组并持久化到 Neo4j
         if (extractLlm && _extractor) {
           let extracted = 0;
-          for (let i = 0; i < tail.length && extracted < 10; i += 2) {
+          const maxPairs = 3; // 限制每次最多提取 3 对消息，避免延迟过高
+          let pairCount = 0;
+          for (let i = 0; i < tail.length && pairCount < maxPairs; i += 2) {
             const userMsg = tail[i];
             const asstMsg = tail[i + 1];
             if (!userMsg || !asstMsg) continue;
             if (typeof userMsg.content !== "string" || typeof asstMsg.content !== "string") continue;
+            // 校验消息角色，确保配对正确
+            if (userMsg.role !== "user" || asstMsg.role !== "assistant") continue;
+            pairCount++;
             try {
               const result = await _extractor.extract(extractLlm, userMsg.content, asstMsg.content);
-              if (result.nodes.length > 0) extracted++;
+              if (result.nodes.length > 0) {
+                extracted++;
+                // 持久化提取的节点和边到 Neo4j
+                const nodeIdMap = new Map<string, string>(); // name -> id 映射，用于边
+                for (const enode of result.nodes) {
+                  try {
+                    const now = Date.now();
+                    const id = `auto-${now}-${Math.random().toString(36).slice(2, 8)}`;
+                    nodeIdMap.set(enode.name, id);
+                    await upsertNode(_driver, {
+                      id,
+                      type: enode.type,
+                      name: enode.name,
+                      description: enode.description,
+                      content: enode.content,
+                      status: "active",
+                      communityId: undefined,
+                      pagerank: 0,
+                      validatedCount: 0,
+                      createdAt: now,
+                      updatedAt: now,
+                    });
+                  } catch (e) {
+                    if (process.env.GM_DEBUG) console.log(`  [graph-memory-pro] upsertNode failed: ${e}`);
+                  }
+                }
+                for (const eedge of result.edges) {
+                  try {
+                    const fromId = nodeIdMap.get(eedge.fromName);
+                    const toId = nodeIdMap.get(eedge.toName);
+                    if (!fromId || !toId) continue; // 跳过找不到节点的边
+                    const now = Date.now();
+                    await upsertEdge(_driver, {
+                      id: `edge-${now}-${Math.random().toString(36).slice(2, 8)}`,
+                      type: eedge.type,
+                      fromId,
+                      toId,
+                      instruction: eedge.instruction,
+                      condition: eedge.condition,
+                      weight: 1,
+                      createdAt: now,
+                      updatedAt: now,
+                    });
+                  } catch (e) {
+                    if (process.env.GM_DEBUG) console.log(`  [graph-memory-pro] upsertEdge failed: ${e}`);
+                  }
+                }
+              }
             } catch {}
           }
           if (process.env.GM_DEBUG && extracted > 0) {

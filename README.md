@@ -16,10 +16,11 @@
 
 ## 版本
 
-**当前版本：2.1.0**
+**当前版本：2.2.0**
 
 ### 相比原版的改进
 
+#### 初始修复（v2.1.0）
 - 修复 `CHARS_PER_TOKEN` 从字面量 `***` 改为 `4`
 - 移除脆弱的动态 `import("openai")`，改用原生 fetch
 - LLM 调用增加重试逻辑（移植自 V1）
@@ -28,6 +29,45 @@
 - 使用 `before_prompt_build` hook（替代已废弃的 `before_agent_start`）
 - 新增 `gm_reembed` 工具，批量补充缺失的向量嵌入
 - 并发维护锁增加超时机制，防止挂死
+
+#### 深度审计修复（v2.2.0）
+
+**核心功能修复：**
+- **三元组提取结果持久化**：修复提取的知识节点和边从未写入 Neo4j 的严重 bug，知识图谱现在可以从对话中自动学习
+- **节点标签大小写统一**：修复 `upsertNode` 创建 `:TASK` 标签但查询使用 `:Task` 标签的不一致问题，添加 `typeToLabel`/`labelToType` 双向映射
+- **边数据完整性**：修复 `recordToEdge` 中 `fromId`/`toId` 永远为 `undefined` 的问题（使用了错误的 neo4j-driver API），在 `upsertEdge` 中持久化 `fromId`/`toId` 属性
+- **边的 weight 类型转换**：修复 `recordToEdge` 中 `weight` 未从 Neo4j Integer 转换为 JS number 的问题
+- **deriveRelatesFromMentions 激活**：修复该函数为死代码从未被调用的问题，现已在维护 Phase 0 中执行
+- **RELATES_TO weight 计算**：从每次维护累加 +1 改为基于实际共现次数计算
+
+**安全性修复：**
+- **Embedding API 认证**：修复 `apiKey` 被读取但从未添加到请求 header 的问题，现在会发送 `Authorization: Bearer` header
+- **XML 注入防护**：修复 `assembleContext` 中 `n.name` 和 `n.content` 未做 XML 转义的问题
+
+**稳定性修复：**
+- **reembed 死循环防护**：添加最大连续失败次数限制（5 次），防止数据库不可用时无限循环
+- **reembed ORDER BY**：添加 `ORDER BY n.id` 确保分页结果确定性
+- **reembed 空内容检查**：修复空内容判断（": " 是非空字符串不会被跳过）
+- **syncEmbed hash 一致性**：修复 hash 基于完整 content 但实际嵌入的是截断文本的不一致问题
+- **维护锁竞态防护**：在每个维护阶段间刷新锁时间戳，防止长时间维护被误判为超时
+- **mergeNodes null 值处理**：修复 OPTIONAL MATCH 返回 null 时导致的 Cypher 语法错误
+- **mergeNodes 幽灵边清理**：在 Phase 6 中 DETACH DELETE merge 节点，防止残留幽灵边
+- **mergeNodes instruction 合并**：修复空字符串导致的 `" | foo"` 前导分隔符问题
+
+**性能修复：**
+- **pagerank 投影缓存 hash 比较**：修复 hash 计算后从未比较的问题，TTL 内关系类型变化时自动重建投影
+- **LLM 智能重试**：对 4xx 错误（非 429）不重试，避免无效等待
+- **timing 内存泄漏**：实现 maxSamples 限制，防止 samples 数组无限增长
+
+**健壮性修复：**
+- **dedup 除零保护**：添加 `normA > 0 AND normB > 0 AND size(va) = size(vb)` 条件
+- **extract 正则非贪婪**：将贪婪匹配 `[\s\S]*` 改为非贪婪 `[\s\S]*?`
+- **extract 节点/边验证**：添加 `isValidNode`/`isValidEdge` 字段验证，过滤畸形数据
+- **crud parseInt 安全**：添加 `safeParseInt` 函数，处理 NaN/负数/非数字输入
+- **community 错误日志**：添加 embedding 和 LLM 失败的警告日志
+- **pagerank 错误日志**：添加 GDS 失败的警告日志
+- **db closeDriver 竞态**：先将 _driver 置 null 再异步关闭，防止竞态
+- **community import 位置**：将文件中间的 import 移到顶部
 
 ## 安装
 

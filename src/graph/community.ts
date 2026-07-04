@@ -8,6 +8,8 @@
 
 import type { Driver } from "neo4j-driver";
 import { getSession } from "../store/db.ts";
+import type { CompleteFn } from "../engine/llm.ts";
+import type { EmbedFn } from "../engine/embed.ts";
 import { updateCommunities, upsertCommunitySummary, pruneCommunitySummaries } from "../store/store.ts";
 
 const ALL_REL_TYPES = ["NEXT_SESSION", "CONTAINS", "MENTIONS", "USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH", "RELATES_TO"];
@@ -129,9 +131,6 @@ export async function getCommunityPeers(driver: Driver, nodeId: string, limit = 
   }
 }
 
-import type { CompleteFn } from "../engine/llm.ts";
-import type { EmbedFn } from "../engine/embed.ts";
-
 const COMMUNITY_SUMMARY_SYS = `你是知识图谱社区摘要引擎。根据社区内的节点列表，生成一句话描述该社区的主题领域。
 要求：
 - 只返回一句话，不超过 30 个字
@@ -194,12 +193,16 @@ export async function summarizeCommunities(
         try {
           const embedText = `${cleaned}\n${members.map(m => m.name).join(", ")}`;
           embedding = await embedFn(embedText);
-        } catch {}
+        } catch (err) {
+          console.warn(`[graph-memory-pro] community embedding failed for ${communityId}: ${err}`);
+        }
       }
 
       await upsertCommunitySummary(driver, communityId, cleaned, memberIds.length, embedding);
       generated++;
-    } catch (err) {}
+    } catch (err) {
+      console.warn(`[graph-memory-pro] community summary failed for ${communityId}: ${err}`);
+    }
   }
 
   return generated;

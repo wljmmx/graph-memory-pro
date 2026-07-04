@@ -114,17 +114,39 @@ export async function ensureSchema(driver: Driver, dimension: number = 1024): Pr
 
 // ─── 节点 CRUD ──────────────────────────────────────────────
 
+/** 将 NodeType (TASK/SKILL/EVENT) 映射为 Neo4j Label (Task/Skill/Event) */
+function typeToLabel(type: string): string {
+  const mapping: Record<string, string> = {
+    TASK: "Task",
+    SKILL: "Skill",
+    EVENT: "Event",
+  };
+  return mapping[type.toUpperCase()] ?? type.charAt(0).toUpperCase() + type.slice(1).toLowerCase();
+}
+
+/** 将 Neo4j Label (Task/Skill/Event) 映射为 NodeType (TASK/SKILL/EVENT) */
+function labelToType(label: string): string {
+  const mapping: Record<string, string> = {
+    Task: "TASK",
+    Skill: "SKILL",
+    Event: "EVENT",
+  };
+  return mapping[label] ?? label.toUpperCase();
+}
+
 export async function upsertNode(
   driver: Driver,
   node: GmNode,
 ): Promise<void> {
   const session = getSession(driver);
   try {
+    const label = typeToLabel(node.type);
     await session.run(
-      `MERGE (n:${node.type} {id: $id})
+      `MERGE (n:${label} {id: $id})
        SET n.name = $name,
            n.description = $description,
            n.content = $content,
+           n.type = $type,
            n.status = $status,
            n.pagerank = $pagerank,
            n.validatedCount = $validatedCount,
@@ -136,6 +158,7 @@ export async function upsertNode(
         name: node.name,
         description: node.description,
         content: node.content,
+        type: node.type,
         status: node.status,
         pagerank: node.pagerank,
         validatedCount: node.validatedCount,
@@ -370,6 +393,8 @@ export async function upsertEdge(
        MATCH (to:Task|Skill|Event {id: $toId})
        MERGE (from)-[r:${edge.type}]->(to)
        SET r.id = $id,
+           r.fromId = $fromId,
+           r.toId = $toId,
            r.instruction = $instruction,
            r.condition = $condition,
            r.weight = $weight,
@@ -402,39 +427,35 @@ export async function mergeNodes(
     // Phase 1: collect outgoing edges from merge node
     const outResult = await session.run(
       `MATCH (merge:Task|Skill|Event {id: $mergeId})
-
        OPTIONAL MATCH (merge)-[r]->(target:Task|Skill|Event)
-
        WHERE target.id <> $keepId AND r IS NOT NULL
-
        RETURN target.id AS targetId, type(r) AS relType, r.instruction AS instruction, r.weight AS weight`,
       { mergeId },
     );
 
     // Phase 2: MERGE each outgoing edge (relType as literal per iteration)
     for (const record of outResult.records) {
-      const targetId = String(record.get('targetId'));
-      const relType = String(record.get('relType'));
+      const targetIdRaw = record.get('targetId');
+      if (!targetIdRaw) continue; // skip null from OPTIONAL MATCH
+      const targetId = String(targetIdRaw);
+      const relTypeRaw = record.get('relType');
+      if (!relTypeRaw) continue;
+      const relType = String(relTypeRaw);
       const instruction = record.get('instruction') ? String(record.get('instruction')) : null;
       const weight = record.get('weight');
       const w = typeof weight === 'number' ? weight : (weight && typeof weight.toNumber === 'function' ? weight.toNumber() : 0);
 
       await session.run(
         `MATCH (k {id: $keepId}), (t {id: $targetId})
-
          MERGE (k)-[nr:${relType}]->(t)
-
          SET nr.instruction = CASE
-
-           WHEN nr.instruction IS NULL THEN COALESCE($instruction, nr.instruction)
-
+           WHEN nr.instruction IS NULL OR trim(nr.instruction) = '' THEN COALESCE($instruction, nr.instruction)
            WHEN $instruction IS NOT NULL AND nr.instruction <> $instruction THEN nr.instruction + ' | ' + $instruction
-
            ELSE nr.instruction
-
          END,
-
-             nr.weight = COALESCE(nr.weight, 0) + $weight`,
+         nr.weight = COALESCE(nr.weight, 0) + $weight,
+         nr.fromId = $keepId,
+         nr.toId = $targetId`,
         { keepId, targetId, instruction, weight: w },
       );
     }
@@ -442,39 +463,35 @@ export async function mergeNodes(
     // Phase 3: collect incoming edges to merge node
     const inResult = await session.run(
       `MATCH (merge:Task|Skill|Event {id: $mergeId})
-
        OPTIONAL MATCH (source:Task|Skill|Event)-[r2]->(merge)
-
        WHERE source.id <> $keepId AND r2 IS NOT NULL
-
        RETURN source.id AS sourceId, type(r2) AS relType, r2.instruction AS instruction, r2.weight AS weight`,
       { mergeId },
     );
 
     // Phase 4: MERGE each incoming edge
     for (const record of inResult.records) {
-      const sourceId = String(record.get('sourceId'));
-      const relType = String(record.get('relType'));
+      const sourceIdRaw = record.get('sourceId');
+      if (!sourceIdRaw) continue;
+      const sourceId = String(sourceIdRaw);
+      const relTypeRaw = record.get('relType');
+      if (!relTypeRaw) continue;
+      const relType = String(relTypeRaw);
       const instruction = record.get('instruction') ? String(record.get('instruction')) : null;
       const weight = record.get('weight');
       const w = typeof weight === 'number' ? weight : (weight && typeof weight.toNumber === 'function' ? weight.toNumber() : 0);
 
       await session.run(
         `MATCH (s {id: $sourceId}), (k {id: $keepId})
-
          MERGE (s)-[nr2:${relType}]->(k)
-
          SET nr2.instruction = CASE
-
-           WHEN nr2.instruction IS NULL THEN COALESCE($instruction, nr2.instruction)
-
+           WHEN nr2.instruction IS NULL OR trim(nr2.instruction) = '' THEN COALESCE($instruction, nr2.instruction)
            WHEN $instruction IS NOT NULL AND nr2.instruction <> $instruction THEN nr2.instruction + ' | ' + $instruction
-
            ELSE nr2.instruction
-
          END,
-
-             nr2.weight = COALESCE(nr2.weight, 0) + $weight`,
+         nr2.weight = COALESCE(nr2.weight, 0) + $weight,
+         nr2.fromId = $sourceId,
+         nr2.toId = $keepId`,
         { sourceId, keepId, instruction, weight: w },
       );
     }
@@ -482,10 +499,16 @@ export async function mergeNodes(
     // Phase 5: update merge counts and status
     await session.run(
       `MATCH (keep {id: $keepId}), (merge {id: $mergeId})
-
        SET keep.validatedCount = COALESCE(keep.validatedCount, 0) + COALESCE(merge.validatedCount, 0),
            merge.status = 'merged', merge.updatedAt = timestamp()`,
       { keepId, mergeId },
+    );
+
+    // Phase 6: delete all edges from/to merge node to prevent ghost edges
+    await session.run(
+      `MATCH (merge:Task|Skill|Event {id: $mergeId})
+       DETACH DELETE merge`,
+      { mergeId },
     );
   } finally {
     await session.close();
@@ -809,9 +832,10 @@ export async function getRecentDistinctMessages(
 function recordToNode(rec: any): GmNode | null {
   if (!rec || !rec.properties) return null;
   const p = rec.properties;
+  const rawLabel = rec.labels?.[0];
   return {
     id: p.id,
-    type: p.type ?? rec.labels?.[0] ?? "TASK",
+    type: p.type ?? (rawLabel ? labelToType(rawLabel) : "TASK"),
     name: p.name ?? "",
     description: p.description ?? "",
     content: p.content ?? "",
@@ -828,14 +852,18 @@ function recordToNode(rec: any): GmNode | null {
 function recordToEdge(rec: any): GmEdge | null {
   if (!rec || !rec.properties) return null;
   const p = rec.properties;
+  // 使用 startNodeElementId/endNodeElementId 获取节点 element ID
+  // 但我们需要的是业务 ID（n.id），需要通过 startNode/endNode 获取
+  const fromId = p.fromId ?? rec.startNodeElementId ?? rec.start?.toNumber?.() ?? "";
+  const toId = p.toId ?? rec.endNodeElementId ?? rec.end?.toNumber?.() ?? "";
   return {
-    id: p.id ?? `${rec.start?.elementId}-${rec.end?.elementId}-${rec.type}`,
+    id: p.id ?? `${fromId}-${toId}-${rec.type}`,
     type: rec.type,
-    fromId: p.fromId ?? rec.start?.elementId,
-    toId: p.toId ?? rec.end?.elementId,
+    fromId,
+    toId,
     instruction: p.instruction ?? "",
     condition: p.condition,
-    weight: p.weight ?? 1,
+    weight: typeof p.weight === "number" ? p.weight : (p.weight?.toNumber?.() ?? 1),
     createdAt: p.createdAt?.toNumber?.() ?? 0,
     updatedAt: p.updatedAt?.toNumber?.() ?? 0,
   };

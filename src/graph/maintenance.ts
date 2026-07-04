@@ -34,9 +34,11 @@ async function deriveRelatesFromMentions(
       `MATCH (msg:ConversationMessage)-[:MENTIONS]->(a:Task|Skill|Event {status: active})
        MATCH (msg)-[:MENTIONS]->(b:Task|Skill|Event {status: active})
        WHERE a.id < b.id
-       WITH DISTINCT a, b
+       WITH a, b, count(DISTINCT msg) AS coOccur
        MERGE (a)-[r:RELATES_TO]->(b)
-       SET r.weight = COALESCE(r.weight, 0) + 1,
+       SET r.weight = coOccur,
+           r.fromId = a.id,
+           r.toId = b.id,
            r.updatedAt = timestamp()
        WITH count(DISTINCT r) AS created
        RETURN created`
@@ -104,6 +106,15 @@ export async function runMaintenance(
   let communitySummaries = 0;
 
   try {
+    // ── Phase 0: Derive RELATES_TO from MENTIONS co-occurrence ──
+    try {
+      const edgeResult = await deriveRelatesFromMentions(driver);
+      console.log(`[graph-memory-pro] repair edges: ${edgeResult.relatesToCreated} created`);
+    } catch (err) {
+      console.warn(`[graph-memory-pro] repair edges failed: ${err}`);
+    }
+    _lockTimestamp = Date.now(); // refresh lock
+
     // ── Phase 1: Dedup ──
     try {
       dedupResult = await dedup(driver, cfg);
@@ -111,6 +122,7 @@ export async function runMaintenance(
     } catch (err) {
       console.warn(`[graph-memory-pro] dedup failed: ${err}`);
     }
+    _lockTimestamp = Date.now(); // refresh lock
 
     // ── Phase 2: PageRank ──
     try {
@@ -119,6 +131,7 @@ export async function runMaintenance(
     } catch (err) {
       console.warn(`[graph-memory-pro] pagerank failed: ${err}`);
     }
+    _lockTimestamp = Date.now(); // refresh lock
 
     // ── Phase 3: Community Detection ──
     try {
@@ -127,6 +140,7 @@ export async function runMaintenance(
     } catch (err) {
       console.warn(`[graph-memory-pro] community failed: ${err}`);
     }
+    _lockTimestamp = Date.now(); // refresh lock
 
     // ── Phase 4: Community Summaries (optional, needs LLM) ──
     if (llm && communityResult.communities.size > 0) {

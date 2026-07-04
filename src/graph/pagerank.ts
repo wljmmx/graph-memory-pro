@@ -48,18 +48,25 @@ async function ensureSharedProjection(session: Session): Promise<boolean> {
   const now = Date.now();
   const tEnsure = Date.now();
 
-  // Fast path: within TTL, check GDS-side existence
+  // Fast path: within TTL and hash unchanged, check GDS-side existence
   if (_cachedRelTypeHash && (now - _cachedTimestamp) < PROJECTION_TTL_MS) {
-    const checkResult = await session.run(`
-      CALL gds.graph.exists($name)
-      YIELD exists
-      RETURN exists
-    `, { name: SHARED_GRAPH_NAME });
+    // Verify relation types haven't changed by comparing hash
+    const currentTypes = await getExistingRelTypes(session);
+    const currentHash = relTypeHash(currentTypes);
 
-    if (checkResult.records[0]?.get("exists") === true) {
-            logPhase("ensure_projection", Date.now() - tEnsure, { cache: "hit" });
-      return true;
+    if (currentHash === _cachedRelTypeHash) {
+      const checkResult = await session.run(`
+        CALL gds.graph.exists($name)
+        YIELD exists
+        RETURN exists
+      `, { name: SHARED_GRAPH_NAME });
+
+      if (checkResult.records[0]?.get("exists") === true) {
+        logPhase("ensure_projection", Date.now() - tEnsure, { cache: "hit" });
+        return true;
+      }
     }
+    // hash changed or graph missing → fall through to recreate
   }
 
   // Check if relation types changed
@@ -67,7 +74,7 @@ async function ensureSharedProjection(session: Session): Promise<boolean> {
   const currentHash = relTypeHash(currentTypes);
 
   if (currentTypes.length === 0) {
-          logPhase("ensure_projection", Date.now() - tEnsure, { status: "no_types" });
+    logPhase("ensure_projection", Date.now() - tEnsure, { status: "no_types" });
     return false;
   }
 
@@ -80,7 +87,7 @@ async function ensureSharedProjection(session: Session): Promise<boolean> {
   );
   _cachedTimestamp = now;
   _cachedRelTypeHash = currentHash;
-        logPhase("ensure_projection", Date.now() - tEnsure, { status: "rebuilt" });
+  logPhase("ensure_projection", Date.now() - tEnsure, { status: "rebuilt" });
   return true;
 }
 export interface PPRResult {
@@ -219,6 +226,7 @@ export async function computeGlobalPageRank(driver: Driver, cfg: GmConfig): Prom
 
     return readTopK(session);
   } catch (err) {
+    console.warn(`[graph-memory-pro] pagerank failed: ${err}`);
     _cachedRelTypeHash = null;
     _cachedTimestamp = 0;
     try { await session.run(`CALL gds.graph.drop('${SHARED_GRAPH_NAME}')`); } catch {}

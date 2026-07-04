@@ -78,17 +78,18 @@ function parseExtractResult(raw: string): ExtractResult {
     const parsed = JSON.parse(cleaned);
     if (!parsed || typeof parsed !== "object") return FALLBACK;
     return {
-      nodes: Array.isArray(parsed.nodes) ? parsed.nodes.slice(0, 5) : [],
-      edges: Array.isArray(parsed.edges) ? parsed.edges.slice(0, 8) : [],
+      nodes: Array.isArray(parsed.nodes) ? parsed.nodes.filter(isValidNode).slice(0, 5) : [],
+      edges: Array.isArray(parsed.edges) ? parsed.edges.filter(isValidEdge).slice(0, 8) : [],
     };
   } catch {
-    const match = cleaned.match(/\{[\s\S]*"nodes"[\s\S]*\}/);
+    // 非贪婪匹配，避免匹配过多内容
+    const match = cleaned.match(/\{[\s\S]*?"nodes"[\s\S]*?\}/);
     if (match) {
       try {
         const parsed = JSON.parse(match[0]);
         return {
-          nodes: Array.isArray(parsed.nodes) ? parsed.nodes.slice(0, 5) : [],
-          edges: Array.isArray(parsed.edges) ? parsed.edges.slice(0, 8) : [],
+          nodes: Array.isArray(parsed.nodes) ? parsed.nodes.filter(isValidNode).slice(0, 5) : [],
+          edges: Array.isArray(parsed.edges) ? parsed.edges.filter(isValidEdge).slice(0, 8) : [],
         };
       } catch {
         return FALLBACK;
@@ -96,6 +97,25 @@ function parseExtractResult(raw: string): ExtractResult {
     }
     return FALLBACK;
   }
+}
+
+// ─── 验证函数 ──────────────────────────────────
+
+function isValidNode(node: any): boolean {
+  if (!node || typeof node !== "object") return false;
+  if (typeof node.name !== "string" || !node.name.trim()) return false;
+  if (typeof node.description !== "string") return false;
+  if (typeof node.content !== "string") return false;
+  if (typeof node.type !== "string" || !["TASK", "SKILL", "EVENT"].includes(node.type.toUpperCase())) return false;
+  return true;
+}
+
+function isValidEdge(edge: any): boolean {
+  if (!edge || typeof edge !== "object") return false;
+  if (typeof edge.type !== "string" || !edge.type.trim()) return false;
+  if (typeof edge.fromName !== "string" || !edge.fromName.trim()) return false;
+  if (typeof edge.toName !== "string" || !edge.toName.trim()) return false;
+  return true;
 }
 
 // ─── Extractor 类包装 ──────────────────────────

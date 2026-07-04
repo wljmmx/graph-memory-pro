@@ -78,6 +78,11 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
         const error = err instanceof Error ? err : new Error(String(err));
         lastErr.push(error);
 
+        // 对 4xx 错误（非 429 限流）不重试，因为重试也不会成功
+        if (error.message.match(/LLM API 4\d{2}/) && !error.message.includes("429")) {
+          throw error;
+        }
+
         if (attempt < delays.length) {
           await new Promise((r) => setTimeout(r, delays[attempt]));
         }

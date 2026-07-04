@@ -37,12 +37,13 @@ export function initDriver(cfg: Neo4jConfig): Driver {
 
 export function closeDriver(): void {
   if (_driver) {
-    try {
-      _driver.close();
-    } catch {
-      // ignore close errors
-    }
+    const oldDriver = _driver;
     _driver = null;
+    _config = null;
+    // 异步关闭旧 driver，不阻塞当前调用
+    oldDriver.close().catch(() => {
+      // ignore close errors
+    });
   }
 }
 

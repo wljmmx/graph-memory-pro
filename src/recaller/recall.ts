@@ -206,15 +206,19 @@ export class Recaller {
 
   async syncEmbed(node: GmNode): Promise<void> {
     if (!this.embed) return;
-    const hash = createHash("md5").update(node.content).digest("hex");
+    // 构造实际用于嵌入的文本
+    const text = node.name + ": " + node.description + "\n" + node.content.slice(0, 500);
+    // 基于嵌入文本计算 hash，确保与 saveVector 一致
+    const hash = createHash("md5").update(text).digest("hex");
     const existingHash = await getVectorHash(this.driver, node.id);
     if (existingHash === hash) return;
+    // 跳过已有 embedding 且 hash 匹配的节点，避免冗余查询
+    if (node.embedding && Array.isArray(node.embedding) && node.embedding.length > 0 && existingHash === hash) return;
     try {
       const tSync = Date.now();
-      const text = node.name + ": " + node.description + "\n" + node.content.slice(0, 500);
       const vec = await this.embed(text);
       logPhase("vec_embed", Date.now() - tSync, { context: "syncEmbed" });
-      if (vec.length) await saveVector(this.driver, node.id, node.content, vec);
+      if (vec.length) await saveVector(this.driver, node.id, text, vec);
     } catch {}
   }
 }
