@@ -67,7 +67,7 @@
 
 ### 编排层（lcm-graph-extra 负责）
 
-以下 4 项的数据/决策不在引擎层，由 lcm-graph-extra 负责。详见 [ROADMAP-lcm-graph-extra.md](file:///workspace/ROADMAP-lcm-graph-extra.md)。
+以下 4 项的数据/决策不在引擎层，由 lcm-graph-extra 负责（lcm-graph-extra 有独立路线图，不在本项目内维护）。
 
 | 方案 | 论文 | 归属原因 |
 |---|---|---|
@@ -861,5 +861,5 @@ S-10 ──→  R-1
 - **T2 质量方案**：Schema 升级（时态/来源/状态/过时）（3 项）
 - **T3 引擎扩展**：层次化社区 + 软替换 + 因果关系 + 边权重 + 反向记忆（5 项）
 - **G 深度能力**：冲突消解 + 重要性评分 + 嵌入版本（简化）+ 图谱健康 + 冷启动（5 项，G-1 深度整合已剔除）
-- **编排层**：12 项由 lcm-graph-extra 负责（G-7/G-12 已剔除，G-8 已简化），详见 [ROADMAP-lcm-graph-extra.md](file:///workspace/ROADMAP-lcm-graph-extra.md)
+- **编排层**：12 项由 lcm-graph-extra 负责（G-7/G-12 已剔除，G-8 已简化），lcm-graph-extra 有独立路线图
 - **预计实施周期**：5 批次，约 60-75 天
