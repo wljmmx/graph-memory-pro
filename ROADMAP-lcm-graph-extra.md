@@ -26,9 +26,9 @@
 
 ---
 
-## 二、v1.0.0 演进方案（8 项）
+## 二、v1.0.0 演进方案（14 项）
 
-按依赖关系分为三个批次：
+按依赖关系分为五个批次：
 
 ### 第一批：基础设施（无 graph-memory-pro 新增 API 依赖）
 
@@ -36,6 +36,7 @@
 |---|---|---|---|---|
 | S-6 | 场景隔离 | 自研 | 场景划分、隔离策略、跨场景关联 | 3-4天 |
 | S-8 | 记忆回顾总结 | 用户需求 | 时间范围查询 + LLM 摘要 + UI | 3-4天 |
+| G-11 | Token 预算管理 | TencentDB | 召回结果 token 预算控制，按重要性裁剪 | 2-3天 |
 
 ### 第二批：反馈与学习（依赖 graph-memory-pro I-2 裁判反馈）
 
@@ -44,14 +45,29 @@
 | S-7 | 用户画像 | TencentDB L3 | 对话历史蒸馏 → GmProfile → 个性化召回 | 4-5天 |
 | R-2 | 成本感知级联 | U-Mem | Tier 2（教师模型）+ Tier 3（工具验证）+ Thompson 采样 | 4-5天 |
 | S-12 | 跨轨迹抽象 | From Storage to Experience | 多对话模式发现 → 经验节点蒸馏 | 4-5天 |
+| G-8 | 记忆验证回路 | 闭环反馈 | Agent 使用记忆后验证结果，反馈给 L-3/L-4 | 3-4天 |
 
 ### 第三批：自主编排（依赖 graph-memory-pro 新增 API）
 
 | 编号 | 方案 | 论文 | 核心机制 | 成本 |
 |---|---|---|---|---|
 | S-9 | 情节缓冲 | GAM (ACL 2026) | 缓冲管理 + 语义边界检测 + 触发整合 | 4-5天 |
-| S-11 | Zettelkasten | A-MEM (NeurIPS 2025) | Note 构建 + Link 触发 + Evolve 调度 | 5-7天 |
+| S-11 | Zettelkasten | A-MEM (NeurIPS 2025) | Note 构建 + Link 触发 + Evolve 调度 + 记忆簇 Box | 5-7天 |
 | R-5 | 动态记忆混合 | Dynamic Mixture | 场景权重学习 + 动态混合召回 | 3-4天 |
+
+### 第四批：编辑性功能（依赖前面批次）
+
+| 编号 | 方案 | 论文 | 核心机制 | 成本 |
+|---|---|---|---|---|
+| G-7 | 主动记忆建议 | 编辑性 | proactively suggest "你学过 X，与当前任务相关" | 3-4天 |
+| G-10 | 主动遗忘命令 | 用户控制 | 用户主动"忘掉这个"命令，触发引擎层降权 | 2-3天 |
+
+### 第五批：运维能力（独立）
+
+| 编号 | 方案 | 论文 | 核心机制 | 成本 |
+|---|---|---|---|---|
+| G-9 | 记忆导出/导入 | 运维需求 | 备份/恢复/迁移，JSON 格式导出 | 2-3天 |
+| G-12 | 记忆簇 Box | A-MEM 核心概念 | 相关记忆打包成簇，召回时按簇扩展 | 2-3天 |
 
 ---
 
@@ -223,45 +239,170 @@ Experience → 跨轨迹抽象，提取可复用模式（本任务）
 
 ---
 
+#### G-7：主动记忆建议
+
+**目标**：proactively suggest "你学过 X，与当前任务相关"，从被动召回升级为主动建议。
+
+**实现要点**：
+- 监听当前对话上下文（不只是 query，还包括 assistant 正在生成的回复）
+- 实时调用 graph-memory-pro 的 `searchNodes` 找相关节点
+- 若发现高相关性且未被召回的节点，主动提示用户
+- 触发条件：相关性 > 0.85 且当前 prompt 中未包含该节点
+- 防干扰：每个对话最多主动建议 3 次
+
+**依赖 graph-memory-pro API**：`searchNodes`（已有）
+
+**成本**：3-4 天
+
+---
+
+#### G-8：记忆验证回路
+
+**目标**：Agent 使用记忆后，验证使用结果（成功/失败），反馈给 L-3/L-4 用于权重调整。
+
+**实现要点**：
+- 监听 assistant 回复后的用户反馈（"对"/"错"/"没用"等）
+- 或通过 LLM 判断"这次任务是否成功完成"
+- 验证结果写入 graph-memory-pro 的 `GmFeedback` 节点
+- 反馈信号驱动：
+  - 成功 → 召回路径上的边 weight +1（L-3）
+  - 失败 → 召回路径上的节点 stalenessScore +0.1（L-4）
+- 与 R-2 级联协同：失败的召回触发 Tier 2/3 重新评估
+
+**依赖 graph-memory-pro API**：`upsertFeedback`（v2.1.10 新增）
+
+**成本**：3-4 天
+
+---
+
+#### G-9：记忆导出/导入
+
+**目标**：备份/恢复/迁移，支持 JSON 格式导出。
+
+**实现要点**：
+- 导出：调用 `getNodesByTimeRange` + `getEdgesForNodes`，序列化为 JSON
+- 导入：解析 JSON，调用 `upsertNode` + `upsertEdge` 批量写入
+- 支持增量导出（按时间范围）和全量导出
+- 支持选择性导出（按场景、按类型、按社区）
+- 用于：环境迁移、备份恢复、跨用户共享
+
+**依赖 graph-memory-pro API**：`getNodesByTimeRange`、`upsertNode`、`upsertEdge`（已有/v2.1.10 新增）
+
+**成本**：2-3 天
+
+---
+
+#### G-10：主动遗忘命令
+
+**目标**：用户主动"忘掉这个"命令，触发引擎层降权或软删除。
+
+**实现要点**：
+- Agent 工具 `gm_forget`：
+  - 参数：nodeId 或查询条件
+  - 模式：soft（仅降权）/ hard（软删除 state=superseded）
+- 调用 graph-memory-pro 的 `evolveNode(id, { state: 'superseded' })`
+- 与 S-2 软替换协同：被遗忘的节点 state → superseded
+- 与 G-3 重要性评分协同：遗忘后 importanceScore → 0
+
+**依赖 graph-memory-pro API**：`evolveNode(id, updates)`（v2.1.10 新增）
+
+**成本**：2-3 天
+
+---
+
+#### G-11：Token 预算管理
+
+**目标**：召回结果 token 预算控制，按重要性裁剪，参考 TencentDB 的 token 优化策略。
+
+**实现要点**：
+- 配置 `recallTokenBudget`（默认 2000 token）
+- 召回结果按 `importanceScore × (1 - stalenessScore)` 排序
+- 按 token 累加裁剪，超出预算的低重要性节点只保留摘要
+- 与 G-12 记忆簇协同：同一簇内的节点共享 token 预算
+- 监控：记录每次召回的实际 token 消耗
+
+**依赖 graph-memory-pro API**：`Recaller` 返回的节点带 importanceScore（v2.1.10 G-3 新增）
+
+**成本**：2-3 天
+
+---
+
+#### G-12：记忆簇 Box
+
+**目标**：相关记忆打包成簇，召回时按簇扩展，参考 A-MEM 的 Box 概念。
+
+**实现要点**：
+- 簇定义：通过 link 关联的节点集合，或同社区的节点
+- 簇存储：在 graph-memory-pro 中作为虚拟结构，通过 `linkNodes` 创建的边识别
+- 召回时扩展：召回一个节点 → 检查同簇节点 → 按相关性排序追加
+- 簇大小限制：每簇最多 5 个节点，超出时按重要性裁剪
+- 与 S-11 Zettelkasten 协同：Link 创建时自动归簇
+
+**依赖 graph-memory-pro API**：`getEdgesForNodes`、`getCommunityPeers`（已有）
+
+**成本**：2-3 天
+
+---
+
 ## 四、实施顺序
 
 ### 第一批：基础设施（无新增 API 依赖）
 
 ```
-S-6 (场景隔离) + S-8 (记忆回顾总结)
+S-6 (场景隔离) + S-8 (记忆回顾总结) + G-11 (Token 预算)
 ```
 
-**产出**：场景隔离策略 + 记忆回顾工具
+**产出**：场景隔离策略 + 记忆回顾工具 + token 控制
 
 ### 第二批：反馈与学习（依赖 graph-memory-pro v2.1.10 第一批）
 
 ```
-S-7 (用户画像) → R-2 (成本感知级联) → S-12 (跨轨迹抽象)
+S-7 (用户画像) → R-2 (成本感知级联) → S-12 (跨轨迹抽象) → G-8 (记忆验证回路)
 ```
 
-**产出**：用户画像 + 多级裁判 + 经验节点
+**产出**：用户画像 + 多级裁判 + 经验节点 + 验证回路
 
 ### 第三批：自主编排（依赖 graph-memory-pro v2.1.10 第四批）
 
 ```
-S-9 (情节缓冲) → S-11 (Zettelkasten) → R-5 (动态混合)
+S-9 (情节缓冲) → S-11 (Zettelkasten) → R-5 (动态混合) → G-12 (记忆簇 Box)
 ```
 
-**产出**：情节缓冲 + 自主链接 + 动态混合召回
+**产出**：情节缓冲 + 自主链接 + 动态混合召回 + 记忆簇
+
+### 第四批：编辑性功能（依赖前面批次）
+
+```
+G-7 (主动记忆建议) + G-10 (主动遗忘命令)
+```
+
+**产出**：主动建议 + 用户控制遗忘
+
+### 第五批：运维能力（独立）
+
+```
+G-9 (记忆导出/导入)
+```
+
+**产出**：备份/恢复/迁移能力
 
 ---
 
 ## 五、依赖关系
 
 ```
-graph-memory-pro v2.1.10 第一批 (Schema升级)
-  └── lcm-graph-extra S-6, S-8 (场景隔离 + 回顾总结)
+graph-memory-pro v2.1.10 第一批 (Schema升级+G-5图谱健康)
+  └── lcm-graph-extra 第一批 (场景隔离 + 回顾总结 + Token预算)
 
-graph-memory-pro v2.1.10 第二批 (反馈闭环)
-  └── lcm-graph-extra S-7, R-2, S-12 (画像 + 级联 + 经验)
+graph-memory-pro v2.1.10 第二批 (反馈闭环+G-6冷启动)
+  └── lcm-graph-extra 第二批 (画像 + 级联 + 经验 + 验证回路)
 
-graph-memory-pro v2.1.10 第四批 (结构升级)
-  └── lcm-graph-extra S-9, S-11, R-5 (情节缓冲 + Zettelkasten + 动态混合)
+graph-memory-pro v2.1.10 第四批 (结构升级+G-1深度整合+G-2冲突消解+G-3重要性)
+  └── lcm-graph-extra 第三批 (情节缓冲 + Zettelkasten + 动态混合 + 记忆簇Box)
+  └── lcm-graph-extra 第四批 (主动建议 + 主动遗忘，依赖 G-3 重要性评分)
+
+graph-memory-pro v2.1.10 全部
+  └── lcm-graph-extra 第五批 (导出/导入)
 ```
 
 ---
@@ -277,6 +418,11 @@ graph-memory-pro v2.1.10 第四批 (结构升级)
 | 语义边界检测不准 | 回退到 token_count 模式 |
 | Zettelkasten LLM 调用成本高 | 仅对新活跃节点触发，批量处理 |
 | 动态混合权重不收敛 | 初始均匀分布，逐步收敛 |
+| 主动建议干扰用户 | 每对话最多 3 次，相关性 > 0.85 才触发 |
+| 记忆验证回路假阳性 | 双信号确认（用户反馈 + LLM 判断） |
+| Token 预算过紧导致召回不全 | 按 importanceScore 裁剪，保留 top-K 摘要 |
+| 记忆簇过度扩张 | 每簇最多 5 个节点，按重要性裁剪 |
+| 导出数据量过大 | 支持增量导出，按场景/类型选择性导出 |
 
 ---
 
@@ -286,5 +432,6 @@ graph-memory-pro v2.1.10 第四批 (结构升级)
 - **依赖**：graph-memory-pro v2.1.10
 - **规划日期**：2026-07-04
 - **模块定位**：上层编排层——上下文管理、prompt 组装、Agent 工作流、用户界面
-- **方案来源**：GAM (ACL 2026)、A-MEM (NeurIPS 2025)、U-Mem、Dynamic Mixture、From Storage to Experience、TencentDB、用户需求
-- **预计实施周期**：3 批次，约 30-40 天
+- **方案来源**：GAM (ACL 2026)、A-MEM (NeurIPS 2025)、U-Mem、Dynamic Mixture、From Storage to Experience、TencentDB、用户需求、闭环反馈设计
+- **任务总数**：14 项（原 8 项 + 补充 6 项 G-7~G-12）
+- **预计实施周期**：5 批次，约 45-60 天

@@ -116,23 +116,44 @@
                 └──────────────────┘
 ```
 
+### 补充模块 G：深度能力（v2.1.10 重新核对 13 份资料后补充）
+
+经重新核对 13 份资料，发现以下 6 项关键能力未被覆盖，补充到本版本：
+
+| 编号 | 方案 | 来源 | 核心机制 | 依赖 | 成本 |
+|---|---|---|---|---|---|
+| G-1 | 深度整合阶段（Memory Consolidation） | 综述+TencentDB L4+From Storage to Experience | 周期性 LLM 驱动的深度整合，比 daily maintenance 更深，跨会话语义压缩 | S-4 层次化社区 | 4-5天 |
+| G-2 | 冲突消解策略 | A-TMA 三层故障模型 | S-13/S-14 检测矛盾后，明确消解策略：时态优先 / 来源优先 / 合并 | S-13+S-14 | 2-3天 |
+| G-3 | 重要性评分（importanceScore） | 综述+Mem0 报告 | importanceScore = f(recency, frequency, centrality, source)，与 stalenessScore 互补 | S-1+S-3 | 2-3天 |
+| G-4 | 嵌入模型版本化与迁移 | EvoEmbedding 补充 | embedding 模型升级时（如 nomic → v2），全量嵌入迁移与版本化 | R-4 | 2-3天 |
+| G-5 | 图谱健康指标 | Mem0 报告 | 连通性/密度/聚类系数/孤立节点比例，监控诊断 | 当前 store.ts | 2天 |
+| G-6 | 冷启动策略 | U-Mem + 自进化文章 | M 矩阵冷启动期使用 BM25+向量混合，裁判冷启动期使用规则兜底 | L-1+I-2 | 2-3天 |
+
+**选型理由**：
+- **G-1 深度整合**：3 份资料共同指向的能力。当前 maintenance 只做浅层（dedup+PageRank+community），缺周期性的深度 LLM 反思整合
+- **G-2 冲突消解**：S-13/S-14 检测矛盾但不消解，是逻辑断点，必须补
+- **G-3 重要性评分**：与 stalenessScore 互补（一个看新鲜度，一个看价值），缺一不可
+- **G-4/G-5/G-6**：运维和启动期必要能力
+
 ### 依赖关系
 
 ```
-S-1 (Bi-Temporal)  ──→  S-13 (状态追踪)  ──→  S-14 (过时检测)
-                     ──→  S-2 (软替换)
+S-1 (Bi-Temporal)  ──→  S-13 (状态追踪)  ──→  S-14 (过时检测)  ──→  G-2 (冲突消解)
+                     ──→  S-2 (软替换)                              ──→  G-3 (重要性评分)
 
-S-3 (来源标记)     ──→  L-2 (节点衰减)
+S-3 (来源标记)     ──→  L-2 (节点衰减)                              ──→  G-3 (重要性评分)
 
-I-2 (裁判反馈)     ──→  L-1 (M 矩阵)    ──→  R-3 (边际效用奖励)
-                     ──→  L-3 (边权重调整) ──→  R-4 (可进化嵌入)
+I-2 (裁判反馈)     ──→  L-1 (M 矩阵)    ──→  R-3 (边际效用奖励)    ──→  G-6 (冷启动策略)
+                     ──→  L-3 (边权重调整) ──→  R-4 (可进化嵌入)     ──→  G-4 (嵌入迁移)
                      ──→  L-4 (反向记忆项)  ──→  R-1 (自主调优)
 
-S-4 (层次化社区)    ──→  独立，基于当前 community.ts
+S-4 (层次化社区)    ──→  G-1 (深度整合)  ──→  独立
 
-S-5 (因果关系)      ──→  独立，扩展 extract.ts + types.ts
+S-5 (因果关系)      ──→  独立
 
-S-10 (Benchmark)   ──→  验证 R-1/R-3/R-4/L-3/L-4 的效果
+G-5 (图谱健康)      ──→  独立，监控基础
+
+S-10 (Benchmark)   ──→  验证 R-1/R-3/R-4/L-3/L-4/G-1/G-2/G-3 的效果
 ```
 
 ---
@@ -397,43 +418,195 @@ interface EvolveActionSpace {
 
 ---
 
+### G-1：深度整合阶段（Memory Consolidation）
+
+**目标**：周期性 LLM 驱动的深度整合，比 daily maintenance 更深，跨会话语义压缩。
+
+**实现要点**：
+- 区分两种维护节奏：
+  - **浅维护**（每次对话后）：当前 maintenance.ts 的 dedup+PageRank+community
+  - **深整合**（每周/每月或积累 100 节点后）：LLM 驱动的语义整合
+- 深整合阶段：
+  1. 选定一个层次化社区（S-4 输出）
+  2. LLM 阅读该社区所有节点的 content
+  3. 提取共同模式/抽象总结
+  4. 创建抽象节点（如"X 类问题的通用解法"）
+  5. 将社区成员与抽象节点建立 CONTAINS 关系
+- 借鉴 TencentDB L4 跨会话沉淀 + From Storage to Experience 的 Reflection 阶段
+
+**接入点**：[src/graph/maintenance.ts](file:///workspace/src/graph/maintenance.ts) 新增 deepConsolidate 函数、[src/graph/community.ts](file:///workspace/src/graph/community.ts) 社区遍历
+
+**成本**：4-5 天
+
+---
+
+### G-2：冲突消解策略
+
+**目标**：S-13/S-14 检测到矛盾后，明确消解策略，而非仅标注。
+
+**A-TMA 三层故障模型对应**：
+
+| 层 | 故障 | 当前实现 | 本任务 |
+|---|---|---|---|
+| Perception | 检测矛盾 | S-13 state + S-14 staleness | 已实现 |
+| Cognition | 理解矛盾原因 | 缺 | **本任务** |
+| Action | 修复/消解 | 缺 | **本任务** |
+
+**消解策略**（按优先级）：
+
+1. **时态优先**（默认）：validFrom 更新的胜出，旧节点 state → superseded
+2. **来源优先**：source=knowledge 优先于 source=experience（外部权威 > 个人经验）
+3. **置信度优先**：validatedCount 高的胜出
+4. **合并**：LLM 判断两节点是否可合并为更完整的描述
+
+**实现要点**：
+- 在 maintenance.ts 新增 conflictResolution 阶段
+- 扫描 S-13 标注的 transitional 节点对
+- 按上述策略消解，写入消解决策日志（GmDecision 节点）
+
+**接入点**：[src/graph/maintenance.ts](file:///workspace/src/graph/maintenance.ts) 新增阶段、[src/store/store.ts](file:///workspace/src/store/store.ts) 新增 upsertDecision
+
+**成本**：2-3 天
+
+---
+
+### G-3：重要性评分（importanceScore）
+
+**目标**：节点除了 stalenessScore（新鲜度），还需要 importanceScore（价值），二者互补。
+
+**计算公式**：
+
+```
+importanceScore = 0.3 × recency + 0.3 × frequency + 0.2 × centrality + 0.2 × source
+
+- recency: 1 - min(age/days, 30) / 30  // 30 天衰减
+- frequency: min(validatedCount / 10, 1)  // 10 次饱和
+- centrality: pagerank / max_pagerank  // 归一化
+- source: knowledge=1.0, experience=0.7, imported=0.5
+```
+
+**实现要点**：
+- 每个维护周期重新计算 importanceScore
+- 召回时按 `score × importanceScore × (1 - stalenessScore)` 加权排序
+- 与 L-4 反向记忆项协同：importanceScore 持续低于阈值 → 进入观察列表
+
+**接入点**：[src/types.ts](file:///workspace/src/types.ts) 新增 importanceScore 字段、[src/graph/maintenance.ts](file:///workspace/src/graph/maintenance.ts) 计算阶段、[src/recaller/recall.ts](file:///workspace/src/recaller/recall.ts) 召回排序
+
+**成本**：2-3 天
+
+---
+
+### G-4：嵌入模型版本化与迁移
+
+**目标**：R-4 处理内容变化的嵌入演化，本任务处理**模型升级**时的全量迁移。
+
+**实现要点**：
+- 嵌入带 `embeddingModel` 和 `embeddingVersion` 字段
+- 配置变更时检测：当前模型 vs 节点存储的 embeddingModel
+- 不一致时触发批量迁移（复用 reembed.ts）
+- 旧嵌入存档（embeddingHistory，保留 N 版）
+- 迁移期间双轨运行：新查询用新嵌入，未迁移节点用旧嵌入
+
+**接入点**：[src/types.ts](file:///workspace/src/types.ts) 新增 embeddingModel/embeddingVersion、[src/graph/reembed.ts](file:///workspace/src/graph/reembed.ts) 迁移逻辑、[src/store/store.ts](file:///workspace/src/store/store.ts) 双轨查询
+
+**成本**：2-3 天
+
+---
+
+### G-5：图谱健康指标
+
+**目标**：监控/诊断基础，提供图谱级健康指标。
+
+**指标清单**：
+
+| 指标 | 计算 | 健康范围 |
+|---|---|---|
+| 节点总数 | count(n) | 增长趋势 |
+| 边总数 | count(r) | 与节点比 1-5 |
+| 孤立节点比例 | 无边的节点 / 总节点 | < 20% |
+| 连通分量数 | GDS wcc.stream | 趋势稳定 |
+| 平均聚类系数 | GDS localClusteringCoefficient | 0.1-0.5 |
+| 图密度 | 2×edges / (nodes×(nodes-1)) | 0.01-0.2 |
+| 社区数 | detectCommunities.count | 与节点比 1:10-1:100 |
+| 过时节点比例 | stalenessScore > 0.7 的节点 | < 30% |
+
+**实现要点**：
+- 维护周期末尾计算并存储到 `GmHealth` 节点
+- HTTP API `/api/health` 暴露
+- 异常指标告警（如孤立节点比例突增）
+
+**接入点**：[src/graph/maintenance.ts](file:///workspace/src/graph/maintenance.ts) 新增 healthCheck 阶段、[src/routes/crud.ts](file:///workspace/src/routes/crud.ts) 新增 `/api/health`
+
+**成本**：2 天
+
+---
+
+### G-6：冷启动策略
+
+**目标**：M 矩阵和裁判在反馈数据不足时的兜底策略。
+
+**M 矩阵冷启动**（前 100 次反馈）：
+- M = 单位矩阵（无变换）
+- 召回使用 BM25 + 向量搜索混合（BM25 权重 0.4，向量 0.6）
+- 累计 100 次反馈后，开始训练 M
+
+**裁判冷启动**（前 50 次反馈）：
+- 不调用 LLM，使用纯规则：节点 id 出现在 assistant 回复中 → 有效
+- 累计 50 次后，启用 LLM 裁判
+
+**实现要点**：
+- 配置项：`warmupFeedbacks: 100`（M 矩阵）、`judgeWarmupFeedbacks: 50`（裁判）
+- 冷启动期日志明确标注 `[cold-start]`
+- 冷启动期不触发 R-1 自主调优
+
+**接入点**：[src/recaller/recall.ts](file:///workspace/src/recaller/recall.ts) 冷启动分支、[src/recaller/judge.ts](file:///workspace/src/recaller/judge.ts) 冷启动规则
+
+**成本**：2-3 天
+
+---
+
 ## 五、实施顺序
 
-### 第一批：Schema 升级（无依赖，可并行）
+### 第一批：Schema 升级 + 监控基础（无依赖，可并行）
 
 ```
 S-1 + S-3  ──→  S-13 + S-14
 S-5 (因果关系，独立)
+G-5 (图谱健康，独立)
 ```
 
-**产出**：types.ts 扩展 8 个字段 + 2 种边类型
+**产出**：types.ts 扩展 8 个字段 + 2 种边类型 + 健康指标 API
 
-### 第二批：反馈闭环（依赖第一批的 S-1）
+### 第二批：反馈闭环 + 冷启动（依赖第一批的 S-1）
 
 ```
 I-1 ──→  I-2 ──→  I-3
+G-6 (冷启动策略，与 I-2 协同)
 ```
 
-**产出**：缓存层 + 启发式裁判 + 反馈持久化
+**产出**：缓存层 + 启发式裁判 + 反馈持久化 + 冷启动兜底
 
-### 第三批：学习能力（依赖第二批的 I-2/I-3）
+### 第三批：学习能力 + 重要性（依赖第二批的 I-2/I-3）
 
 ```
 L-1 + R-3  ──→  R-4
+G-3 (重要性评分，与 L-2 协同)
 ```
 
-**产出**：M 矩阵 + 边际效用奖励 + 可进化嵌入
+**产出**：M 矩阵 + 边际效用奖励 + 可进化嵌入 + 重要性评分
 
-### 第四批：结构升级与质量保障（依赖第一/二/三批）
+### 第四批：结构升级 + 冲突消解 + 嵌入迁移（依赖第一/二/三批）
 
 ```
 S-13 ──→ S-2 (软替换，依赖 S-13)
-S-4 (层次化社区，独立)
+S-4 (层次化社区，独立)  ──→  G-1 (深度整合，依赖 S-4)
+S-13 + S-14 ──→  G-2 (冲突消解，依赖状态+过时)
+R-4 ──→  G-4 (嵌入迁移，依赖 R-4)
 L-3 (边权重调整，依赖 I-2)
 L-4 (反向记忆项，依赖 I-2 + L-2)
 ```
 
-**产出**：层次化社区 + 软替换 + 边权重 + 反向记忆
+**产出**：层次化社区 + 软替换 + 边权重 + 反向记忆 + 深度整合 + 冲突消解 + 嵌入迁移
 
 ### 第五批：验证闭环（依赖前面所有）
 
@@ -547,6 +720,46 @@ S-10 ──→  R-1
             "warmupFeedbacks": 100,
             "stalenessIncrement": 0.1,
             "triggerRatio": 10
+          },
+
+          "consolidation": {
+            "enabled": false,
+            "interval": "weekly",
+            "minNodesThreshold": 100,
+            "llmDriven": true
+          },
+
+          "conflictResolution": {
+            "enabled": false,
+            "strategy": "temporal",
+            "logDecisions": true
+          },
+
+          "importance": {
+            "enabled": false,
+            "weights": {
+              "recency": 0.3,
+              "frequency": 0.3,
+              "centrality": 0.2,
+              "source": 0.2
+            }
+          },
+
+          "embeddingMigration": {
+            "enabled": false,
+            "keepHistoryVersions": 5,
+            "dualTrackDuringMigration": true
+          },
+
+          "graphHealth": {
+            "enabled": true,
+            "alertOnAnomaly": true
+          },
+
+          "coldStart": {
+            "warmupFeedbacks": 100,
+            "judgeWarmupFeedbacks": 50,
+            "fallbackToBM25": true
           }
         }
       }
@@ -664,5 +877,6 @@ S-10 ──→  R-1
 - **T1 核心方案**：自主调优 + 边际效用奖励 + 可进化嵌入 + Benchmark（4 项）
 - **T2 质量方案**：Schema 升级（时态/来源/状态/过时）（3 项）
 - **T3 引擎扩展**：层次化社区 + 软替换 + 因果关系 + 边权重 + 反向记忆（5 项）
+- **G 深度能力**：深度整合 + 冲突消解 + 重要性评分 + 嵌入迁移 + 图谱健康 + 冷启动（6 项）
 - **编排层**：8 项由 lcm-graph-extra 负责，详见 [ROADMAP-lcm-graph-extra.md](file:///workspace/ROADMAP-lcm-graph-extra.md)
-- **预计实施周期**：5 批次，约 50-65 天
+- **预计实施周期**：5 批次，约 65-85 天
