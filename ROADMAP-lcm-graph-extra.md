@@ -4,6 +4,7 @@
 > 模块定位：**上层编排层**——上下文管理、prompt 组装、Agent 工作流、用户界面
 > 依赖：graph-memory-pro v2.1.10（记忆底层引擎），通过 Re-exports API 调用
 > 对等计划：[graph-memory-pro ROADMAP.md](file:///workspace/ROADMAP.md)
+> 基线：lcm-graph-extra v2.1.9（已具备四层检索、经验层、TagRegistry、PressureTier、12 工具）
 
 ---
 
@@ -11,142 +12,245 @@
 
 ```
 ┌─────────────────────────────────────────────────┐
-│  lcm-graph-extra（上层编排层）← 本计划           │
-│  上下文管理 · prompt 组装 · Agent 工作流 · UI     │
-│  调用 graph-memory-pro 的 Re-exports API         │
+│  lcm-graph-extra v2.1.9（上层编排层）← 本计划     │
+│  四层检索 · 经验层 · TagRegistry · PressureTier  │
+│  12 个 Agent 工具 · 熔断器 · debt-manager         │
+│  调用 graph-memory-pro 的 Re-exports API        │
 ├─────────────────────────────────────────────────┤
 │  graph-memory-pro（记忆底层引擎）                │
 │  提取 · 存储 · 检索 · 去重 · 维护 · 质量 · 进化  │
-│  暴露：Recaller / upsertNode / runMaintenance 等  │
 └─────────────────────────────────────────────────┘
 ```
 
-**graph-memory-pro 提供的 Re-exports API**（v2.1.10 后）：
-`Recaller`, `upsertNode`, `upsertEdge`, `mergeNodes`, `runMaintenance`, `Extractor`, `extractTriplets`, `searchNodes`, `getTopNodes`, `dedup`, `personalizedPageRank`, `computeGlobalPageRank`, `detectCommunities`, `summarizeCommunities`, `getCommunityPeers`, `getVectorHash`, `createEmbedFn`, `getDriver`, `getNodesByTimeRange`, `upsertProfile`, `getProfile`, `consolidateBuffer`, `linkNodes`, `evolveNode`, `judgeRecall`
+---
+
+## 二、现有能力清单（v2.1.9 已实现）
+
+| 维度 | 已实现能力 |
+|---|---|
+| **检索** | 四层并行（L1 lossless-claw DAG / L2 qmd BM25+vector / L3 Neo4j 图谱 / L4 EXPERIENCE）；qmd MCP+CLI 双模式降级；multiGet 批量文档；标签过滤 |
+| **经验层** | 4 触发源（correction/failure/fix_success/explicit_save）；PENDING→DISTILLED 蒸馏；Query-aware 混合搜索（60% relevance + 40% queryMatch）；matchCount 命中计数；expiresAt TTL；distillOne LLM 蒸馏（heartbeat 2h） |
+| **场景/标签** | QueryContext 推断（scenario/techStack/freeTags/projects/urgency）；TagRegistry 动态加载（Neo4j TAG_REGISTRY）；16 内置标签；freeTag 升格 |
+| **压力/Token** | PressureTier 三级（low/medium/high）；maxContextChars 12k/6k/1.6k；retrievalLimits 分级；contextWindow 解析；tokenBudget 参数；0.85 budgetCeiling；applyTotalControl 优先级裁剪（L1<L2<L3<L4） |
+| **压缩/维护** | compact lifecycle（300s timeout + AbortSignal）；debt-manager（60s 轮询 + 紧急度 0.7 + 2 并发）；TTL（90 天 + 24h cleanup）；applyWeightDecay（0.5^(days/halfLife)）；heartbeat（5min）；pre-emptive compaction（ratio>0.65） |
+| **工具 (12)** | lcmg_search / lcmg_backup / lcmg_restore / lcmg_import / lcmg_pin / lcmg_sync / lcmg_qmd_status / lcmg_get_document / lcmg_batch_get / lcmg_maintain / lcmg_diagnose / lcmg_experience_report |
+| **编排** | assemble 三引擎 Promise.all 并行；Merger 实体级去重（fuzzyMatch 0.85）；Merger 时间衰减（halfLife 30d）；Merger LLM 重排接口（未默认启用）；sessionDedupCache LRU（500/24/1h） |
+| **故障保护** | 三个熔断器（lcm/qmd/neo4j）；自动重试；AbortSignal 全生命周期；validateBackupPath 路径校验；FTS5 转义；singleton DB |
 
 ---
 
-## 二、v1.0.0 演进方案（12 项，按性能/长期价值/用户友好度筛选）
+## 三、对照评估结论
 
-经重新评估，剔除 2 项（G-7 主动建议、G-12 记忆簇 Box），简化 1 项（G-8 验证回路），保留 11 项。按依赖关系分为五个批次：
+### 原 ROADMAP 11 项处置决策
 
-### 第一批：基础设施（无 graph-memory-pro 新增 API 依赖）
-
-| 编号 | 方案 | 论文 | 核心机制 | 成本 |
-|---|---|---|---|---|
-| S-6 | 场景隔离 | 自研 | 场景划分、隔离策略、跨场景关联 | 3-4天 |
-| S-8 | 记忆回顾总结 | 用户需求 | 时间范围查询 + LLM 摘要 + UI | 3-4天 |
-| G-11 | Token 预算管理 | TencentDB | 召回结果 token 预算控制，按重要性裁剪 | 2-3天 |
-
-### 第二批：反馈与学习（依赖 graph-memory-pro I-2 裁判反馈）
-
-| 编号 | 方案 | 论文 | 核心机制 | 成本 |
-|---|---|---|---|---|
-| S-7 | 用户画像 | TencentDB L3 | 对话历史蒸馏 → GmProfile → 个性化召回 | 4-5天 |
-| R-2 | 成本感知级联 | U-Mem | Tier 2（教师模型）+ Tier 3（工具验证）+ Thompson 采样 | 4-5天 |
-| S-12 | 跨轨迹抽象 | From Storage to Experience | 多对话模式发现 → 经验节点蒸馏 | 4-5天 |
-| G-8 | 记忆验证回路（简化版） | 闭环反馈 | 仅 LLM 异步判断召回是否有效，不询问用户 | 2-3天 |
-
-### 第三批：自主编排（依赖 graph-memory-pro 新增 API）
-
-| 编号 | 方案 | 论文 | 核心机制 | 成本 |
-|---|---|---|---|---|
-| S-9 | 情节缓冲 | GAM (ACL 2026) | 缓冲管理 + 语义边界检测 + 触发整合 | 4-5天 |
-| S-11 | Zettelkasten | A-MEM (NeurIPS 2025) | Note 构建 + Link 触发 + Evolve 调度 | 5-7天 |
-| R-5 | 动态记忆混合 | Dynamic Mixture | 场景权重学习 + 动态混合召回 | 3-4天 |
-
-### 第四批：编辑性功能（依赖前面批次）
-
-| 编号 | 方案 | 论文 | 核心机制 | 成本 |
-|---|---|---|---|---|
-| G-10 | 主动遗忘命令 | 用户控制 | 用户主动"忘掉这个"命令，触发引擎层降权 | 2-3天 |
-
-### 第五批：运维能力（独立）
-
-| 编号 | 方案 | 论文 | 核心机制 | 成本 |
-|---|---|---|---|---|
-| G-9 | 记忆导出/导入 | 运维需求 | 备份/恢复/迁移，JSON 格式导出 | 2-3天 |
-
-### 已剔除项
-
-| 编号 | 方案 | 剔除原因 |
+| 原编号 | 处置 | 原因 |
 |---|---|---|
-| ~~G-7~~ | ~~主动记忆建议~~ | ❌ 干扰用户：每对话 3 次建议打断思路，IDE 场景的反模式，用户应主动查询 |
-| ~~G-12~~ | ~~记忆簇 Box~~ | ❌ 与 S-11 Zettelkasten 的 Link 机制重复，召回时 graphWalk 已扩展邻居，额外归簇是多此一举 |
+| ~~G-11 Token 预算~~ | ❌ 剔除 | 重复度 90%：maxContextChars + applyTotalControl + tokenBudget + 0.85 budgetCeiling 已完整覆盖 |
+| ~~S-12 跨轨迹抽象~~ | ❌ 剔除 | 重复度 85%：experience/ 整层即此能力（rawIds 关联多轨迹 + distillOne 蒸馏） |
+| ~~G-9 记忆导出/导入~~ | ❌ 剔除 | 重复度 95%：lcmg_backup + lcmg_restore + lcmg_import 三工具已完整覆盖 |
+| S-6 场景隔离 | ⚠️ 简化 | 重复度 50%：扩展 context-inference.projects 推断 + 搜索过滤，不新建 sceneId 体系 |
+| S-7 用户画像 | ⚠️ 简化 | 重复度 40%：复用 TagRegistry + EXPERIENCE.tags，不建独立 GmProfile 节点 |
+| S-9 情节缓冲 | ⚠️ 简化 | 重复度 70%：在 afterTurn 加语义边界判断，复用 lossless-claw compact |
+| S-11 Zettelkasten | ⚠️ 简化 | 重复度 80%：增强 distillOne 的 link 生成 + 周期 evolve 旧经验 |
+| R-5 动态混合 | ⚠️ 简化 | 重复度 60%：按 QueryContext.scenario 调整三引擎 retrievalLimits |
+| R-2 成本感知级联 | ✅ 必做 | Tier 1 已有熔断，缺 Tier 2 LLM 判断 + Tier 3 工具验证 |
+| G-8 验证回路 | ✅ 必做 | 现有只有 matchCount，缺 LLM 异步质量反馈 |
+| G-10 主动遗忘 | ✅ 必做 | 现有只有反向 pin + 自动 TTL，缺正向"忘掉这个"工具 |
+| S-8 记忆回顾 | ✅ 必做 | 现有经验报告无时间过滤，缺自然语言时间查询 |
+
+### 新增建议项（基于现有能力短板）
+
+| 新编号 | 短板 | 实现思路 |
+|---|---|---|
+| N-1 Sync 算法升级 | lcmg_sync 只查 orphan 节点，缺跨端时间戳一致性 | sync Phase 2 加 updatedAt 对比 + 增量 MERGE |
+| N-2 Merger LLM 重排启用 | merger.llmRerank 接口已实现但 assemble 未调用 | 按 tokenBudget 触发（low tier 启用，high 跳过） |
+| N-3 TTL-经验层集成 | findExpiredNodes 针对图节点；EXPERIENCE.expiresAt 字段未调度清理 | heartbeat 扩展 cleanupExpiredExperienceNodes |
+| N-4 健康指标导出 | heartbeat 已收集 pressure signals，仅日志输出 | 暴露 Prometheus 指标 / 写入 lcm.db 供 lcmg_diagnose 查询 |
 
 ---
 
-## 三、详细任务
+## 四、v1.0.0 演进方案（13 项，按依赖关系分三批）
+
+### 第一批：补强现有能力（无 graph-memory-pro 新 API 依赖）
+
+| 编号 | 方案 | 类型 | 核心机制 | 成本 |
+|---|---|---|---|---|
+| S-6' | 场景隔离扩展 | 简化 | context-inference.projects 推断 + 搜索过滤 projectName | 1-2天 |
+| S-7' | 用户画像轻量版 | 简化 | projects 推断 + 长期偏好到 EXPERIENCE.tags | 2-3天 |
+| S-9' | 情节缓冲扩展 | 简化 | afterTurn 语义边界 LLM 判断 → 触发 compact | 2-3天 |
+| S-11' | Zettelkasten 增强 | 简化 | distillOne 主动 link 生成 + 周期 evolve 旧经验 tags | 2-3天 |
+| R-5' | 动态混合简化 | 简化 | 按 QueryContext.scenario 调整三引擎 retrievalLimits | 1-2天 |
+| N-1 | Sync 算法升级 | 新增 | sync Phase 2 updatedAt 对比 + 增量 MERGE | 1-2天 |
+| N-2 | Merger LLM 重排启用 | 新增 | assemble 中按 tier 启用 merger.llmRerank | 1天 |
+| N-3 | TTL-经验层集成 | 新增 | heartbeat 扩展 cleanupExpiredExperienceNodes | 1天 |
+
+### 第二批：自主进化（依赖 graph-memory-pro v2.1.10）
+
+| 编号 | 方案 | 类型 | 核心机制 | 成本 |
+|---|---|---|---|---|
+| R-2 | 成本感知级联 Tier 2/3 | 必做 | Tier 2 教师模型 LLM 判断 + Tier 3 工具验证 + Thompson 采样 | 4-5天 |
+| G-8 | LLM 异步验证回路 | 必做 | LLM 判断召回有效性 → 写入 EXPERIENCE.matchCount/qualityScore | 2-3天 |
+| S-8' | 时间范围回顾总结 | 必做 | 扩展 lcmg_experience_report 支持 from/to + LLM 摘要输出 | 2天 |
+| N-4 | 健康指标导出 | 新增 | Prometheus 端点 / lcm.db 写入（依赖 graph-memory-pro G-5 图谱健康） | 1-2天 |
+
+### 第三批：用户控制
+
+| 编号 | 方案 | 类型 | 核心机制 | 成本 |
+|---|---|---|---|---|
+| G-10 | 主动遗忘命令 | 必做 | 新增 lcmg_forget 工具（复用 lcmg_pin 框架） | 2天 |
+
+---
+
+## 五、详细任务
 
 ### 第一批
 
-#### S-6 场景隔离
+#### S-6' 场景隔离扩展
 
-**目标**：按项目/会话维度隔离记忆，防止不同项目的记忆互相干扰。
+**目标**：复用现有 sessionKey + TagRegistry，补齐 projects 推断与搜索过滤。
 
 **实现要点**：
-- 每次对话开始时，生成或复用 sceneId（基于项目名/会话标识）
-- 调用 graph-memory-pro 的 `Recaller` 时传入 `sceneId` 参数
-- 跨场景关联：LLM 判断两个场景是否相关，关联时创建显式 link
-- 隔离策略：默认 soft（全局+本场景），可切换 strict（仅本场景）
+- 在 [context-inference.ts](file:///workspace/lcm-graph-extra/src/context-inference.ts) `inferQueryContext` 中实现 projects 推断（从 query 中正则匹配项目名/路径）
+- 在 [retrieval-gateway.ts](file:///workspace/lcm-graph-extra/src/retrieval-gateway.ts) 经验搜索时按 `EXPERIENCE.projectName` 过滤
+- qmd/graph 搜索时透传 projects 参数（可选过滤）
+- 跨场景关联：复用 TagRegistry 场景标签，无需独立 sceneId 体系
 
-**依赖 graph-memory-pro API**：`Recaller(sceneId)`、`sceneId` 字段（已有）
+**接入点**：[src/context-inference.ts](file:///workspace/lcm-graph-extra/src/context-inference.ts)、[src/retrieval-gateway.ts](file:///workspace/lcm-graph-extra/src/retrieval-gateway.ts)
 
-**成本**：3-4 天
+**成本**：1-2 天
 
 ---
 
-#### S-8 记忆回顾总结
+#### S-7' 用户画像轻量版
 
-**目标**：支持"本周学会了什么""今年有什么特别记忆"等人类可读的记忆回顾。
+**目标**：复用 TagRegistry + EXPERIENCE.tags，无需独立 GmProfile 节点。
 
 **实现要点**：
-- 自然语言查询解析："本周"→时间范围、"学会了什么"→TASK/SKILL 过滤
-- 调用 graph-memory-pro 的 `getNodesByTimeRange(from, to)` 获取数据
-- 按 S-4（层次化社区，如果已启用）分组，LLM 生成自然语言摘要
-- 新增 Agent 工具 `gm_summary`，输出格式化的记忆回顾
+- 扫描对话历史，LLM 提取用户偏好（技术栈、工作习惯）→ 写入 `EXPERIENCE.tags.techStack`
+- 偏好变化追踪：按时间窗口对比 tags 历史
+- 召回时通过 TagRegistry 的 freeTag 升格机制影响 expResults 排序
+- 不建独立 GmProfile 节点（避免 schema 膨胀）
 
-**依赖 graph-memory-pro API**：`getNodesByTimeRange(from, to)`（v2.1.10 新增）
+**接入点**：[src/experience/storage.ts](file:///workspace/lcm-graph-extra/src/experience/storage.ts)、[src/context-inference.ts](file:///workspace/lcm-graph-extra/src/context-inference.ts)
 
-**成本**：3-4 天
+**成本**：2-3 天
+
+---
+
+#### S-9' 情节缓冲扩展
+
+**目标**：复用 lossless-claw DAG，仅在 afterTurn 加语义边界判断。
+
+**实现要点**：
+- 在 [src/index.ts](file:///workspace/lcm-graph-extra/src/index.ts) afterTurn 中加入 LLM 语义边界判断（话题切换/任务完成）
+- 到达边界时显式调用 `_losslessClawAdapter.compact({ force: true })`
+- 不另建缓冲区（lossless-claw 已有 2048 token 滑窗 + 层次化 summary）
+- 失败回退到 token_count 模式
+
+**接入点**：[src/index.ts](file:///workspace/lcm-graph-extra/src/index.ts) afterTurn
+
+**成本**：2-3 天
+
+---
+
+#### S-11' Zettelkasten 增强
+
+**目标**：增强现有 distillOne 的 link 生成与 evolve 能力。
+
+**实现要点**：
+- 在 [src/index.ts](file:///workspace/lcm-graph-extra/src/index.ts) `distillOne` 中让 LLM 主动生成 link 建议（扩展 rawIds）
+- 周期性扫描新 distilled 经验，与历史经验对比，触发 evolve（更新 tags/context）
+- Note→Link→Evolve→Retrieve 四步已映射到现有 saveDistilled/rawIds/saveDistilled ON MATCH/searchByQuery
+- 仅增强 link 主动生成能力
+
+**接入点**：[src/index.ts](file:///workspace/lcm-graph-extra/src/index.ts) distillOne
+
+**成本**：2-3 天
+
+---
+
+#### R-5' 动态混合简化
+
+**目标**：按 QueryContext.scenario 动态调整三引擎权重。
+
+**实现要点**：
+- 在 [src/index.ts](file:///workspace/lcm-graph-extra/src/index.ts) assemble 中调用 `inferQueryContext(qmdQuery)` 获取 scenario
+- 按 scenario 调整 retrievalLimits（如 bug-fix → 提高 graph 权重；feature-dev → 提高 qmd 权重）
+- 复用现有 PressureTier 机制，仅在 low tier 时启用动态调整
+- 不建独立权重学习模块
+
+**接入点**：[src/index.ts](file:///workspace/lcm-graph-extra/src/index.ts) assemble、[src/context-inference.ts](file:///workspace/lcm-graph-extra/src/context-inference.ts)
+
+**成本**：1-2 天
+
+---
+
+#### N-1 Sync 算法升级
+
+**目标**：补强 lcmg_sync 的跨端时间戳一致性校验。
+
+**实现要点**：
+- 在 [src/tools.ts](file:///workspace/lcm-graph-extra/src/tools.ts) `lcmg_sync` Phase 2 加 `updatedAt` 对比
+- 跨端时间戳不一致时增量 MERGE
+- 保留现有 orphan 检测能力
+
+**接入点**：[src/tools.ts](file:///workspace/lcm-graph-extra/src/tools.ts) lcmg_sync
+
+**成本**：1-2 天
+
+---
+
+#### N-2 Merger LLM 重排启用
+
+**目标**：启用现有但未调用的 merger.llmRerank 接口。
+
+**实现要点**：
+- 在 [src/index.ts](file:///workspace/lcm-graph-extra/src/index.ts) assemble 中，按 tier 决定是否启用 LLM 重排
+- low tier（token 充裕）→ 启用 merger.llmRerank
+- medium/high tier → 跳过（避免 LLM 调用延迟）
+- 复用现有 merger.llmRerank 接口（无需新代码，仅调用）
+
+**接入点**：[src/index.ts](file:///workspace/lcm-graph-extra/src/index.ts) assemble、[src/merger.ts](file:///workspace/lcm-graph-extra/src/merger.ts)
+
+**成本**：1 天
+
+---
+
+#### N-3 TTL-经验层集成
+
+**目标**：补齐 EXPERIENCE.expiresAt 字段的调度清理。
+
+**实现要点**：
+- 在 [src/index.ts](file:///workspace/lcm-graph-extra/src/index.ts) heartbeat 中扩展 `cleanupExpiredExperienceNodes()`
+- 调用 `experienceStorage.deleteById(id)` 清理过期经验
+- 复用现有 `EXPERIENCE.expiresAt` 字段
+
+**接入点**：[src/index.ts](file:///workspace/lcm-graph-extra/src/index.ts) heartbeat、[src/experience/storage.ts](file:///workspace/lcm-graph-extra/src/experience/storage.ts)
+
+**成本**：1 天
 
 ---
 
 ### 第二批
 
-#### S-7 用户画像
+#### R-2 成本感知级联 Tier 2/3
 
-**目标**：从历史对话中蒸馏用户偏好，用于个性化召回。
-
-**实现要点**：
-- 扫描对话历史，LLM 提取用户偏好（技术栈、代码风格、工作习惯）
-- 偏好变化追踪：按时间窗口对比，检测偏好漂移
-- 蒸馏完成后，调用 graph-memory-pro 的 `upsertProfile(profile)` 存储
-- 召回时，调用 `Recaller` 传入 `profileWeight` 参数影响排序
-
-**依赖 graph-memory-pro API**：`upsertProfile(profile)`、`getProfile(userId)`、`Recaller(profileWeight)`（v2.1.10 新增）
-
-**成本**：4-5 天
-
----
-
-#### R-2 成本感知级联（Tier 2/3）
-
-**目标**：把 I-2 启发式裁判升级为多级成本感知级联（Tier 1 在 graph-memory-pro，Tier 2/3 在 lcm-graph-extra）。
+**目标**：在现有 Tier 1 熔断基础上，补齐 Tier 2/3。
 
 **U-Mem 三层级联**：
 
-| 层级 | 信号源 | 成本 | 负责方 |
-|---|---|---|---|
-| Tier 1 | 启发式规则（字符串匹配） | 极低 | graph-memory-pro（I-2） |
-| Tier 2 | 教师模型（更强的 LLM） | 中 | **lcm-graph-extra** |
-| Tier 3 | 工具验证（代码执行/搜索） | 高 | **lcm-graph-extra** |
+| 层级 | 信号源 | 成本 | 负责方 | 现状 |
+|---|---|---|---|---|
+| Tier 1 | 启发式规则 + 熔断器 | 极低 | lcm-graph-extra | ✅ 已实现（withCircuitBreaker） |
+| Tier 2 | 教师模型 LLM 判断 | 中 | lcm-graph-extra | ❌ 缺 |
+| Tier 3 | 工具验证（代码执行/搜索） | 高 | lcm-graph-extra | ❌ 缺 |
 
 **实现要点**：
-- 接收 graph-memory-pro 的 Tier 1 结果（置信度 < 0.7 时触发）
+- Tier 1 置信度 < 0.7 时触发 Tier 2
 - Tier 2：调用更强的 LLM 判断"哪些记忆被真正用到"
 - Tier 3：对事实性声明，调用代码解释器或搜索验证
 - Thompson 采样：平衡"召回熟悉节点"（利用）vs"探索新节点"（探索）
+- 与现有 withCircuitBreaker 解耦，不重复造熔断
 
 **依赖 graph-memory-pro API**：`judgeRecall()` Tier 1 结果（v2.1.10 新增）
 
@@ -154,117 +258,18 @@
 
 ---
 
-#### S-12 跨轨迹抽象
+#### G-8 LLM 异步验证回路
 
-**目标**：从多个独立对话轨迹中提取可复用的经验模式。
-
-**From Storage to Experience 三阶段**：
-
-```
-Storage    → 忠实记录每个对话轨迹（lcm-graph-extra 已有）
-Reflection → 评估轨迹质量，去噪（R-2 级联反馈）
-Experience → 跨轨迹抽象，提取可复用模式（本任务）
-```
+**目标**：补齐 LLM 异步质量反馈，复用现有 EXPERIENCE.matchCount。
 
 **实现要点**：
-- 定期扫描 I-3 反馈数据（从 graph-memory-pro 查询）
-- 发现"多次出现的成功模式"（如"某类问题总是用某种方法解决"）
-- 将模式蒸馏为经验节点，通过 graph-memory-pro 的 `upsertNode` 写入图谱
-- MDL（Minimum Description Length）压缩比评估：压缩比越高，经验越普遍
-
-**依赖 graph-memory-pro API**：`upsertNode`、`searchNodes`（已有）
-
-**成本**：4-5 天
-
----
-
-### 第三批
-
-#### S-9 情节缓冲（GAM 启发）
-
-**目标**：把"每轮对话直接写全局图谱"改为"缓冲→语义边界检测→整合"。
-
-**GAM 双阶段**：
-
-| 阶段 | 职责 | 负责方 |
-|---|---|---|
-| Episodic Buffering | 实时捕获对话，构建局部事件图 | **lcm-graph-extra** |
-| Semantic Boundary Detection | LLM 判断话题是否完成 | **lcm-graph-extra** |
-| Semantic Consolidation | 将完整事件图压缩为摘要节点，整合到全局图谱 | graph-memory-pro (`consolidateBuffer`) |
-
-**实现要点**：
-- 维护 2048 token 滑窗缓冲区
-- 每轮对话后，LLM 判断是否到达语义边界（话题切换/任务完成）
-- 到达边界时，调用 graph-memory-pro 的 `consolidateBuffer(nodes)` 整合
-- 缓冲区清空，开始下一轮
-
-**依赖 graph-memory-pro API**：`consolidateBuffer(nodes)`（v2.1.10 新增）
-
-**成本**：4-5 天
-
----
-
-#### S-11 Zettelkasten（A-MEM 启发）
-
-**目标**：实现 Note→Link→Evolve→Retrieve 四步闭环的编排层逻辑。
-
-**A-MEM 四步闭环**：
-
-| 步骤 | 引擎层提供 | 编排层实现 |
-|---|---|---|
-| Note | extract.ts 三元组提取 | **LLM 增强：生成 keywords、tags、contextual description** |
-| Link | `linkNodes(fromId, toId, type)` | **LLM 判断新记忆与历史记忆的语义关联，触发 link** |
-| Evolve | `evolveNode(id, updates)` | **新记忆加入时，触发相关旧记忆的 context/tags 更新** |
-| Retrieve | `Recaller` | **通过链接扩展召回范围（Box 概念：记忆簇）** |
-
-**实现要点**：
-- Note：在 graph-memory-pro 提取三元组后，LLM 补充 keywords/tags
-- Link：LLM 周期性扫描新节点，判断与历史节点的语义关联
-- Evolve：新记忆加入时，检查相关旧记忆是否需要更新（如新的 context 补充）
-- Retrieve：召回时，通过 link 扩展候选集（记忆簇）
-
-**依赖 graph-memory-pro API**：`linkNodes(fromId, toId, type)`、`evolveNode(id, updates)`（v2.1.10 新增）
-
-**成本**：5-7 天
-
----
-
-#### R-5 动态记忆混合
-
-**目标**：按场景动态加权混合召回结果。
-
-**实现要点**：
-- 场景权重学习：根据历史成功率，学习各场景的贡献权重
-- 召回时，调用 `Recaller` 多次（每次传不同 sceneId），按权重合并结果
-- 初始均匀分布，通过 R-1 诊断循环学习最优权重
-
-**依赖 graph-memory-pro API**：`Recaller(sceneId)`（已有）
-
-**成本**：3-4 天
-
----
-
-#### G-7：~~主动记忆建议~~（已剔除）
-
-**剔除原因**：
-1. **干扰用户**：每对话 3 次建议打断用户思路
-2. **IDE 反模式**：主动建议在 IDE 场景已被证明破坏专注度（如过度自动补全）
-3. **与用户友好度原则冲突**：用户应通过 `gm_search` 主动查询，而非被动接受建议
-
----
-
-#### G-8：记忆验证回路（简化版）
-
-**目标**：LLM 异步判断召回是否有效，反馈给 L-3/L-4 用于权重调整。
-
-**简化方案**（剔除原 G-8 的双信号确认/用户反馈收集）：
-- 仅通过 LLM 异步判断"这次召回是否被有效使用"
-- **不主动询问用户**（避免干扰）
-- 验证结果写入 graph-memory-pro 的 `GmFeedback` 节点
+- LLM 异步判断"这次召回是否被有效使用"
+- 验证结果写入 `EXPERIENCE.matchCount` + 新增 `qualityScore` 字段
 - 反馈信号驱动：
-  - 成功 → 召回路径上的边 weight +1（L-3）
-  - 失败 → 召回路径上的节点 stalenessScore +0.1（L-4）
+  - 成功 → 经验 relevanceScore +0.05
+  - 失败 → 经验 relevanceScore -0.05（不低于 0.3）
 - 与 R-2 级联协同：失败的召回触发 Tier 2/3 重新评估
+- **不主动询问用户**（避免干扰）
 
 **依赖 graph-memory-pro API**：`upsertFeedback`（v2.1.10 新增）
 
@@ -272,153 +277,125 @@ Experience → 跨轨迹抽象，提取可复用模式（本任务）
 
 ---
 
-#### G-9：记忆导出/导入
+#### S-8' 时间范围回顾总结
 
-**目标**：备份/恢复/迁移，支持 JSON 格式导出。
+**目标**：扩展 lcmg_experience_report 支持时间范围 + LLM 摘要。
 
 **实现要点**：
-- 导出：调用 `getNodesByTimeRange` + `getEdgesForNodes`，序列化为 JSON
-- 导入：解析 JSON，调用 `upsertNode` + `upsertEdge` 批量写入
-- 支持增量导出（按时间范围）和全量导出
-- 支持选择性导出（按场景、按类型、按社区）
-- 用于：环境迁移、备份恢复、跨用户共享
+- 在 [src/tools.ts](file:///workspace/lcm-graph-extra/src/tools.ts) `lcmg_experience_report` 加 `from`/`to` 时间参数
+- 自然语言查询解析："本周学会了什么" → from=本周一 / to=今天 / type=lesson|fix
+- LLM 生成自然语言摘要（"本周共记录 N 条经验，主要涉及 X/Y/Z..."）
+- 输出格式：text / markdown / summary（自然语言总结）
 
-**依赖 graph-memory-pro API**：`getNodesByTimeRange`、`upsertNode`、`upsertEdge`（已有/v2.1.10 新增）
+**依赖 graph-memory-pro API**：`getNodesByTimeRange(from, to)`（v2.1.10 新增）
 
-**成本**：2-3 天
+**成本**：2 天
 
 ---
 
-#### G-10：主动遗忘命令
+#### N-4 健康指标导出
 
-**目标**：用户主动"忘掉这个"命令，触发引擎层降权或软删除。
+**目标**：补齐 heartbeat 已收集指标的导出能力。
 
 **实现要点**：
-- Agent 工具 `gm_forget`：
-  - 参数：nodeId 或查询条件
-  - 模式：soft（仅降权）/ hard（软删除 state=superseded）
-- 调用 graph-memory-pro 的 `evolveNode(id, { state: 'superseded' })`
-- 与 S-2 软替换协同：被遗忘的节点 state → superseded
-- 与 G-3 重要性评分协同：遗忘后 importanceScore → 0
+- heartbeat 已收集 pressure signals（pending_msgs/summary_frags/token_ratio）
+- 暴露 Prometheus 指标端点（`/metrics`）或写入 lcm.db `health_metrics` 表
+- `lcmg_diagnose` 工具查询历史指标
+- 依赖 graph-memory-pro G-5 图谱健康（v2.1.10 新增）
+
+**依赖 graph-memory-pro API**：`/api/health`（G-5 新增）
+
+**成本**：1-2 天
+
+---
+
+### 第三批
+
+#### G-10 主动遗忘命令
+
+**目标**：补齐用户主动遗忘入口（与现有 lcmg_pin 反向）。
+
+**实现要点**：
+- 新增 `lcmg_forget` 工具（复用 [src/tools.ts](file:///workspace/lcm-graph-extra/src/tools.ts) lcmg_pin 的 Neo4j 连接 + 路径校验）
+- 参数：nodeId 或查询条件；模式 soft（降权）/ hard（软删除）
+- 调用 graph-memory-pro `evolveNode(id, { state: 'superseded' })`
+- 与 graph-memory-pro S-2 软替换协同
+- 与 graph-memory-pro G-3 重要性评分协同：遗忘后 importanceScore → 0
 
 **依赖 graph-memory-pro API**：`evolveNode(id, updates)`（v2.1.10 新增）
 
-**成本**：2-3 天
+**成本**：2 天
 
 ---
 
-#### G-11：Token 预算管理
+## 六、实施顺序
 
-**目标**：召回结果 token 预算控制，按重要性裁剪，参考 TencentDB 的 token 优化策略。
+### 第一批：补强现有能力（无新 API 依赖，8 项）
 
-**实现要点**：
-- 配置 `recallTokenBudget`（默认 2000 token）
-- 召回结果按 `importanceScore × (1 - stalenessScore)` 排序
-- 按 token 累加裁剪，超出预算的低重要性节点只保留摘要
-- 与 G-12 记忆簇协同：同一簇内的节点共享 token 预算
-- 监控：记录每次召回的实际 token 消耗
+```
+S-6' (场景隔离扩展) + S-7' (用户画像轻量) + S-9' (情节缓冲扩展)
+S-11' (Zettelkasten 增强) + R-5' (动态混合简化)
+N-1 (Sync 升级) + N-2 (LLM 重排启用) + N-3 (TTL-经验集成)
+```
 
-**依赖 graph-memory-pro API**：`Recaller` 返回的节点带 importanceScore（v2.1.10 G-3 新增）
+**产出**：场景隔离 + 用户画像 + 情节缓冲 + Zettelkasten + 动态混合 + Sync 升级 + LLM 重排 + TTL 集成
 
-**成本**：2-3 天
+### 第二批：自主进化（依赖 graph-memory-pro v2.1.10，4 项）
+
+```
+R-2 (成本感知级联 Tier 2/3) → G-8 (LLM 异步验证回路)
+S-8' (时间范围回顾总结) + N-4 (健康指标导出)
+```
+
+**产出**：多级裁判 + 验证回路 + 时间回顾 + 健康指标
+
+### 第三批：用户控制（依赖 graph-memory-pro v2.1.10 第四批，1 项）
+
+```
+G-10 (主动遗忘命令)
+```
+
+**产出**：用户主动遗忘工具
 
 ---
 
-#### G-12：~~记忆簇 Box~~（已剔除）
-
-**剔除原因**：
-1. **与 S-11 Zettelkasten 的 Link 机制重复**：S-11 已通过 Link 建立节点关联
-2. **与 graphWalk 重复**：召回时 graphWalk 已扩展邻居节点
-3. **额外归簇无显著收益**：簇管理增加维护复杂度，对召回质量提升有限
-
----
-
-## 四、实施顺序
-
-### 第一批：基础设施（无新增 API 依赖）
-
-```
-S-6 (场景隔离) + S-8 (记忆回顾总结) + G-11 (Token 预算)
-```
-
-**产出**：场景隔离策略 + 记忆回顾工具 + token 控制
-
-### 第二批：反馈与学习（依赖 graph-memory-pro v2.1.10 第一批）
-
-```
-S-7 (用户画像) → R-2 (成本感知级联) → S-12 (跨轨迹抽象) → G-8 (记忆验证回路)
-```
-
-**产出**：用户画像 + 多级裁判 + 经验节点 + 验证回路
-
-### 第三批：自主编排（依赖 graph-memory-pro v2.1.10 第四批）
-
-```
-S-9 (情节缓冲) → S-11 (Zettelkasten) → R-5 (动态混合) → G-12 (记忆簇 Box)
-```
-
-**产出**：情节缓冲 + 自主链接 + 动态混合召回 + 记忆簇
-
-### 第四批：编辑性功能（依赖前面批次）
-
-```
-G-7 (主动记忆建议) + G-10 (主动遗忘命令)
-```
-
-**产出**：主动建议 + 用户控制遗忘
-
-### 第五批：运维能力（独立）
-
-```
-G-9 (记忆导出/导入)
-```
-
-**产出**：备份/恢复/迁移能力
-
----
-
-## 五、依赖关系
+## 七、依赖关系
 
 ```
 graph-memory-pro v2.1.10 第一批 (Schema升级+G-5图谱健康)
-  └── lcm-graph-extra 第一批 (场景隔离 + 回顾总结 + Token预算)
+  └── lcm-graph-extra 第一批 (8项补强现有能力)
 
 graph-memory-pro v2.1.10 第二批 (反馈闭环+G-6冷启动)
-  └── lcm-graph-extra 第二批 (画像 + 级联 + 经验 + 验证回路简化版)
+  └── lcm-graph-extra 第二批 (R-2 级联 + G-8 验证回路)
 
 graph-memory-pro v2.1.10 第四批 (结构升级+G-2冲突消解+G-3重要性)
-  └── lcm-graph-extra 第三批 (情节缓冲 + Zettelkasten + 动态混合)
-  └── lcm-graph-extra 第四批 (主动遗忘，依赖 G-3 重要性评分)
-
-graph-memory-pro v2.1.10 全部
-  └── lcm-graph-extra 第五批 (导出/导入)
+  └── lcm-graph-extra 第三批 (G-10 主动遗忘，依赖 G-3 重要性评分)
 ```
 
 ---
 
-## 六、风险与对策
+## 八、风险与对策
 
 | 风险 | 对策 |
 |---|---|
-| 场景隔离误判全局记忆 | 默认 soft 模式（全局+本场景），strict 模式可选 |
-| 用户画像过拟合历史偏好 | 画像带时间衰减，旧偏好降权 |
-| Tier 2/3 级联触发过频 | Tier 1 置信度阈值可调，默认 0.7 |
-| 跨轨迹抽象过度泛化 | MDL 压缩阈值过滤低质量抽象 |
-| 语义边界检测不准 | 回退到 token_count 模式 |
-| Zettelkasten LLM 调用成本高 | 仅对新活跃节点触发，批量处理 |
-| 动态混合权重不收敛 | 初始均匀分布，逐步收敛 |
-| 记忆验证回路假阳性 | 仅 LLM 异步判断，不主动询问用户，避免干扰 |
-| Token 预算过紧导致召回不全 | 按 importanceScore 裁剪，保留 top-K 摘要 |
-| 导出数据量过大 | 支持增量导出，按场景/类型选择性导出 |
+| S-6' projects 推断误判 | 默认 soft 模式，仅作过滤提示，不强制隔离 |
+| S-7' 用户画像过拟合历史偏好 | tags 带时间衰减，旧偏好降权（复用 Merger.applyDecayToResults） |
+| S-9' 语义边界检测不准 | 回退到 token_count 模式（lossless-claw 已有） |
+| R-2 Tier 2/3 级联触发过频 | Tier 1 置信度阈值可调，默认 0.7 |
+| G-8 LLM 验证回路假阳性 | 仅 LLM 异步判断，不主动询问用户，权重 ≤ 0.3 |
+| S-8' 时间范围查询图谱过大 | 限制返回上限（默认 50 节点） |
+| G-10 误删 | 默认 soft 模式，hard 模式需二次确认；可恢复（state=superseded） |
+| N-1 Sync 算法时间戳冲突 | 以 Neo4j updatedAt 为权威，lcm DB 跟随 |
 
 ---
 
-## 七、版本信息
+## 九、版本信息
 
 - **规划版本**：1.0.0
 - **依赖**：graph-memory-pro v2.1.10
 - **规划日期**：2026-07-04
 - **模块定位**：上层编排层——上下文管理、prompt 组装、Agent 工作流、用户界面
-- **方案来源**：GAM (ACL 2026)、A-MEM (NeurIPS 2025)、U-Mem、Dynamic Mixture、From Storage to Experience、TencentDB、用户需求、闭环反馈设计
-- **任务总数**：11 项（原 14 项，剔除 G-7 主动建议 + G-12 记忆簇 Box，简化 G-8 验证回路）
-- **预计实施周期**：5 批次，约 40-55 天
+- **基线**：lcm-graph-extra v2.1.9
+- **方案来源**：基于现有能力对照 13 份文献后筛选，剔除已实现 3 项，简化 5 项，保留必做 3 项，新增 4 项补强短板
+- **任务总数**：13 项（原 11 项 → 剔除 3 + 简化 5 + 必做 3 + 新增 4 = 13 项，工作量从 40-55 天压缩至 20-30 天）
+- **预计实施周期**：3 批次，约 20-30 天
