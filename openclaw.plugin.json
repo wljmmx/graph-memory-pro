@@ -22,5 +22,415 @@
       "label": "Embedding API Key",
       "sensitive": true
     }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "neo4j": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "uri": {
+            "type": "string",
+            "default": "bolt://localhost:7687"
+          },
+          "user": {
+            "type": "string",
+            "default": "neo4j"
+          },
+          "password": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "uri",
+          "user",
+          "password"
+        ]
+      },
+      "compactTurnCount": {
+        "type": "integer",
+        "default": 6,
+        "minimum": 1
+      },
+      "recallMaxNodes": {
+        "type": "integer",
+        "default": 6,
+        "minimum": 1
+      },
+      "recallMaxDepth": {
+        "type": "integer",
+        "default": 2,
+        "minimum": 1
+      },
+      "freshTailCount": {
+        "type": "integer",
+        "default": 10,
+        "minimum": 0
+      },
+      "dedupThreshold": {
+        "type": "number",
+        "default": 0.9,
+        "minimum": 0,
+        "maximum": 1
+      },
+      "pagerankDamping": {
+        "type": "number",
+        "default": 0.85,
+        "minimum": 0,
+        "maximum": 1
+      },
+      "pagerankIterations": {
+        "type": "integer",
+        "default": 20,
+        "minimum": 1
+      },
+      "timing": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "reportEveryN": {
+            "type": "integer",
+            "default": 10,
+            "minimum": 1
+          }
+        }
+      },
+      "llm": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "baseURL": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          }
+        }
+      },
+      "embedding": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "baseURL": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "keepAlive": {
+            "type": "string"
+          },
+          "dimensions": {
+            "type": "integer"
+          },
+          "apiKey": {
+            "type": "string"
+          }
+        }
+      },
+      "background": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "extractorIntervalMs": {
+            "type": "integer",
+            "default": 60000,
+            "minimum": 1000
+          },
+          "maintenanceIntervalMs": {
+            "type": "integer",
+            "default": 21600000,
+            "minimum": 60000
+          }
+        }
+      },
+      "temporal": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "defaultSource": {
+            "type": "string",
+            "enum": ["experience", "knowledge", "imported"],
+            "default": "experience"
+          }
+        }
+      },
+      "state": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "filterSupersededInRecall": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "staleness": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "threshold": {
+            "type": "number",
+            "default": 0.7,
+            "minimum": 0,
+            "maximum": 1
+          },
+          "mode": {
+            "type": "string",
+            "enum": ["heuristic", "llm"],
+            "default": "heuristic"
+          }
+        }
+      },
+      "causalEdges": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "extract": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "graphHealth": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "alertOnAnomaly": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "queryCache": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "maxSize": {
+            "type": "integer",
+            "default": 100,
+            "minimum": 1
+          },
+          "ttlMs": {
+            "type": "integer",
+            "default": 1800000,
+            "minimum": 1000
+          },
+          "similarityThreshold": {
+            "type": "number",
+            "default": 0.95,
+            "minimum": 0,
+            "maximum": 1
+          }
+        }
+      },
+      "judge": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "asyncMode": {
+            "type": "boolean",
+            "default": true
+          },
+          "judgeWarmupFeedbacks": {
+            "type": "integer",
+            "default": 50,
+            "minimum": 1
+          },
+          "heuristicMatch": {
+            "type": "string",
+            "enum": ["id", "name", "both"],
+            "default": "both"
+          }
+        }
+      },
+      "feedback": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "retentionDays": {
+            "type": "integer",
+            "default": 90,
+            "minimum": 1
+          }
+        }
+      },
+      "warmup": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "warmupFeedbacks": {
+            "type": "integer",
+            "default": 100,
+            "minimum": 1
+          },
+          "judgeWarmupFeedbacks": {
+            "type": "integer",
+            "default": 50,
+            "minimum": 1
+          }
+        }
+      },
+      "associationMatrix": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "learningRate": {
+            "type": "number",
+            "default": 0.01,
+            "exclusiveMinimum": 0
+          },
+          "momentum": {
+            "type": "number",
+            "default": 0.9,
+            "minimum": 0,
+            "maximum": 1
+          },
+          "adamBeta1": {
+            "type": "number",
+            "default": 0.9,
+            "minimum": 0,
+            "maximum": 1
+          },
+          "adamBeta2": {
+            "type": "number",
+            "default": 0.999,
+            "minimum": 0,
+            "maximum": 1
+          },
+          "warmupFeedbacks": {
+            "type": "integer",
+            "default": 100,
+            "minimum": 1
+          }
+        }
+      },
+      "marginalUtility": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "neighborhoodSize": {
+            "type": "integer",
+            "default": 5,
+            "minimum": 1
+          },
+          "minImprovement": {
+            "type": "number",
+            "default": 0.0
+          }
+        }
+      },
+      "evolvableEmbedding": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "reembedOnContentChange": {
+            "type": "boolean",
+            "default": true
+          },
+          "archiveKeepCount": {
+            "type": "integer",
+            "default": 3,
+            "minimum": 1
+          }
+        }
+      },
+      "importance": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "weights": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "recency": {
+                "type": "number",
+                "default": 0.3,
+                "minimum": 0
+              },
+              "frequency": {
+                "type": "number",
+                "default": 0.3,
+                "minimum": 0
+              },
+              "centrality": {
+                "type": "number",
+                "default": 0.2,
+                "minimum": 0
+              },
+              "source": {
+                "type": "number",
+                "default": 0.2,
+                "minimum": 0
+              }
+            }
+          },
+          "recencyDecayDays": {
+            "type": "integer",
+            "default": 30,
+            "minimum": 1
+          },
+          "frequencySaturation": {
+            "type": "integer",
+            "default": 10,
+            "minimum": 1
+          }
+        }
+      }
+    }
   }
 }
