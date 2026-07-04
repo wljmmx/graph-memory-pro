@@ -2,16 +2,16 @@
   "id": "graph-memory-pro",
   "name": "Graph Memory Pro",
   "version": "2.2.0",
-  "description": "Neo4j \u77e5\u8bc6\u56fe\u8c31\u8bb0\u5fc6\u5f15\u64ce\uff1a\u4e09\u5143\u7ec4\u63d0\u53d6 + GDS \u56fe\u7b97\u6cd5 + \u5411\u91cf\u7d22\u5f15 + \u53cc\u8def\u5f84\u53ec\u56de\u3002\u65e0\u69fd\u4f4d\u63d2\u4ef6\uff0c\u901a\u8fc7 registerMemoryCorpusSupplement \u66b4\u9732\u7ed9 memory-core\uff0c\u5de5\u5177 + \u540e\u53f0\u670d\u52a1\u6a21\u5f0f\u8fd0\u884c\u3002",
+  "description": "Neo4j 知识图谱记忆引擎：三元组提取 + GDS 图算法 + 向量索引 + 双路径召回。无槽位插件，通过 registerMemoryCorpusSupplement 暴露给 memory-core，工具 + 后台服务模式运行。",
   "author": "Ananas <Wywelljob@gmail.com>",
   "license": "MIT",
   "uiHints": {
     "neo4j": {
-      "label": "Neo4j \u6570\u636e\u5e93\u8fde\u63a5",
-      "help": "\u914d\u7f6e Neo4j \u56fe\u6570\u636e\u5e93\u8fde\u63a5\u53c2\u6570"
+      "label": "Neo4j 数据库连接",
+      "help": "配置 Neo4j 图数据库连接参数"
     },
     "neo4j.password": {
-      "label": "Neo4j \u5bc6\u7801",
+      "label": "Neo4j 密码",
       "sensitive": true
     },
     "llm.apiKey": {
@@ -131,6 +131,465 @@
           },
           "apiKey": {
             "type": "string"
+          }
+        }
+      },
+      "background": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "extractorIntervalMs": {
+            "type": "integer",
+            "default": 60000,
+            "minimum": 1000
+          },
+          "maintenanceIntervalMs": {
+            "type": "integer",
+            "default": 21600000,
+            "minimum": 60000
+          }
+        }
+      },
+      "temporal": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "defaultSource": {
+            "type": "string",
+            "enum": ["experience", "knowledge", "imported"],
+            "default": "experience"
+          }
+        }
+      },
+      "state": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "filterSupersededInRecall": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "staleness": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "threshold": {
+            "type": "number",
+            "default": 0.7,
+            "minimum": 0,
+            "maximum": 1
+          },
+          "mode": {
+            "type": "string",
+            "enum": ["heuristic", "llm"],
+            "default": "heuristic"
+          }
+        }
+      },
+      "causalEdges": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "extract": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "graphHealth": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "alertOnAnomaly": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "queryCache": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "maxSize": {
+            "type": "integer",
+            "default": 100,
+            "minimum": 1
+          },
+          "ttlMs": {
+            "type": "integer",
+            "default": 1800000,
+            "minimum": 1000
+          },
+          "similarityThreshold": {
+            "type": "number",
+            "default": 0.95,
+            "minimum": 0,
+            "maximum": 1
+          }
+        }
+      },
+      "judge": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "asyncMode": {
+            "type": "boolean",
+            "default": true
+          },
+          "judgeWarmupFeedbacks": {
+            "type": "integer",
+            "default": 50,
+            "minimum": 1
+          },
+          "heuristicMatch": {
+            "type": "string",
+            "enum": ["id", "name", "both"],
+            "default": "both"
+          }
+        }
+      },
+      "feedback": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "retentionDays": {
+            "type": "integer",
+            "default": 90,
+            "minimum": 1
+          }
+        }
+      },
+      "warmup": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "warmupFeedbacks": {
+            "type": "integer",
+            "default": 100,
+            "minimum": 1
+          },
+          "judgeWarmupFeedbacks": {
+            "type": "integer",
+            "default": 50,
+            "minimum": 1
+          }
+        }
+      },
+      "associationMatrix": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "learningRate": {
+            "type": "number",
+            "default": 0.01,
+            "exclusiveMinimum": 0
+          },
+          "momentum": {
+            "type": "number",
+            "default": 0.9,
+            "minimum": 0,
+            "maximum": 1
+          },
+          "adamBeta1": {
+            "type": "number",
+            "default": 0.9,
+            "minimum": 0,
+            "maximum": 1
+          },
+          "adamBeta2": {
+            "type": "number",
+            "default": 0.999,
+            "minimum": 0,
+            "maximum": 1
+          },
+          "warmupFeedbacks": {
+            "type": "integer",
+            "default": 100,
+            "minimum": 1
+          }
+        }
+      },
+      "marginalUtility": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "neighborhoodSize": {
+            "type": "integer",
+            "default": 5,
+            "minimum": 1
+          },
+          "minImprovement": {
+            "type": "number",
+            "default": 0.0
+          }
+        }
+      },
+      "evolvableEmbedding": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "reembedOnContentChange": {
+            "type": "boolean",
+            "default": true
+          },
+          "archiveKeepCount": {
+            "type": "integer",
+            "default": 3,
+            "minimum": 1
+          }
+        }
+      },
+      "importance": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "weights": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "recency": {
+                "type": "number",
+                "default": 0.3,
+                "minimum": 0
+              },
+              "frequency": {
+                "type": "number",
+                "default": 0.3,
+                "minimum": 0
+              },
+              "centrality": {
+                "type": "number",
+                "default": 0.2,
+                "minimum": 0
+              },
+              "source": {
+                "type": "number",
+                "default": 0.2,
+                "minimum": 0
+              }
+            }
+          },
+          "recencyDecayDays": {
+            "type": "integer",
+            "default": 30,
+            "minimum": 1
+          },
+          "frequencySaturation": {
+            "type": "integer",
+            "default": 10,
+            "minimum": 1
+          }
+        }
+      },
+      "hierarchicalCommunity": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "depth": {
+            "type": "integer",
+            "enum": [1, 2, 3],
+            "default": 3
+          }
+        }
+      },
+      "conflictResolution": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "temporalPriority": {
+            "type": "boolean",
+            "default": true
+          },
+          "sourcePriority": {
+            "type": "boolean",
+            "default": true
+          },
+          "confidencePriority": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "edgeWeights": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "strengthenFactor": {
+            "type": "number",
+            "default": 1.1,
+            "minimum": 1
+          },
+          "decayFactor": {
+            "type": "number",
+            "default": 0.95,
+            "exclusiveMinimum": 0,
+            "maximum": 1
+          },
+          "minWeight": {
+            "type": "number",
+            "default": 0.1,
+            "minimum": 0
+          },
+          "maxWeight": {
+            "type": "number",
+            "default": 5.0,
+            "minimum": 1
+          }
+        }
+      },
+      "reverseMemory": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "recallThreshold": {
+            "type": "integer",
+            "default": 10,
+            "minimum": 1
+          },
+          "stalenessPenalty": {
+            "type": "number",
+            "default": 0.1,
+            "minimum": 0,
+            "maximum": 1
+          },
+          "importanceFloor": {
+            "type": "number",
+            "default": 0.2,
+            "minimum": 0,
+            "maximum": 1
+          }
+        }
+      },
+      "benchmark": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "dataDir": {
+            "type": "string"
+          },
+          "maxCases": {
+            "type": "integer",
+            "default": 0,
+            "minimum": 0
+          },
+          "buildGraph": {
+            "type": "boolean",
+            "default": true
+          },
+          "caseTimeoutMs": {
+            "type": "integer",
+            "default": 30000,
+            "minimum": 1000
+          }
+        }
+      },
+      "autoTuner": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "regressionThreshold": {
+            "type": "number",
+            "default": 0.02,
+            "minimum": 0,
+            "maximum": 1
+          },
+          "stagnationThreshold": {
+            "type": "integer",
+            "default": 5,
+            "minimum": 1
+          },
+          "maxRounds": {
+            "type": "integer",
+            "default": 10,
+            "minimum": 1
+          },
+          "benchmarkMaxCases": {
+            "type": "integer",
+            "default": 50,
+            "minimum": 0
+          },
+          "llmDiagnosis": {
+            "type": "boolean",
+            "default": true
+          },
+          "warmupFeedbacks": {
+            "type": "integer",
+            "default": 100,
+            "minimum": 1
           }
         }
       }

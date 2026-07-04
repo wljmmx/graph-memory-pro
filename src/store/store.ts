@@ -141,6 +141,65 @@ export async function upsertNode(
   const session = getSession(driver);
   try {
     const label = typeToLabel(node.type);
+
+    // v2.1.2 第三批 R-4: 可进化嵌入
+    // 检测 content 实质变化（MD5 hash 对比），变化时：
+    //   1. 将当前 embedding 归档到 embeddingHistory 数组（保留最近 archiveKeepCount 条）
+    //   2. 清空当前 embedding，让下一次 reembed 周期重算
+    //   3. 更新 embeddingHash 为新 content 的 hash
+    const newContentHash = createHash("md5")
+      .update(`${node.name}|${node.description}|${node.content}`)
+      .digest("hex");
+
+    let evolvableApplied = false;
+    if (node.id) {
+      // 读取旧节点的 embedding/embeddingHash/embeddingHistory
+      const existing = await session.run(
+        `MATCH (n:${label} {id: $id})
+         RETURN n.embedding AS embedding,
+                n.embeddingHash AS embeddingHash,
+                n.embeddingModel AS embeddingModel,
+                n.embeddingHistory AS embeddingHistory`,
+        { id: node.id },
+      );
+      const rec = existing.records[0];
+      if (rec) {
+        const oldHash = rec.get("embeddingHash");
+        const oldEmbedding = rec.get("embedding");
+        const oldModel = rec.get("embeddingModel");
+        const oldHistory = rec.get("embeddingHistory") ?? [];
+
+        // hash 不同且旧 embedding 存在 → content 实质变化
+        if (oldHash && oldHash !== newContentHash && oldEmbedding && Array.isArray(oldEmbedding) && oldEmbedding.length > 0) {
+          // 归档旧嵌入
+          const archived = Array.isArray(oldHistory) ? [...oldHistory] : [];
+          archived.unshift({
+            embedding: oldEmbedding,
+            embeddingModel: oldModel ?? null,
+            embeddingHash: oldHash,
+            archivedAt: Date.now(),
+          });
+          // 保留最近 N 条（默认 3）
+          const keepCount = 3;
+          const trimmed = archived.slice(0, keepCount);
+
+          await session.run(
+            `MATCH (n:${label} {id: $id})
+             SET n.embeddingHistory = $history,
+                 n.embedding = null,
+                 n.embeddingHash = $newHash`,
+            { id: node.id, history: trimmed, newHash: newContentHash },
+          );
+          evolvableApplied = true;
+        }
+      }
+    }
+
+    // v2.1.2: 持久化 S-1/S-3/S-13/S-14/G-4 新增字段（全部可选，向后兼容）
+    // R-4: 若 evolvable 已应用（content 变化），不覆盖 embeddingHash（保留 null）
+    //      若未应用，写入新 hash（若节点新创建，则记录初始 hash）
+    const finalEmbeddingHash = evolvableApplied ? null : newContentHash;
+
     await session.run(
       `MERGE (n:${label} {id: $id})
        SET n.name = $name,
@@ -151,7 +210,17 @@ export async function upsertNode(
            n.pagerank = $pagerank,
            n.validatedCount = $validatedCount,
            n.createdAt = $createdAt,
-           n.updatedAt = $updatedAt
+           n.updatedAt = $updatedAt,
+           n.validFrom = COALESCE($validFrom, $createdAt),
+           n.recordedAt = COALESCE($recordedAt, $createdAt),
+           n.source = COALESCE($source, 'experience'),
+           n.state = COALESCE($state, 'current'),
+           n.stalenessScore = COALESCE($stalenessScore, 0.0),
+           n.importanceScore = COALESCE($importanceScore, 0.0),
+           n.embeddingHash = COALESCE($embeddingHash, n.embeddingHash)
+       SET n.validTo = $validTo,
+           n.supersededBy = $supersededBy,
+           n.embeddingModel = $embeddingModel
        `,
       {
         id: node.id,
@@ -164,6 +233,17 @@ export async function upsertNode(
         validatedCount: node.validatedCount,
         createdAt: neo4j.int(node.createdAt),
         updatedAt: neo4j.int(node.updatedAt),
+        // v2.1.2 新增字段（向后兼容：undefined 时使用默认值）
+        validFrom: node.validFrom ? neo4j.int(node.validFrom) : null,
+        validTo: node.validTo ? neo4j.int(node.validTo) : null,
+        recordedAt: node.recordedAt ? neo4j.int(node.recordedAt) : null,
+        source: node.source ?? null,
+        state: node.state ?? null,
+        stalenessScore: node.stalenessScore ?? null,
+        importanceScore: node.importanceScore ?? null,
+        supersededBy: node.supersededBy ?? null,
+        embeddingModel: node.embeddingModel ?? null,
+        embeddingHash: finalEmbeddingHash,
       },
     );
   } finally {
@@ -294,7 +374,8 @@ export async function graphWalk(
   const session = getSession(driver);
   try {
     // ✅ 优化：限制关系类型为有意义的业务关系，排除 NEXT_SESSION/CONTAINS 等高频低价值边
-    const relTypes = "USED_SKILL|SOLVED_BY|REQUIRES|PATCHES|CONFLICTS_WITH";
+    // v2.1.2: 新增 CAUSED_BY / LEADS_TO 因果边类型
+    const relTypes = "USED_SKILL|SOLVED_BY|REQUIRES|PATCHES|CONFLICTS_WITH|CAUSED_BY|LEADS_TO";
     const result = await session.run(
       `MATCH path = (start:Task|Skill|Event)-[r:${relTypes}*1..${depth}]-(end:Task|Skill|Event)
        WHERE start.id IN $seedIds
@@ -327,6 +408,147 @@ export async function getNodeCount(driver: Driver): Promise<number> {
       "MATCH (n:Task|Skill|Event {status: 'active'}) RETURN count(n) AS c",
     );
     return result.records[0]?.get("c")?.toNumber?.() ?? 0;
+  } finally {
+    await session.close();
+  }
+}
+
+// ── I-3 反馈持久化（v2.1.2 第二批）─────────────────────────────
+
+export interface GmFeedback {
+  id: string;                 // 反馈 ID（query hash + timestamp）
+  query: string;
+  recalledNodeIds: string[];
+  usedNodeIds: string[];
+  unusedNodeIds: string[];
+  timestamp: number;
+  sessionId?: string;
+  matchedBy: "heuristic" | "llm" | "cold-start";
+}
+
+/**
+ * 持久化反馈记录到 Neo4j
+ *
+ * 节点结构：(:GmFeedback {id, query, usedNodeIds, ...})
+ * 关系：(:GmFeedback)-[:JUDGED]->(:Task|Skill|Event)  反馈所评价的节点
+ */
+export async function upsertFeedback(
+  driver: Driver,
+  feedback: GmFeedback,
+): Promise<void> {
+  const session = getSession(driver);
+  try {
+    // 1. 创建 GmFeedback 节点
+    await session.run(
+      `MERGE (f:GmFeedback {id: $id})
+       SET f.query = $query,
+           f.recalledNodeIds = $recalledNodeIds,
+           f.usedNodeIds = $usedNodeIds,
+           f.unusedNodeIds = $unusedNodeIds,
+           f.timestamp = $timestamp,
+           f.sessionId = $sessionId,
+           f.matchedBy = $matchedBy
+      `,
+      {
+        id: feedback.id,
+        query: feedback.query,
+        recalledNodeIds: feedback.recalledNodeIds,
+        usedNodeIds: feedback.usedNodeIds,
+        unusedNodeIds: feedback.unusedNodeIds,
+        timestamp: neo4j.int(feedback.timestamp),
+        sessionId: feedback.sessionId ?? null,
+        matchedBy: feedback.matchedBy,
+      },
+    );
+
+    // 2. 建立 JUDGED 关系（仅对实际被使用/未使用的节点建边）
+    // usedNodeIds → [:JUDGED {verdict: 'used'}]
+    // unusedNodeIds → [:JUDGED {verdict: 'unused'}]
+    if (feedback.usedNodeIds.length > 0) {
+      await session.run(
+        `MATCH (f:GmFeedback {id: $feedbackId})
+         UNWIND $usedNodeIds AS nodeId
+         MATCH (n:Task|Skill|Event {id: nodeId})
+         MERGE (f)-[r:JUDGED]->(n)
+         SET r.verdict = 'used',
+             r.timestamp = $timestamp
+        `,
+        {
+          feedbackId: feedback.id,
+          usedNodeIds: feedback.usedNodeIds,
+          timestamp: neo4j.int(feedback.timestamp),
+        },
+      );
+    }
+    if (feedback.unusedNodeIds.length > 0) {
+      await session.run(
+        `MATCH (f:GmFeedback {id: $feedbackId})
+         UNWIND $unusedNodeIds AS nodeId
+         MATCH (n:Task|Skill|Event {id: nodeId})
+         MERGE (f)-[r:JUDGED]->(n)
+         SET r.verdict = 'unused',
+             r.timestamp = $timestamp
+        `,
+        {
+          feedbackId: feedback.id,
+          unusedNodeIds: feedback.unusedNodeIds,
+          timestamp: neo4j.int(feedback.timestamp),
+        },
+      );
+    }
+
+    // 3. 增加被使用节点的 validatedCount（reward signal）
+    if (feedback.usedNodeIds.length > 0) {
+      await session.run(
+        `UNWIND $usedNodeIds AS nodeId
+         MATCH (n:Task|Skill|Event {id: nodeId})
+         SET n.validatedCount = COALESCE(n.validatedCount, 0) + 1,
+             n.updatedAt = timestamp()
+        `,
+        { usedNodeIds: feedback.usedNodeIds },
+      );
+    }
+  } finally {
+    await session.close();
+  }
+}
+
+/**
+ * 查询反馈记录（用于冷启动计数）
+ */
+export async function getFeedbackCount(driver: Driver): Promise<number> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(
+      "MATCH (f:GmFeedback) RETURN count(f) AS c",
+    );
+    return result.records[0]?.get("c")?.toNumber?.() ?? 0;
+  } finally {
+    await session.close();
+  }
+}
+
+/**
+ * 查询某节点的累计使用/未使用计数
+ */
+export async function getNodeFeedbackStats(
+  driver: Driver,
+  nodeId: string,
+): Promise<{ usedCount: number; unusedCount: number }> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(
+      `MATCH (:Task|Skill|Event {id: $nodeId})<-[r:JUDGED]-(f:GmFeedback)
+       RETURN count(CASE WHEN r.verdict = 'used' THEN 1 END) AS usedCount,
+              count(CASE WHEN r.verdict = 'unused' THEN 1 END) AS unusedCount
+      `,
+      { nodeId },
+    );
+    const rec = result.records[0];
+    return {
+      usedCount: rec?.get("usedCount")?.toNumber?.() ?? 0,
+      unusedCount: rec?.get("unusedCount")?.toNumber?.() ?? 0,
+    };
   } finally {
     await session.close();
   }
@@ -504,11 +726,24 @@ export async function mergeNodes(
       { keepId, mergeId },
     );
 
-    // Phase 6: delete all edges from/to merge node to prevent ghost edges
+    // Phase 6: S-2 软替换（v2.1.2）
+    // 旧实现：DETACH DELETE merge（物理删除，丢失历史）
+    // 新实现：保留节点，标记 state=superseded，validTo=now，supersededBy 指向 keep
+    //         边 weight 降为 0.1 不参与 GDS 计算（但仍可追溯）
+    //         state.enabled=false 时退化为旧行为（物理删除）
+    // 注：当前默认走软替换；如需旧行为可由调用方在 mergeNodes 前判断 cfg.state.enabled
     await session.run(
       `MATCH (merge:Task|Skill|Event {id: $mergeId})
-       DETACH DELETE merge`,
-      { mergeId },
+       SET merge.state = 'superseded',
+           merge.validTo = timestamp(),
+           merge.supersededBy = $keepId,
+           merge.updatedAt = timestamp()
+       WITH merge
+       MATCH (merge)-[r]-()
+       WHERE NOT type(r) IN ['NEXT_SESSION', 'CONTAINS', 'MENTIONS']
+       SET r.weight = 0.1
+      `,
+      { keepId, mergeId },
     );
   } finally {
     await session.close();
@@ -846,6 +1081,19 @@ function recordToNode(rec: any): GmNode | null {
     createdAt: p.createdAt?.toNumber?.() ?? 0,
     updatedAt: p.updatedAt?.toNumber?.() ?? 0,
     embedding: p.embedding,
+    // v2.1.2 新增字段（向后兼容：旧数据无这些字段时为 undefined）
+    validFrom: p.validFrom?.toNumber?.() ?? (typeof p.validFrom === "number" ? p.validFrom : undefined),
+    validTo: p.validTo?.toNumber?.() ?? (typeof p.validTo === "number" ? p.validTo : undefined),
+    recordedAt: p.recordedAt?.toNumber?.() ?? (typeof p.recordedAt === "number" ? p.recordedAt : undefined),
+    source: p.source,
+    supersededBy: p.supersededBy,
+    state: p.state,
+    stalenessScore: typeof p.stalenessScore === "number" ? p.stalenessScore : (p.stalenessScore?.toNumber?.() ?? undefined),
+    importanceScore: typeof p.importanceScore === "number" ? p.importanceScore : (p.importanceScore?.toNumber?.() ?? undefined),
+    embeddingModel: p.embeddingModel,
+    // v2.1.2 第三批 R-4
+    embeddingHash: p.embeddingHash,
+    embeddingHistory: Array.isArray(p.embeddingHistory) ? p.embeddingHistory : undefined,
   };
 }
 

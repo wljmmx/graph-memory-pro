@@ -1,7 +1,7 @@
 /**
  * graph-memory-pro — Neo4j Knowledge Graph Memory Plugin
  *
- * Version: 2.2.0
+ * Version: 2.1.2
  *
  * 架构定位（A 方案）:
  *   - 不占用 slots（memory/contextEngine）
@@ -198,6 +198,135 @@ export default definePluginEntry({
       extractorIntervalMs: Type.Optional(Type.Number({ default: 60_000 })),
       maintenanceIntervalMs: Type.Optional(Type.Number({ default: 6 * 3600_000 })),
     })),
+    // ── v2.1.2 第一批 Schema 升级 + 监控基础 ────────────
+    temporal: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      defaultSource: Type.Optional(Type.Union([
+        Type.Literal("experience"),
+        Type.Literal("knowledge"),
+        Type.Literal("imported"),
+      ])),
+    })),
+    state: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      filterSupersededInRecall: Type.Optional(Type.Boolean({ default: false })),
+    })),
+    staleness: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      threshold: Type.Optional(Type.Number({ default: 0.7 })),
+      mode: Type.Optional(Type.Union([
+        Type.Literal("heuristic"),
+        Type.Literal("llm"),
+      ])),
+    })),
+    causalEdges: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      extract: Type.Optional(Type.Boolean({ default: true })),
+    })),
+    graphHealth: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      alertOnAnomaly: Type.Optional(Type.Boolean({ default: true })),
+    })),
+    // ── v2.1.2 第二批 反馈闭环 + 冷启动 ────────────
+    queryCache: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      maxSize: Type.Optional(Type.Number({ default: 100 })),
+      ttlMs: Type.Optional(Type.Number({ default: 30 * 60 * 1000 })),
+      similarityThreshold: Type.Optional(Type.Number({ default: 0.95 })),
+    })),
+    judge: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      asyncMode: Type.Optional(Type.Boolean({ default: true })),
+      judgeWarmupFeedbacks: Type.Optional(Type.Number({ default: 50 })),
+      heuristicMatch: Type.Optional(Type.Union([
+        Type.Literal("id"),
+        Type.Literal("name"),
+        Type.Literal("both"),
+      ])),
+    })),
+    feedback: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      retentionDays: Type.Optional(Type.Number({ default: 90 })),
+    })),
+    warmup: Type.Optional(Type.Object({
+      warmupFeedbacks: Type.Optional(Type.Number({ default: 100 })),
+      judgeWarmupFeedbacks: Type.Optional(Type.Number({ default: 50 })),
+    })),
+    // ── v2.1.2 第三批 在线学习 + 可进化嵌入 + 重要性评分 ────────
+    associationMatrix: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: false })),
+      learningRate: Type.Optional(Type.Number({ default: 0.01 })),
+      momentum: Type.Optional(Type.Number({ default: 0.9 })),
+      adamBeta1: Type.Optional(Type.Number({ default: 0.9 })),
+      adamBeta2: Type.Optional(Type.Number({ default: 0.999 })),
+      warmupFeedbacks: Type.Optional(Type.Number({ default: 100 })),
+    })),
+    marginalUtility: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      neighborhoodSize: Type.Optional(Type.Number({ default: 5 })),
+      minImprovement: Type.Optional(Type.Number({ default: 0.0 })),
+    })),
+    evolvableEmbedding: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      reembedOnContentChange: Type.Optional(Type.Boolean({ default: true })),
+      archiveKeepCount: Type.Optional(Type.Number({ default: 3 })),
+    })),
+    importance: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      weights: Type.Optional(Type.Object({
+        recency: Type.Optional(Type.Number({ default: 0.3 })),
+        frequency: Type.Optional(Type.Number({ default: 0.3 })),
+        centrality: Type.Optional(Type.Number({ default: 0.2 })),
+        source: Type.Optional(Type.Number({ default: 0.2 })),
+      })),
+      recencyDecayDays: Type.Optional(Type.Number({ default: 30 })),
+      frequencySaturation: Type.Optional(Type.Number({ default: 10 })),
+    })),
+    // ── v2.1.2 第四批 结构升级 + 冲突消解 + 嵌入版本 ────────────
+    hierarchicalCommunity: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      depth: Type.Optional(Type.Union([
+        Type.Literal(1),
+        Type.Literal(2),
+        Type.Literal(3),
+      ])),
+    })),
+    conflictResolution: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      temporalPriority: Type.Optional(Type.Boolean({ default: true })),
+      sourcePriority: Type.Optional(Type.Boolean({ default: true })),
+      confidencePriority: Type.Optional(Type.Boolean({ default: true })),
+    })),
+    edgeWeights: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      strengthenFactor: Type.Optional(Type.Number({ default: 1.1 })),
+      decayFactor: Type.Optional(Type.Number({ default: 0.95 })),
+      minWeight: Type.Optional(Type.Number({ default: 0.1 })),
+      maxWeight: Type.Optional(Type.Number({ default: 5.0 })),
+    })),
+    reverseMemory: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      recallThreshold: Type.Optional(Type.Number({ default: 10 })),
+      stalenessPenalty: Type.Optional(Type.Number({ default: 0.1 })),
+      importanceFloor: Type.Optional(Type.Number({ default: 0.2 })),
+    })),
+    // ── v2.1.2 第五批 Benchmark + 自主调优 ────────────
+    benchmark: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: false })),
+      dataDir: Type.Optional(Type.String()),
+      maxCases: Type.Optional(Type.Number({ default: 0 })),
+      buildGraph: Type.Optional(Type.Boolean({ default: true })),
+      caseTimeoutMs: Type.Optional(Type.Number({ default: 30_000 })),
+    })),
+    autoTuner: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: false })),
+      regressionThreshold: Type.Optional(Type.Number({ default: 0.02 })),
+      stagnationThreshold: Type.Optional(Type.Number({ default: 5 })),
+      maxRounds: Type.Optional(Type.Number({ default: 10 })),
+      benchmarkMaxCases: Type.Optional(Type.Number({ default: 50 })),
+      llmDiagnosis: Type.Optional(Type.Boolean({ default: true })),
+      warmupFeedbacks: Type.Optional(Type.Number({ default: 100 })),
+    })),
   }) as any),
   register(api: any) {
     const logger = api.logger ?? console;
@@ -246,6 +375,32 @@ export default definePluginEntry({
       // 4. 初始化 Recaller / Extractor
       _recaller = new Recaller(driver, _cfg);
       if (_embed) _recaller.setEmbedFn(_embed);
+
+      // v2.1.2 第二批 I-2：注入 JudgeManager
+      if (_cfg.judge?.enabled !== false) {
+        const { JudgeManager } = await import("./src/recaller/judge.ts");
+        const { getFeedbackCount } = await import("./src/store/store.ts");
+        const jm = new JudgeManager(_cfg.judge, _llm ?? undefined);
+        // 从 DB 恢复累计反馈计数，避免 Gateway 重启后永久卡在冷启动期
+        try {
+          const persistedCount = await getFeedbackCount(driver);
+          for (let i = 0; i < persistedCount; i++) jm.incrementFeedback();
+          logger?.info?.(`[graph-memory-pro] judge enabled (warmup=${_cfg.judge?.judgeWarmupFeedbacks ?? 50}, persisted=${persistedCount})`);
+        } catch (err) {
+          logger?.warn?.(`[graph-memory-pro] judge feedback count restore failed: ${err}`);
+        }
+        _recaller.setJudgeManager(jm);
+      }
+
+      // v2.1.2 第三批 L-1：注入 AssociationMatrix（关联矩阵 M）
+      if (_cfg.associationMatrix?.enabled === true) {
+        const { createAssociationMatrix } = await import("./src/recaller/association-matrix.ts");
+        const amDim = resolveEmbedDimension(_cfg);
+        const am = createAssociationMatrix(amDim, _cfg);
+        _recaller.setAssociationMatrix(am);
+        logger?.info?.(`[graph-memory-pro] association-matrix enabled (dim=${amDim}, warmup=${_cfg.associationMatrix?.warmupFeedbacks ?? _cfg.warmup?.warmupFeedbacks ?? 100})`);
+      }
+
       _extractor = new Extractor(driver);
 
       if (_cfg.timing?.enabled) {
@@ -474,7 +629,7 @@ export default definePluginEntry({
     api.registerTool({
       name: "gm_maintain",
       label: "Graph Memory Maintain",
-      description: "手动触发 Graph Memory Pro 图谱维护（去重 + PageRank + 社区检测）并返回统计信息",
+      description: "手动触发 Graph Memory Pro 图谱维护（去重 + PageRank + 社区检测 + 过时检测 + 健康检查）并返回统计信息",
       parameters: Type.Object({}),
       async execute() {
         if (!_driver || !_cfg) {
@@ -486,6 +641,28 @@ export default definePluginEntry({
             getEdgeCount(_driver),
           ]);
           const result = await runMaintenance(_driver, _cfg, _llm ?? undefined, _embed ?? undefined);
+
+          // v2.1.2 G-5: 维护后追加健康报告
+          let healthReport: any = null;
+          try {
+            const { healthCheck } = await import("./src/graph/maintenance.ts");
+            healthReport = await healthCheck(_driver);
+          } catch (err: any) {
+            // 健康检查失败不影响主流程
+          }
+
+          // v2.1.2 第二批：缓存 + 反馈统计
+          const cacheStats = _recaller?.getQueryCache()?.getStats();
+          const judgeStats = _recaller?.getJudgeManager()
+            ? {
+                feedbackCount: _recaller.getJudgeManager()!.getFeedbackCount(),
+                coldStart: _recaller.getJudgeManager()!.isColdStart(),
+              }
+            : null;
+
+          // v2.1.2 第三批：L-1 关联矩阵 M 统计
+          const amStats = _recaller?.getAssociationMatrix()?.getStats();
+
           const text = [
             "📊 Graph Memory Pro 统计",
             `节点总数: ${nodeCount}`,
@@ -496,9 +673,39 @@ export default definePluginEntry({
             `PageRank: ${result.pagerank.topK.length} 个节点已排序`,
             `社区: ${result.community.count} 个社区`,
             `社区摘要: ${result.communitySummaries} 个`,
+            result.importance ? `重要性评分: scanned=${result.importance.scanned}, avg=${result.importance.avgScore.toFixed(3)}` : "",
+            result.conflictResolution ? `冲突消解: scanned=${result.conflictResolution.scanned}, resolved=${result.conflictResolution.resolved} (合并=${result.conflictResolution.merged})` : "",
+            result.edgeWeights && result.edgeWeights.scanned > 0 ? `边权重: 强化=${result.edgeWeights.strengthened}, 衰减=${result.edgeWeights.decayed}` : "",
+            result.reverseMemory && (result.reverseMemory.watchlistAdded > 0 || result.reverseMemory.decayed > 0) ? `反向记忆: 衰减=${result.reverseMemory.decayed}, 恢复=${result.reverseMemory.watchlistRemoved}` : "",
             `耗时: ${result.durationMs}ms`,
-          ].join("\n");
-          return { content: [{ type: "text", text }], details: { nodeCount, edgeCount, ...result } };
+            "",
+            healthReport ? "🏥 图谱健康" : "",
+            healthReport ? `活跃节点: ${healthReport.nodes.active}/${healthReport.nodes.total}` : "",
+            healthReport ? `孤立节点: ${healthReport.isolatedNodes}` : "",
+            healthReport ? `高过时节点: ${healthReport.highStaleNodes}` : "",
+            healthReport ? `社区数: ${healthReport.communities}` : "",
+            healthReport ? `平均 PageRank: ${healthReport.avgPageRank.toFixed(4)}` : "",
+            healthReport && healthReport.anomalies.length > 0
+              ? `⚠️ 异常: ${healthReport.anomalies.join("; ")}`
+              : (healthReport ? "✅ 无异常" : ""),
+            "",
+            cacheStats ? "💾 查询缓存" : "",
+            cacheStats ? `容量: ${cacheStats.size}/${cacheStats.capacity}` : "",
+            cacheStats ? `命中率: ${cacheStats.hitRate}` : "",
+            cacheStats ? `相似命中: ${cacheStats.similarityHits}` : "",
+            "",
+            judgeStats ? "📋 反馈系统" : "",
+            judgeStats ? `累计反馈: ${judgeStats.feedbackCount}` : "",
+            judgeStats ? `冷启动期: ${judgeStats.coldStart ? "是（仅启发式规则）" : "否（已启用 LLM）"}` : "",
+            "",
+            amStats ? "🧠 关联矩阵 M (L-1)" : "",
+            amStats ? `维度: ${amStats.dim}` : "",
+            amStats ? `时间步 t: ${amStats.t}` : "",
+            amStats ? `已应用更新: ${amStats.updatesApplied}` : "",
+            amStats ? `被拒更新: ${amStats.updatesRejected} (R-3 边际效用拒绝)` : "",
+            amStats ? `历史样本: ${amStats.historySize}` : "",
+          ].filter(Boolean).join("\n");
+          return { content: [{ type: "text", text }], details: { nodeCount, edgeCount, ...result, health: healthReport, cache: cacheStats, judge: judgeStats, associationMatrix: amStats } };
         } catch (err: any) {
           return { content: [{ type: "text", text: `维护失败: ${err.message}` }], details: {} };
         }
@@ -519,7 +726,8 @@ export default definePluginEntry({
           return { content: [{ type: "text", text: "Embedding engine not configured" }], details: {} };
         }
         try {
-          const result = await reEmbedNodes(_driver, _embed);
+          // 传入 embeddingModel，避免清空所有节点的 embeddingModel 字段（G-4 修复）
+          const result = await reEmbedNodes(_driver, _embed, 50, _cfg.embedding?.model);
           const lines = [
             "Re-Embed done",
             `Scanned: ${result.totalScanned} nodes`,
@@ -531,6 +739,158 @@ export default definePluginEntry({
           return { content: [{ type: "text", text: lines.join("\n") }], details: result };
         } catch (err) {
           return { content: [{ type: "text", text: "Re-Embed failed: " + String(err) }], details: {} };
+        }
+      },
+    });
+
+    // v2.1.2 第二批 I-2/I-3: 反馈提交工具
+    // Agent 在收到 assistant 回复后调用，记录哪些召回节点被实际使用
+    api.registerTool({
+      name: "gm_feedback",
+      label: "Graph Memory Feedback",
+      description: "Submit feedback on which recalled nodes were actually used in the assistant reply. Triggers I-2 heuristic judge + I-3 persistence.",
+      parameters: Type.Object({
+        query: Type.String({ description: "Original user query" }),
+        recalledNodeIds: Type.Array(Type.String(), { description: "Node IDs returned by recall" }),
+        assistantReply: Type.String({ description: "Assistant's reply content" }),
+        sessionId: Type.Optional(Type.String()),
+      }),
+      async execute(_callId: string, params: any) {
+        if (!_driver || !_recaller) {
+          return { content: [{ type: "text", text: "Graph Memory Pro not connected" }], details: {} };
+        }
+        try {
+          // 加载召回的节点（用于裁判判断）
+          const { findById } = await import("./src/store/store.ts");
+          const driver = _driver;
+          const recalledNodes = (await Promise.all(
+            (params.recalledNodeIds as string[]).map(id => findById(driver, id)),
+          )).filter(Boolean) as any[];
+
+          // 调用 Recaller.processFeedback（I-2 判断 + I-3 持久化）
+          await _recaller.processFeedback(
+            params.query,
+            recalledNodes,
+            params.assistantReply,
+            params.sessionId,
+          );
+
+          const jm = _recaller.getJudgeManager();
+          const text = [
+            "✅ Feedback submitted",
+            `Recalled: ${recalledNodes.length} nodes`,
+            `Cold start: ${jm?.isColdStart() ? "yes (heuristic only)" : "no"}`,
+            `Total feedbacks: ${jm?.getFeedbackCount() ?? 0}`,
+          ].join("\n");
+          return { content: [{ type: "text", text }], details: { submitted: true } };
+        } catch (err: any) {
+          return { content: [{ type: "text", text: `Feedback failed: ${err.message}` }], details: {} };
+        }
+      },
+    });
+
+    // v2.1.2 第五批 S-10: Benchmark 评测工具
+    // Agent 触发标准评测（LoCoMo / LongMemEval），输出量化指标
+    api.registerTool({
+      name: "gm_benchmark",
+      label: "Graph Memory Benchmark",
+      description: "Run S-10 Benchmark evaluation (LoCoMo + LongMemEval) on the current graph memory. Outputs P@1 / P@3 / MRR / F1 / P99 latency / token consumption. Use to quantify recall quality before/after tuning.",
+      parameters: Type.Object({
+        datasets: Type.Optional(Type.Union([
+          Type.Literal("all"),
+          Type.Array(Type.String()),
+        ])),
+        maxCases: Type.Optional(Type.Number({ description: "Max cases per dataset (0 = all)" })),
+        buildGraph: Type.Optional(Type.Boolean({ description: "Build graph from conversation history before evaluation (default true)" })),
+      }),
+      async execute(_callId: string, params: any) {
+        if (!_recaller || !_cfg) {
+          return { content: [{ type: "text", text: "Graph Memory Pro not connected" }], details: {} };
+        }
+        try {
+          const { runBenchmark, formatAggregateReport } = await import("./src/benchmark/runner.ts");
+          const result = await runBenchmark(_recaller, _driver, _cfg, {
+            datasets: params.datasets ?? "all",
+            maxCases: params.maxCases ?? _cfg.benchmark?.maxCases ?? 0,
+            buildGraph: params.buildGraph ?? _cfg.benchmark?.buildGraph ?? true,
+            caseTimeoutMs: _cfg.benchmark?.caseTimeoutMs ?? 30_000,
+            dataDir: _cfg.benchmark?.dataDir,
+            llm: _llm ?? undefined,
+            embedFn: _embed ?? undefined,
+          });
+          const text = formatAggregateReport(result);
+          return { content: [{ type: "text", text }], details: result.aggregate };
+        } catch (err: any) {
+          return { content: [{ type: "text", text: `Benchmark failed: ${err.message}` }], details: {} };
+        }
+      },
+    });
+
+    // v2.1.2 第五批 R-1: 自主调优（EvolveMem）工具
+    // Agent 触发一次 EvolveMem 四步循环：EVALUATE → DIAGNOSE → PROPOSE → GUARD
+    api.registerTool({
+      name: "gm_tune",
+      label: "Graph Memory Auto-Tune",
+      description: "Run one EvolveMem auto-tuning cycle (R-1). Evaluates current config on benchmark, diagnoses failures via LLM/heuristic, proposes parameter adjustments, and guards against regressions. Requires benchmark + autoTuner enabled.",
+      parameters: Type.Object({
+        rounds: Type.Optional(Type.Number({ description: "Number of tune cycles to run (default 1, max bounded by config maxRounds)" })),
+      }),
+      async execute(_callId: string, params: any) {
+        if (!_recaller || !_cfg) {
+          return { content: [{ type: "text", text: "Graph Memory Pro not connected" }], details: {} };
+        }
+        if (_cfg.autoTuner?.enabled !== true) {
+          return { content: [{ type: "text", text: "AutoTuner disabled. Set autoTuner.enabled=true in config." }], details: {} };
+        }
+        try {
+          const { AutoTuner } = await import("./src/evolution/auto-tuner.ts");
+          // 持久化 AutoTuner 状态到本地文件，跨 gm_tune 调用保留 snapshots/bestMetrics
+          // 修复 R-1 设计缺陷：旧实现每次新建 AutoTuner，导致 revert-on-regression 永不触发
+          const { readFile, writeFile, mkdir } = await import("node:fs/promises");
+          const { join } = await import("node:path");
+          const statePath = join(
+            process.env.HOME || process.env.USERPROFILE || ".",
+            ".openclaw", "graph-memory-pro", "auto-tuner-state.json",
+          );
+          const tuner = new AutoTuner(_cfg.autoTuner, _llm ?? undefined);
+          tuner.setInitialAction(_cfg);
+          // 尝试从持久化文件恢复状态
+          try {
+            const saved = await readFile(statePath, "utf-8");
+            if (saved.trim()) tuner.deserialize(saved);
+          } catch { /* 首次运行无状态文件 */ }
+
+          const rounds = Math.max(1, Math.min(params.rounds ?? 1, _cfg.autoTuner?.maxRounds ?? 10));
+          const results: any[] = [];
+          for (let i = 0; i < rounds; i++) {
+            const r = await tuner.runTuneCycle(_recaller, _driver, _cfg);
+            results.push(r);
+            if (!r.applied) break;
+          }
+          // 持久化最新状态
+          try {
+            await mkdir(join(statePath, "..").replace(/\/[^/]+$/, ""), { recursive: true }).catch(() => {});
+            await writeFile(statePath, tuner.serialize()).catch(() => {});
+          } catch { /* 持久化失败不影响调优结果 */ }
+
+          const lines = [
+            "🔧 EvolveMem Auto-Tuning",
+            `Rounds executed: ${results.length}`,
+            `Total tune rounds (persisted): ${tuner.getTuneRound()}`,
+            `Snapshots: ${tuner.getSnapshots().length}`,
+            "",
+            ...results.map((r, i) =>
+              `Round ${i + 1}: ${r.applied ? "applied" : "skipped"} — ${r.reason}${r.isImprovement ? " ✨ improvement" : ""}${r.metrics ? ` | P@1=${(r.metrics.p1 * 100).toFixed(1)}%` : ""}`,
+            ),
+            "",
+            `Current action: ${JSON.stringify(tuner.getCurrentAction())}`,
+            "",
+            "⚠️ 注意：调优结果需手动应用到 GmConfig 并重启 Recaller 才生效。",
+            "   可通过 applyActionSpace(cfg, tuner.getCurrentAction()) 生成新配置。",
+          ];
+          return { content: [{ type: "text", text: lines.join("\n") }], details: { rounds: results, finalAction: tuner.getCurrentAction(), totalRounds: tuner.getTuneRound(), snapshots: tuner.getSnapshots().length } };
+        } catch (err: any) {
+          return { content: [{ type: "text", text: `Auto-tune failed: ${err.message}` }], details: {} };
         }
       },
     });
@@ -555,3 +915,40 @@ export type { GmConfig, NodeType, EdgeType, NodeStatus, GmNode, GmEdge, RecallRe
 export { createEmbedFn } from "./src/engine/embed.js";
 export { setTimingEnabled, printAllDistributions, resetAllDistributions, LatencyDistribution } from "./src/timing.js";
 export type { EmbedFn } from "./src/engine/embed.js";
+
+// ─── v2.1.2 第二批 反馈闭环 + 冷启动 Re-exports ─────────────────────────
+export { upsertFeedback, getFeedbackCount, getNodeFeedbackStats } from "./src/store/store.js";
+export type { GmFeedback } from "./src/store/store.js";
+export { QueryCache } from "./src/recaller/query-cache.js";
+export { JudgeManager, isMatrixColdStart, getColdStartSearchWeights } from "./src/recaller/judge.js";
+export type { JudgeConfig, JudgeResult, JudgeFeedback, WarmupConfig } from "./src/recaller/judge.js";
+
+// ─── v2.1.2 第三批 在线学习 + 可进化嵌入 + 重要性评分 Re-exports ─────────
+export { AssociationMatrix, createAssociationMatrix } from "./src/recaller/association-matrix.js";
+export type { AssociationMatrixConfig, MarginalUtilityConfig } from "./src/recaller/association-matrix.js";
+export { computeImportanceScores } from "./src/graph/maintenance.js";
+export type { ImportanceConfig } from "./src/graph/maintenance.js";
+
+// ─── v2.1.2 第四批 结构升级 + 冲突消解 + 嵌入版本 Re-exports ─────────
+export { detectHierarchicalCommunities, drillDownCommunity } from "./src/graph/community.js";
+export type { HierarchicalCommunityResult } from "./src/graph/community.js";
+export { resolveConflicts, adjustEdgeWeights, applyReverseMemory } from "./src/graph/maintenance.js";
+export type { ConflictResolutionConfig, EdgeWeightsConfig, ReverseMemoryConfig } from "./src/graph/maintenance.js";
+export { detectAndMigrateEmbeddings } from "./src/graph/reembed.js";
+export type { MigrationResult } from "./src/graph/reembed.js";
+
+// ─── v2.1.2 第五批 Benchmark + 自主调优 Re-exports ─────────
+export { runBenchmark, formatAggregateReport } from "./src/benchmark/runner.ts";
+export type { BenchmarkOptions, BenchmarkRunResult } from "./src/benchmark/runner.ts";
+export {
+  computeP1, computeP3, computeMRR, computeF1, computeP99Latency, computeAvgTokenEstimate,
+  evaluateCase, buildReport, formatReport,
+} from "./src/benchmark/types.ts";
+export type { BenchmarkCase, BenchmarkDataset, BenchmarkReport, CaseResult } from "./src/benchmark/types.ts";
+export { loadAllDatasets, loadLoCoMo, loadLongMemEval, getBuiltinSampleDataset } from "./src/benchmark/datasets.ts";
+export {
+  AutoTuner, extractActionSpace, applyActionSpace, clampAction, ACTION_BOUNDS, DEFAULT_AUTOTUNER_CONFIG,
+} from "./src/evolution/auto-tuner.ts";
+export type {
+  EvolveActionSpace, AutoTunerConfig, TuneCycleResult, DiagnosisResult, ConfigSnapshot,
+} from "./src/evolution/auto-tuner.ts";

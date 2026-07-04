@@ -9,7 +9,8 @@ import type { GmConfig } from "../types.ts";
 import { getSession } from "../store/db.ts";
 import { logPhase, isTimingEnabled } from "../timing.ts";
 
-const ALL_REL_TYPES = ["NEXT_SESSION", "CONTAINS", "MENTIONS", "USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH", "RELATES_TO"];
+// v2.1.2: 新增 CAUSED_BY / LEADS_TO 因果边类型
+const ALL_REL_TYPES = ["NEXT_SESSION", "CONTAINS", "MENTIONS", "USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH", "RELATES_TO", "CAUSED_BY", "LEADS_TO"];
 
 // ✅ Shared projection config
 const SHARED_GRAPH_NAME = "gm-shared";

@@ -17,7 +17,9 @@ export type TimingPhase =
   | "community_reps"
   | "ppr_total"
   | "merge_results"
-  | "extract_llm";
+  | "extract_llm"
+  | "recall_cache_hit"
+  | "recall_cache_similar_hit";
 
 export interface TimingRecord {
   phase: TimingPhase;

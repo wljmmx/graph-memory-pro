@@ -45,11 +45,13 @@ export function getRoutes(): RouteHandler[] {
   return [
     { method: "GET", path: "/api/status", handler: handleStatus },
     { method: "GET", path: "/api/stats", handler: handleStats },
+    { method: "GET", path: "/api/health", handler: handleHealth }, // v2.1.2 G-5
     { method: "GET", path: "/api/nodes/:id", handler: handleGetNode },
     { method: "GET", path: "/api/search", handler: handleSearch },
     { method: "GET", path: "/api/top", handler: handleTop },
     { method: "GET", path: "/api/nodes-by-type/:type", handler: handleNodesByType },
     { method: "POST", path: "/api/maintain", handler: handleMaintain },
+    { method: "POST", path: "/api/staleness/refresh", handler: handleRefreshStaleness }, // v2.1.2 S-14
   ];
 }
 
@@ -57,9 +59,36 @@ async function handleStatus(): Promise<{ status: number; body: any }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   try {
     await _driver.verifyConnectivity();
-    return { status: 200, body: { status: "connected", version: "2.1.0" } };
+    return { status: 200, body: { status: "connected", version: "2.1.2" } };
   } catch (err: any) {
     return { status: 503, body: { status: "disconnected", error: err.message } };
+  }
+}
+
+// v2.1.2 G-5: 图谱健康检查
+async function handleHealth(): Promise<{ status: number; body: any }> {
+  if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
+  try {
+    const { healthCheck } = await import("../graph/maintenance.ts");
+    const report = await healthCheck(_driver);
+    return { status: 200, body: report };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+// v2.1.2 S-14: 手动触发 staleness 重算
+async function handleRefreshStaleness(): Promise<{ status: number; body: any }> {
+  if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
+  try {
+    const { computeStalenessScores } = await import("../graph/maintenance.ts");
+    const result = await computeStalenessScores(_driver, {
+      halfLifeDays: 90,
+      threshold: _cfg?.staleness?.threshold ?? 0.7,
+    });
+    return { status: 200, body: result };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
   }
 }
 
