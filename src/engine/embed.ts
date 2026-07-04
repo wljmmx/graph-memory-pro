@@ -23,7 +23,7 @@ const RETRY_DELAYS = [1000, 3000, 5000];
  */
 export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
   const apiKey = config.apiKey || "";
-  let baseURL = (config.baseURL || "http://192.168.50.5:11434").replace(/\/+$/, "");
+  let baseURL = (config.baseURL || "http://localhost:11434").replace(/\/+$/, "");
   
   if (baseURL.endsWith("/v1")) {
     baseURL = baseURL.slice(0, -3);

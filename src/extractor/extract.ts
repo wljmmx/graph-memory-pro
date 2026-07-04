@@ -100,8 +100,6 @@ function parseExtractResult(raw: string): ExtractResult {
 
 // ─── Extractor 类包装 ──────────────────────────
 
-import type { Driver } from "neo4j-driver";
-
 export class Extractor {
   constructor(private _driver: Driver) {}
 

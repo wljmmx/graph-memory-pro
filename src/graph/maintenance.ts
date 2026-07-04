@@ -12,6 +12,7 @@ import type { EmbedFn } from "../engine/embed.ts";
 import { computeGlobalPageRank, type GlobalPageRankResult } from "./pagerank.ts";
 import { detectCommunities, summarizeCommunities, type CommunityResult } from "./community.ts";
 import { dedup, type DedupResult } from "./dedup.ts";
+import { getSession } from "../store/db.ts";
 export interface RepairEdgeResult {
   relatesToCreated: number;
   messageCount: number;

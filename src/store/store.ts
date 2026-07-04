@@ -223,7 +223,7 @@ export async function searchNodes(
        LIMIT toInteger($limit)`,
       { query, limit },
     );
-    return result.records.map((r) => recordToNode(r.get("n")));
+    return result.records.map((r) => recordToNode(r.get("n"))).filter((n): n is GmNode => n !== null);
   } finally {
     await session.close();
   }
@@ -257,7 +257,7 @@ export async function vectorSearchWithScore(
     return result.records.map((r) => ({
       node: recordToNode(r.get("node")),
       score: r.get("score"),
-    }));
+    })).filter((r): r is { node: GmNode; score: number } => r.node !== null);
   } finally {
     await session.close();
   }
@@ -332,7 +332,7 @@ export async function getNodesByType(
       ? `MATCH (n:${type} {status: 'active'}) RETURN n ORDER BY n.validatedCount DESC LIMIT toInteger($limit)`
       : `MATCH (n:${type} {status: 'active'}) RETURN n ORDER BY n.validatedCount DESC`;
     const result = await session.run(q, { limit: limit ?? 0 });
-    return result.records.map((r) => recordToNode(r.get("n")));
+    return result.records.map((r) => recordToNode(r.get("n"))).filter((n): n is GmNode => n !== null);
   } finally {
     await session.close();
   }
@@ -351,7 +351,7 @@ export async function getTopNodes(
        LIMIT toInteger($limit)`,
       { limit },
     );
-    return result.records.map((r) => recordToNode(r.get("n")));
+    return result.records.map((r) => recordToNode(r.get("n"))).filter((n): n is GmNode => n !== null);
   } finally {
     await session.close();
   }
@@ -635,7 +635,7 @@ export async function communityRepresentatives(
        ORDER BY n.pagerank DESC, n.validatedCount DESC`,
       { communityIds },
     );
-    return result.records.map((r) => recordToNode(r.get("n")));
+    return result.records.map((r) => recordToNode(r.get("n"))).filter((n): n is GmNode => n !== null);
   } finally {
     await session.close();
   }
@@ -678,7 +678,7 @@ export async function nodesByCommunityIds(
        LIMIT toInteger($limit)`,
       { communityIds, limit },
     );
-    return result.records.map((r) => recordToNode(r.get("n")));
+    return result.records.map((r) => recordToNode(r.get("n"))).filter((n): n is GmNode => n !== null);
   } finally {
     await session.close();
   }
@@ -689,15 +689,17 @@ export async function nodesByCommunityIds(
 export async function saveVector(
   driver: Driver,
   nodeId: string,
-  _content: string,
+  content: string,
   vec: number[],
 ): Promise<void> {
+  const hash = createHash("md5").update(content).digest("hex");
   const session = getSession(driver);
   try {
     await session.run(
       `MATCH (n:Task|Skill|Event {id: $nodeId})
-       SET n.embedding = $vec`,
-      { nodeId, vec },
+       SET n.embedding = $vec,
+           n.embeddingHash = $hash`,
+      { nodeId, vec, hash },
     );
   } finally {
     await session.close();
@@ -706,9 +708,21 @@ export async function saveVector(
 
 export async function getVectorHash(
   driver: Driver,
-  _nodeId: string,
+  nodeId: string,
 ): Promise<string> {
-  return "";
+  const session = getSession(driver);
+  try {
+    const result = await session.run(
+      `MATCH (n:Task|Skill|Event {id: $nodeId})
+       RETURN n.embeddingHash AS hash`,
+      { nodeId },
+    );
+    if (!result.records.length) return "";
+    const hash = result.records[0].get("hash");
+    return hash ?? "";
+  } finally {
+    await session.close();
+  }
 }
 
 // ─── 消息存储 ──────────────────────────────────────────────

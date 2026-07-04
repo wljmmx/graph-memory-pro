@@ -9,7 +9,8 @@
 
 import type { Driver } from "neo4j-driver";
 import type { GmNode, GmEdge } from "../types.ts";
-import { getCommunitySummary, getAllCommunitySummaries, type CommunitySummary } from "../store/store.ts";
+import { getCommunitySummary, getAllCommunitySummaries } from "../store/store.ts";
+import type { CommunitySummary } from "../types.ts";
 
 // 每 token 约 4 个英文字符（保守估计）
 const CHARS_PER_TOKEN = 4;
