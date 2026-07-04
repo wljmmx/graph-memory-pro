@@ -1,55 +1,10 @@
 {
   "id": "graph-memory-pro",
   "name": "Graph Memory Pro",
-  "version": "2.1.0",
-  "description": "Neo4j 知识图谱记忆引擎：三元组提取 + GDS 图算法 + 向量索引 + 双路径召回",
+  "version": "2.2.0",
+  "description": "Neo4j 知识图谱记忆引擎：三元组提取 + GDS 图算法 + 向量索引 + 双路径召回。无槽位插件，通过 registerMemoryCorpusSupplement 暴露给 memory-core，工具 + 后台服务模式运行。",
   "author": "Ananas <Wywelljob@gmail.com>",
   "license": "MIT",
-  "activation": {
-    "onStartup": true
-  },
-  "contracts": {
-    "tools": ["gm_search", "gm_record", "gm_stats", "gm_maintain"]
-  },
-  "configSchema": {
-    "type": "object",
-    "required": ["neo4j"],
-    "properties": {
-      "neo4j": {
-        "type": "object",
-        "required": ["uri", "user", "password"],
-        "properties": {
-          "uri": { "type": "string", "default": "bolt://localhost:37687", "description": "Neo4j bolt 连接地址" },
-          "user": { "type": "string", "default": "neo4j", "description": "Neo4j 用户名" },
-          "password": { "type": "string", "default": "", "description": "Neo4j 密码" }
-        }
-      },
-      "compactTurnCount": { "type": "number", "default": 6, "minimum": 1 },
-      "recallMaxNodes": { "type": "number", "default": 6, "minimum": 1, "maximum": 50 },
-      "recallMaxDepth": { "type": "number", "default": 2, "minimum": 1, "maximum": 5 },
-      "freshTailCount": { "type": "number", "default": 10, "minimum": 1 },
-      "dedupThreshold": { "type": "number", "default": 0.90, "minimum": 0, "maximum": 1 },
-      "pagerankDamping": { "type": "number", "default": 0.85, "minimum": 0, "maximum": 1 },
-      "pagerankIterations": { "type": "number", "default": 20, "minimum": 1 },
-      "llm": {
-        "type": "object",
-        "properties": {
-          "apiKey": { "type": "string" },
-          "baseURL": { "type": "string" },
-          "model": { "type": "string" }
-        }
-      },
-      "embedding": {
-        "type": "object",
-        "properties": {
-          "apiKey": { "type": "string" },
-          "baseURL": { "type": "string" },
-          "model": { "type": "string" },
-          "dimensions": { "type": "number", "default": 1024 }
-        }
-      }
-    }
-  },
   "uiHints": {
     "neo4j": {
       "label": "Neo4j 数据库连接",

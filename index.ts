@@ -1,22 +1,21 @@
 /**
  * graph-memory-pro — Neo4j Knowledge Graph Memory Plugin
  *
- * Version: 2.1.0 (Fixed Edition)
+ * Version: 2.2.0
  *
- * BUGFIXES:
- * - CHARS_PER_TOKEN: fixed from literal *** to 4
- * - embed.ts: removed fragile dynamic import("openai"), uses raw fetch
- * - llm.ts: added retry logic (ported from V1)
- * - store.ts: removed APOC dependency, uses native Cypher
- * - crud.ts: no longer exposes passwords in responses
- * - hooks: uses before_prompt_build (modern, not deprecated before_agent_start)
+ * 架构定位（A 方案）:
+ *   - 不占用 slots（memory/contextEngine）
+ *   - 不再使用 before_prompt_build 钩子（避免与 contextEngine 双注入）
+ *   - 通过 registerMemoryCorpusSupplement 把图谱暴露给 memory-core 的 memory_search
+ *   - 三元组提取 / 图谱维护通过 registerService 后台运行，不阻塞主流程
+ *   - HTTP 路由通过 api.registerHttpRoute 注册
+ *   - 保留专业工具：gm_record / gm_maintain / gm_reembed（gm_search/gm_stats 已合并）
  *
  * Latest OpenClaw Plugin SDK compliance:
  * - definePluginEntry from openclaw/plugin-sdk/plugin-entry
- * - registerTool for agent tools
- * - registerHttpRoute for REST API
- * - before_prompt_build hook for context injection
- * - session_end hook for maintenance
+ * - api.config 用于配置加载（不读文件系统）
+ * - api.logger 用于结构化日志
+ * - api.registerHttpRoute / registerService / registerMemoryCorpusSupplement
  */
 
 import { definePluginEntry, buildJsonPluginConfigSchema } from "openclaw/plugin-sdk/plugin-entry";
@@ -28,10 +27,9 @@ import type { EmbedFn } from "./src/engine/embed.ts";
 import { createCompleteFn } from "./src/engine/llm.ts";
 import { createEmbedFn } from "./src/engine/embed.ts";
 import { initDriver, closeDriver, verifyWithRetry, getDriver } from "./src/store/db.ts";
-import { ensureSchema, getNodeCount, getEdgeCount, searchNodes, getEdgesForNodes, upsertNode, upsertEdge } from "./src/store/store.ts";
+import { ensureSchema, getNodeCount, getEdgeCount, searchNodes, getEdgesForNodes, upsertNode, upsertEdge, findById } from "./src/store/store.ts";
 import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
-import { assembleContext } from "./src/format/assemble.ts";
 import { runMaintenance } from "./src/graph/maintenance.ts";
 import { reEmbedNodes } from "./src/graph/reembed.ts";
 import { initRoutes, getRoutes } from "./src/routes/crud.ts";
@@ -45,40 +43,118 @@ let _llm: CompleteFn | null = null;
 let _embed: EmbedFn | null = null;
 let _extractor: Extractor | null = null;
 let _recaller: Recaller | null = null;
+let _extractorTimer: ReturnType<typeof setInterval> | null = null;
+let _maintenanceTimer: ReturnType<typeof setInterval> | null = null;
 
 // ─── 辅助函数 ──────────────────────────────────────────
 
 import { EMBEDDING_PRESETS } from "./src/types.ts";
 
 function resolveEmbedDimension(cfg: any): number {
-  // 1. User-explicit dimension in config
+  // 1. 用户显式指定的维度
   if (cfg?.embedding?.dimensions && typeof cfg.embedding.dimensions === 'number') {
     return cfg.embedding.dimensions;
   }
-  // 2. Match by model name from presets
+  // 2. 按模型名匹配预设
   if (cfg?.embedding?.model) {
     const modelKey = Object.keys(EMBEDDING_PRESETS).find(k => cfg.embedding.model.includes(k) || k.includes(cfg.embedding.model));
     if (modelKey && EMBEDDING_PRESETS[modelKey].dimensions) {
       return EMBEDDING_PRESETS[modelKey].dimensions;
     }
   }
-  // 3. Fallback 1024
+  // 3. 回退 1024
   return 1024;
 }
 
-async function getOrCreateDriver(cfg: GmConfig): Promise<Driver | null> {
+async function getOrCreateDriver(cfg: GmConfig, logger: any): Promise<Driver | null> {
   try {
     const d = initDriver(cfg.neo4j);
     const ok = await verifyWithRetry(d);
     if (!ok) {
-      console.warn("[graph-memory-pro] Neo4j connection failed — plugin disabled");
+      logger?.warn?.("[graph-memory-pro] Neo4j connection failed — plugin disabled");
       closeDriver();
       return null;
     }
     return d;
   } catch (err) {
-    console.warn(`[graph-memory-pro] Neo4j init failed: ${err}`);
+    logger?.warn?.(`[graph-memory-pro] Neo4j init failed: ${err}`);
     return null;
+  }
+}
+
+/**
+ * 后台三元组提取：从最近会话消息中提取实体/关系写入 Neo4j。
+ * 移出 before_prompt_build 钩子以避免阻塞 prompt 构建。
+ */
+async function extractInBackground(
+  extractor: Extractor | null,
+  driver: Driver | null,
+  llm: CompleteFn | null,
+  logger: any,
+  pendingMessages: Array<{ user: string; assistant: string }>,
+): Promise<void> {
+  if (!extractor || !driver || !llm || pendingMessages.length === 0) return;
+
+  let extracted = 0;
+  const maxPairs = 3;
+  const pairs = pendingMessages.slice(0, maxPairs);
+
+  for (const pair of pairs) {
+    try {
+      const result = await extractor.extract(llm, pair.user, pair.assistant);
+      if (result.nodes.length > 0) {
+        extracted++;
+        const nodeIdMap = new Map<string, string>();
+        for (const enode of result.nodes) {
+          try {
+            const now = Date.now();
+            const id = `auto-${now}-${Math.random().toString(36).slice(2, 8)}`;
+            nodeIdMap.set(enode.name, id);
+            await upsertNode(driver, {
+              id,
+              type: enode.type,
+              name: enode.name,
+              description: enode.description,
+              content: enode.content,
+              status: "active",
+              communityId: undefined,
+              pagerank: 0,
+              validatedCount: 0,
+              createdAt: now,
+              updatedAt: now,
+            });
+          } catch (e) {
+            if (process.env.GM_DEBUG) logger?.debug?.(`  [graph-memory-pro] upsertNode failed: ${e}`);
+          }
+        }
+        for (const eedge of result.edges) {
+          try {
+            const fromId = nodeIdMap.get(eedge.fromName);
+            const toId = nodeIdMap.get(eedge.toName);
+            if (!fromId || !toId) continue;
+            const now = Date.now();
+            await upsertEdge(driver, {
+              id: `edge-${now}-${Math.random().toString(36).slice(2, 8)}`,
+              type: eedge.type,
+              fromId,
+              toId,
+              instruction: eedge.instruction,
+              condition: eedge.condition,
+              weight: 1,
+              createdAt: now,
+              updatedAt: now,
+            });
+          } catch (e) {
+            if (process.env.GM_DEBUG) logger?.debug?.(`  [graph-memory-pro] upsertEdge failed: ${e}`);
+          }
+        }
+      }
+    } catch (err) {
+      if (process.env.GM_DEBUG) logger?.debug?.(`  [graph-memory-pro] extract pair failed: ${err}`);
+    }
+  }
+  if (extracted > 0) {
+    logger?.info?.(`[graph-memory-pro] background extractor: ${extracted} turns processed`);
   }
 }
 
@@ -118,32 +194,23 @@ export default definePluginEntry({
       maxSamples: Type.Optional(Type.Number({ default: 1000 })),
       reportEveryN: Type.Optional(Type.Number({ default: 50 })),
     })),
+    background: Type.Optional(Type.Object({
+      extractorIntervalMs: Type.Optional(Type.Number({ default: 60_000 })),
+      maintenanceIntervalMs: Type.Optional(Type.Number({ default: 6 * 3600_000 })),
+    })),
   }) as any),
-  register(api) {
+  register(api: any) {
+    const logger = api.logger ?? console;
+
     // ── Gateway 启动时初始化 ──────────────────────
-    api.on("gateway_start", async (event) => {
-      // 优先从 event 中获取配置，回退到文件读取
-      let pluginConfig: GmConfig | undefined;
-      const eventCfg = (event as any)?.config ?? (event as any)?.pluginConfig;
-      if (eventCfg?.neo4j?.uri) {
-        pluginConfig = eventCfg as GmConfig;
-      } else {
-        // 回退：从 openclaw.json 读取
-        try {
-          const { readFileSync } = await import('node:fs');
-          const { join } = await import('node:path');
-          const configPath = join(process.env.HOME || process.env.USERPROFILE || '.', '.openclaw', 'openclaw.json');
-          const rawCfg = JSON.parse(readFileSync(configPath, 'utf-8'));
-          const entryCfg = rawCfg?.plugins?.entries?.['graph-memory-pro'];
-          pluginConfig = (entryCfg?.config ?? entryCfg) as GmConfig | undefined;
-        } catch (err) {
-          console.warn(`[graph-memory-pro] Failed to read config: ${err}`);
-        }
-      }
-      if (!pluginConfig?.neo4j?.uri) {
-        console.warn("[graph-memory-pro] No Neo4j config — plugin skipped");
+    api.on("gateway_start", async (event: any) => {
+      // P0-2: 配置优先从 SDK 注入，移除 fs.readFileSync
+      const eventCfg = event?.config ?? event?.pluginConfig ?? api.config;
+      if (!eventCfg?.neo4j?.uri) {
+        logger?.warn?.("[graph-memory-pro] No Neo4j config — plugin skipped");
         return;
       }
+      const pluginConfig = eventCfg as GmConfig;
 
       _cfg = {
         neo4j: pluginConfig.neo4j,
@@ -160,17 +227,16 @@ export default definePluginEntry({
       };
 
       // 1. 连接 Neo4j
-      const driver = await getOrCreateDriver(_cfg);
+      const driver = await getOrCreateDriver(_cfg, logger);
       if (!driver) return;
       _driver = driver;
 
       // 2. 初始化 Schema
       try {
-        // 解析 embedding 维度用于向量索引创建
-      const embedDimension = resolveEmbedDimension(pluginConfig);
-      await ensureSchema(driver, embedDimension);
+        const embedDimension = resolveEmbedDimension(pluginConfig);
+        await ensureSchema(driver, embedDimension);
       } catch (err) {
-        console.warn(`[graph-memory-pro] Schema init: ${err}`);
+        logger?.warn?.(`[graph-memory-pro] Schema init: ${err}`);
       }
 
       // 3. 初始化 LLM / Embedding
@@ -182,19 +248,20 @@ export default definePluginEntry({
       if (_embed) _recaller.setEmbedFn(_embed);
       _extractor = new Extractor(driver);
 
-      // Set timing enabled based on config
       if (_cfg.timing?.enabled) {
         setTimingEnabled(true);
       }
 
-      // 5. 初始化 HTTP 路由
+      // 5. 初始化 HTTP 路由模块状态（P0-4: 路由通过 registerHttpRoute 注册，见下方）
       initRoutes(driver, _cfg, _llm ?? undefined, _embed ?? undefined);
 
-      console.log("[graph-memory-pro] initialized");
+      logger?.info?.("[graph-memory-pro] initialized");
     });
 
     // ── Gateway 停止时清理 ──────────────────────
     api.on("gateway_stop", async () => {
+      if (_extractorTimer) { clearInterval(_extractorTimer); _extractorTimer = null; }
+      if (_maintenanceTimer) { clearInterval(_maintenanceTimer); _maintenanceTimer = null; }
       closeDriver();
       _driver = null;
       _cfg = null;
@@ -204,194 +271,179 @@ export default definePluginEntry({
       _extractor = null;
     });
 
-    // ── Prompt 构建前注入知识图谱上下文 ──────────
-    api.on("before_prompt_build", async (event) => {
-      if (!_driver || !_cfg) return;
+    // ─────────────────────────────────────────────────────────────────
+    // P0-1: 移除 before_prompt_build 钩子
+    //
+    // 上下文注入完全由 contextEngine（lcm-graph-extra）的 assemble() 负责：
+    //   - lcm-graph-extra 通过 Re-exports API 调用 Recaller
+    //   - 返回 systemPromptAddition 注入
+    //
+    // graph-memory-pro 不再主动注入上下文，避免双注入冲突。
+    // ─────────────────────────────────────────────────────────────────
 
-      // event 只有 prompt 和 messages 属性
-      const messages = (event.messages ?? []) as Array<{ role: string; content: unknown }>;
-      const tokenBudget = 32768;
-      const tail = messages.slice(-_cfg.freshTailCount * 2);
-
-      try {
-        // ── 动态选择 LLM 进行三元组提取 ──
-        // 主会话使用 ollama/ollama-256k 时，优先使用当前会话的模型
-        // 否则使用配置的 fallback (qwen3.6:27b)
-        let extractLlm: CompleteFn | null = null;
-
-        // 检查是否使用本地 ollama（通过消息内容推断）
-        extractLlm = _llm;
-
-        // 提取三元组并持久化到 Neo4j
-        if (extractLlm && _extractor) {
-          let extracted = 0;
-          const maxPairs = 3; // 限制每次最多提取 3 对消息，避免延迟过高
-          let pairCount = 0;
-          for (let i = 0; i < tail.length && pairCount < maxPairs; i += 2) {
-            const userMsg = tail[i];
-            const asstMsg = tail[i + 1];
-            if (!userMsg || !asstMsg) continue;
-            if (typeof userMsg.content !== "string" || typeof asstMsg.content !== "string") continue;
-            // 校验消息角色，确保配对正确
-            if (userMsg.role !== "user" || asstMsg.role !== "assistant") continue;
-            pairCount++;
+    // ─────────────────────────────────────────────────────────────────
+    // P0-3: 三元组提取改为后台服务
+    //
+    // 通过 api.registerService 注册，周期性消费待提取消息队列。
+    // 注意：graph-memory-pro 作为无槽位插件，不直接接入 OpenClaw 会话消息流，
+    // 因此这里通过 lcm-graph-extra 的 afterTurn 钩子写入的"待提取队列"
+    // （~/.openclaw/graph-memory-pro/extract-queue.jsonl）来传递消息对。
+    // 如果该队列为空，后台服务空转。
+    // ─────────────────────────────────────────────────────────────────
+    api.registerService({
+      name: "graph-memory-extractor",
+      description: "Background triplet extraction from conversation messages",
+      async start() {
+        const interval = _cfg?.background?.extractorIntervalMs ?? 60_000;
+        _extractorTimer = setInterval(async () => {
+          if (!_driver || !_extractor || !_llm) return;
+          try {
+            // 从队列文件读取待提取消息对（由 lcm-graph-extra 写入）
+            const { readFile } = await import('node:fs/promises');
+            const { join } = await import('node:path');
+            const queuePath = join(
+              process.env.HOME || process.env.USERPROFILE || '.',
+              '.openclaw', 'graph-memory-pro', 'extract-queue.jsonl'
+            );
+            let queueContent = '';
             try {
-              const result = await _extractor.extract(extractLlm, userMsg.content, asstMsg.content);
-              if (result.nodes.length > 0) {
-                extracted++;
-                // 持久化提取的节点和边到 Neo4j
-                const nodeIdMap = new Map<string, string>(); // name -> id 映射，用于边
-                for (const enode of result.nodes) {
-                  try {
-                    const now = Date.now();
-                    const id = `auto-${now}-${Math.random().toString(36).slice(2, 8)}`;
-                    nodeIdMap.set(enode.name, id);
-                    await upsertNode(_driver, {
-                      id,
-                      type: enode.type,
-                      name: enode.name,
-                      description: enode.description,
-                      content: enode.content,
-                      status: "active",
-                      communityId: undefined,
-                      pagerank: 0,
-                      validatedCount: 0,
-                      createdAt: now,
-                      updatedAt: now,
-                    });
-                  } catch (e) {
-                    if (process.env.GM_DEBUG) console.log(`  [graph-memory-pro] upsertNode failed: ${e}`);
-                  }
-                }
-                for (const eedge of result.edges) {
-                  try {
-                    const fromId = nodeIdMap.get(eedge.fromName);
-                    const toId = nodeIdMap.get(eedge.toName);
-                    if (!fromId || !toId) continue; // 跳过找不到节点的边
-                    const now = Date.now();
-                    await upsertEdge(_driver, {
-                      id: `edge-${now}-${Math.random().toString(36).slice(2, 8)}`,
-                      type: eedge.type,
-                      fromId,
-                      toId,
-                      instruction: eedge.instruction,
-                      condition: eedge.condition,
-                      weight: 1,
-                      createdAt: now,
-                      updatedAt: now,
-                    });
-                  } catch (e) {
-                    if (process.env.GM_DEBUG) console.log(`  [graph-memory-pro] upsertEdge failed: ${e}`);
-                  }
-                }
-              }
-            } catch {}
-          }
-          if (process.env.GM_DEBUG && extracted > 0) {
-            console.log(`  [graph-memory-pro] extracted ${extracted} turns`);
-          }
-        }
+              queueContent = await readFile(queuePath, 'utf-8');
+            } catch {
+              // 队列文件不存在时静默返回
+              return;
+            }
+            if (!queueContent.trim()) return;
 
-        // 召回知识图谱
-        if (_recaller) {
-          // 使用最近消息作为查询
-          const lastUserMsg = [...tail].reverse().find(m => m.role === "user" && typeof m.content === "string");
-          const query = lastUserMsg ? (lastUserMsg.content as string).slice(0, 500) : "";
-
-          if (query) {
-            const recallResult = await _recaller.recall(query);
-
-            // 在插入完节点之后同步 embedding
-            for (const node of recallResult.nodes) {
-              if (_embed) await _recaller.syncEmbed(node).catch(() => {});
+            const lines = queueContent.split('\n').filter(Boolean);
+            const pairs: Array<{ user: string; assistant: string }> = [];
+            for (const line of lines) {
+              try {
+                const item = JSON.parse(line);
+                if (item.user && item.assistant) pairs.push(item);
+              } catch { /* 跳过损坏行 */ }
             }
 
-            // 组装上下文
-            const context = await assembleContext(_driver, {
-              tokenBudget,
-              activeNodes: recallResult.nodes.filter(n => n.status === "active"),
-              activeEdges: recallResult.edges,
-              recalledNodes: [],
-              recalledEdges: [],
-            });
+            if (pairs.length === 0) return;
+            await extractInBackground(_extractor, _driver, _llm, logger, pairs);
 
-            if (context.xml) {
-              // prependSystemContext 必须是 string 类型
-              return {
-                prependSystemContext: context.systemPrompt + "\n\n" + context.xml,
-              };
-            }
+            // 清空队列文件（保留空文件）
+            const { writeFile, mkdir } = await import('node:fs/promises');
+            const { dirname } = await import('node:path');
+            await mkdir(dirname(queuePath), { recursive: true }).catch(() => {});
+            await writeFile(queuePath, '').catch(() => {});
+          } catch (err) {
+            logger?.warn?.(`[graph-memory-pro] extractor tick failed: ${err}`);
           }
-        }
-      } catch (err) {
-        if (process.env.GM_DEBUG) {
-          console.log(`  [graph-memory-pro] prompt hook error: ${err}`);
-        }
-      }
+        }, interval);
+      },
+      async stop() {
+        if (_extractorTimer) { clearInterval(_extractorTimer); _extractorTimer = null; }
+      },
     });
 
-    // ── Session 结束时维护 ────────────────────────
-    api.on("session_end", async () => {
-      if (!_driver || !_cfg) return;
-      try {
-        await runMaintenance(_driver, _cfg, _llm ?? undefined, _embed ?? undefined);
-      } catch (err) {
-        if (process.env.GM_DEBUG) {
-          console.log(`  [graph-memory-pro] maintenance error: ${err}`);
-        }
-      }
+    // ─────────────────────────────────────────────────────────────────
+    // P0-4 / P1-2: 图谱维护改为后台周期服务
+    //
+    // 不再使用 session_end 钩子（会阻塞会话结束），改为周期性运行。
+    // ─────────────────────────────────────────────────────────────────
+    api.registerService({
+      name: "graph-memory-maintenance",
+      description: "Background graph maintenance (dedup + PageRank + community)",
+      async start() {
+        const interval = _cfg?.background?.maintenanceIntervalMs ?? 6 * 3600_000;
+        // 启动后延迟 5 分钟执行第一次，避免与初始化竞争
+        const initialDelay = 5 * 60_000;
+        const runOnce = async () => {
+          if (!_driver || !_cfg) return;
+          try {
+            logger?.info?.("[graph-memory-pro] background maintenance start");
+            const result = await runMaintenance(_driver, _cfg, _llm ?? undefined, _embed ?? undefined);
+            logger?.info?.(`[graph-memory-pro] maintenance done: ${result.dedup.merged} merged, ${result.community.count} communities`);
+          } catch (err) {
+            logger?.warn?.(`[graph-memory-pro] maintenance error: ${err}`);
+          }
+        };
+        setTimeout(runOnce, initialDelay);
+        _maintenanceTimer = setInterval(runOnce, interval);
+      },
+      async stop() {
+        if (_maintenanceTimer) { clearInterval(_maintenanceTimer); _maintenanceTimer = null; }
+      },
     });
 
-    // ── 注册 Agent 工具 ───────────────────────────
-    // gm_search: 搜索知识图谱
-    api.registerTool({
-      name: "gm_search",
-      label: "Graph Memory Search",
-      description: "在 Graph Memory Pro 中搜索知识节点。支持按关键词搜索知识图谱中的技能(SKILL)、任务(TASK)、事件(EVENT)节点",
-      parameters: Type.Object({
-        query: Type.String({ description: "搜索关键词" }),
-        limit: Type.Optional(Type.Number({ default: 10, description: "返回结果数量上限" })),
-      }),
-      async execute(_callId, params) {
-        if (!_driver) {
-          return { content: [{ type: "text", text: "Graph Memory Pro 未连接" }], details: {} };
-        }
+    // ─────────────────────────────────────────────────────────────────
+    // P0-4: HTTP 路由通过 api.registerHttpRoute 注册
+    //
+    // 之前 initRoutes() 只初始化模块状态，路由从未注册到 Gateway。
+    // ─────────────────────────────────────────────────────────────────
+    const routes = getRoutes();
+    for (const route of routes) {
+      api.registerHttpRoute({
+        method: route.method,
+        path: route.path,
+        handler: async (req: any) => {
+          const result = await route.handler(req?.params ?? req?.query ?? {});
+          return { status: result.status, body: result.body };
+        },
+      });
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // P1-1: 注册为 memory-core 的语料补充
+    //
+    // 让 memory_search 工具能搜索到 Neo4j 图谱节点，无需另建 gm_search。
+    // ─────────────────────────────────────────────────────────────────
+    api.registerMemoryCorpusSupplement({
+      async search(query: string, opts?: { limit?: number }) {
+        if (!_driver) return [];
         try {
-          const p = params as { query: string; limit?: number };
-          const q = p.query;
-          const limit = Math.min(p.limit || 10, 50);
-          const nodes = await searchNodes(_driver, q, limit);
-          const ids = nodes.map(n => n.id);
-          const edges = await getEdgesForNodes(_driver, ids);
-          const text = [
-            `找到 ${nodes.length} 个节点，${edges.length} 条关系`,
-            ...nodes.map(n => `- [${n.type}] ${n.name}: ${n.description} (得分: ${n.pagerank.toFixed(3)})`),
-          ].join("\n");
-          return { content: [{ type: "text", text }], details: { nodeCount: nodes.length, edgeCount: edges.length } };
-        } catch (err: any) {
-          return { content: [{ type: "text", text: `搜索失败: ${err.message}` }], details: {} };
+          const limit = Math.min(opts?.limit ?? 5, 20);
+          const nodes = await searchNodes(_driver, query, limit);
+          return nodes.map(n => ({
+            id: n.id,
+            content: `[${n.type}] ${n.name}: ${n.description}\n${n.content ?? ''}`,
+            metadata: {
+              source: "graph-memory-pro",
+              type: n.type,
+              pagerank: n.pagerank,
+              validatedCount: n.validatedCount,
+            },
+          }));
+        } catch {
+          return [];
+        }
+      },
+      async read(id: string) {
+        if (!_driver) return null;
+        try {
+          return await findById(_driver, id);
+        } catch {
+          return null;
         }
       },
     });
 
-    // gm_record: 手动记录知识
+    // ── 注册 Agent 工具 ───────────────────────────
+    // P1-4: 移除 gm_search（已通过 registerMemoryCorpusSupplement 由 memory_search 覆盖）
+    //       移除 gm_stats（合并到 gm_maintain 输出）
+
+    // gm_record: 手动记录知识到图谱
     api.registerTool({
       name: "gm_record",
       label: "Graph Memory Record",
-      description: "手动记录一条知识到 Graph Memory Pro 图谱中。当你发现重要的技能、经验或事件时使用",
+      description: "手动记录一条知识到 Graph Memory Pro 图谱中。当你发现重要的技能、经验或事件时使用。节点类型: SKILL(技能/方案) / TASK(任务/需求) / EVENT(事件/错误)",
       parameters: Type.Object({
-        type: Type.String({ description: "节点类型: SKILL(技能/方案) / TASK(任务/需求) / EVENT(事件/错误)" }),
+        type: Type.String({ description: "节点类型: SKILL / TASK / EVENT" }),
         name: Type.String({ description: "节点英文名" }),
         description: Type.String({ description: "描述" }),
         content: Type.String({ description: "详细内容" }),
       }),
-      async execute(_callId, params) {
+      async execute(_callId: string, params: { type: string; name: string; description: string; content: string }) {
         if (!_driver) {
           return { content: [{ type: "text", text: "Graph Memory Pro 未连接" }], details: {} };
         }
         try {
-          const p = params as { type: string; name: string; description: string; content: string };
-          const { upsertNode } = await import("./src/store/store.ts");
+          const p = params;
           const now = Date.now();
           const id = `manual-${now}-${Math.random().toString(36).slice(2, 8)}`;
           const nodeType = p.type.toUpperCase();
@@ -418,14 +470,14 @@ export default definePluginEntry({
       },
     });
 
-    // gm_stats: 查看图谱统计
+    // gm_maintain: 手动触发维护（含统计输出）
     api.registerTool({
-      name: "gm_stats",
-      label: "Graph Memory Stats",
-      description: "查看 Graph Memory Pro 知识图谱的统计信息，包括节点数、关系数等",
+      name: "gm_maintain",
+      label: "Graph Memory Maintain",
+      description: "手动触发 Graph Memory Pro 图谱维护（去重 + PageRank + 社区检测）并返回统计信息",
       parameters: Type.Object({}),
       async execute() {
-        if (!_driver) {
+        if (!_driver || !_cfg) {
           return { content: [{ type: "text", text: "Graph Memory Pro 未连接" }], details: {} };
         }
         try {
@@ -433,31 +485,12 @@ export default definePluginEntry({
             getNodeCount(_driver),
             getEdgeCount(_driver),
           ]);
+          const result = await runMaintenance(_driver, _cfg, _llm ?? undefined, _embed ?? undefined);
           const text = [
             "📊 Graph Memory Pro 统计",
             `节点总数: ${nodeCount}`,
             `关系总数: ${edgeCount}`,
-          ].join("\n");
-          return { content: [{ type: "text", text }], details: { nodeCount, edgeCount } };
-        } catch (err: any) {
-          return { content: [{ type: "text", text: `获取统计失败: ${err.message}` }], details: {} };
-        }
-      },
-    });
-
-    // gm_maintain: 手动触发维护
-    api.registerTool({
-      name: "gm_maintain",
-      label: "Graph Memory Maintain",
-      description: "手动触发 Graph Memory Pro 图谱维护（去重 + PageRank + 社区检测）",
-      parameters: Type.Object({}),
-      async execute() {
-        if (!_driver || !_cfg) {
-          return { content: [{ type: "text", text: "Graph Memory Pro 未连接" }], details: {} };
-        }
-        try {
-          const result = await runMaintenance(_driver, _cfg, _llm ?? undefined, _embed ?? undefined);
-          const text = [
+            "",
             "✅ 维护完成",
             `去重合并: ${result.dedup.merged} 个`,
             `PageRank: ${result.pagerank.topK.length} 个节点已排序`,
@@ -465,14 +498,14 @@ export default definePluginEntry({
             `社区摘要: ${result.communitySummaries} 个`,
             `耗时: ${result.durationMs}ms`,
           ].join("\n");
-          return { content: [{ type: "text", text }], details: result };
+          return { content: [{ type: "text", text }], details: { nodeCount, edgeCount, ...result } };
         } catch (err: any) {
           return { content: [{ type: "text", text: `维护失败: ${err.message}` }], details: {} };
         }
       },
     });
 
-    // gm_reembed: batch re-embed nodes missing embedding vectors
+    // gm_reembed: 批量重新向量化
     api.registerTool({
       name: "gm_reembed",
       label: "Graph Memory Re-Embed",

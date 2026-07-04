@@ -46,6 +46,11 @@ export interface GmConfig {
   embedding?: EmbeddingConfig;
   /** Latency distribution tracking (optional) */
   timing?: GmTimingOptions;
+  /** 后台服务间隔配置（A 方案：三元组提取 + 图谱维护） */
+  background?: {
+    extractorIntervalMs?: number;
+    maintenanceIntervalMs?: number;
+  };
 }
 
 export type NodeType = "TASK" | "SKILL" | "EVENT";
