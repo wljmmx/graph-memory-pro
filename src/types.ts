@@ -174,6 +174,50 @@ export interface GmConfig {
     /** frequency 饱和阈值（默认 10 次） */
     frequencySaturation?: number;
   };
+
+  // ── v2.1.2 第四批 结构升级 + 冲突消解 + 嵌入版本 ────────────
+
+  /** S-4 层次化社区（默认开启，depth=3） */
+  hierarchicalCommunity?: {
+    enabled?: boolean;
+    /** 层次深度（1=单层, 2=社区+主题, 3=社区+主题+领域） */
+    depth?: 1 | 2 | 3;
+  };
+
+  /** G-2 冲突消解（默认开启） */
+  conflictResolution?: {
+    enabled?: boolean;
+    /** 时态优先（validFrom 更新者胜出） */
+    temporalPriority?: boolean;
+    /** 来源优先（knowledge > experience > imported） */
+    sourcePriority?: boolean;
+    /** 置信度优先（validatedCount 高者胜出） */
+    confidencePriority?: boolean;
+  };
+
+  /** L-3 边权重调整（默认开启，需 I-2 反馈数据） */
+  edgeWeights?: {
+    enabled?: boolean;
+    /** 强化系数（默认 1.1） */
+    strengthenFactor?: number;
+    /** 衰减系数（默认 0.95） */
+    decayFactor?: number;
+    /** weight 最小值（默认 0.1） */
+    minWeight?: number;
+    /** weight 最大值（默认 5.0） */
+    maxWeight?: number;
+  };
+
+  /** L-4 反向记忆项（默认开启，需 I-2 反馈数据） */
+  reverseMemory?: {
+    enabled?: boolean;
+    /** 召回频次阈值（默认 10 次） */
+    recallThreshold?: number;
+    /** stalenessScore 增量（默认 0.1） */
+    stalenessPenalty?: number;
+    /** importanceScore 下限（默认 0.2） */
+    importanceFloor?: number;
+  };
 }
 
 export type NodeType = "TASK" | "SKILL" | "EVENT";
@@ -261,6 +305,12 @@ export interface GmNode {
     embeddingHash?: string;
     archivedAt: number;
   }>;
+
+  // ── S-4 层次化社区（v2.1.2 第四批新增）─────────
+  /** Level 2 主题 id（社区→主题） */
+  topicId?: string;
+  /** Level 3 领域 id（主题→领域） */
+  domainId?: string;
 }
 
 export interface GmEdge {

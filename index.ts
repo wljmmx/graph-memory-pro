@@ -282,6 +282,34 @@ export default definePluginEntry({
       recencyDecayDays: Type.Optional(Type.Number({ default: 30 })),
       frequencySaturation: Type.Optional(Type.Number({ default: 10 })),
     })),
+    // ── v2.1.2 第四批 结构升级 + 冲突消解 + 嵌入版本 ────────────
+    hierarchicalCommunity: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      depth: Type.Optional(Type.Union([
+        Type.Literal(1),
+        Type.Literal(2),
+        Type.Literal(3),
+      ])),
+    })),
+    conflictResolution: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      temporalPriority: Type.Optional(Type.Boolean({ default: true })),
+      sourcePriority: Type.Optional(Type.Boolean({ default: true })),
+      confidencePriority: Type.Optional(Type.Boolean({ default: true })),
+    })),
+    edgeWeights: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      strengthenFactor: Type.Optional(Type.Number({ default: 1.1 })),
+      decayFactor: Type.Optional(Type.Number({ default: 0.95 })),
+      minWeight: Type.Optional(Type.Number({ default: 0.1 })),
+      maxWeight: Type.Optional(Type.Number({ default: 5.0 })),
+    })),
+    reverseMemory: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      recallThreshold: Type.Optional(Type.Number({ default: 10 })),
+      stalenessPenalty: Type.Optional(Type.Number({ default: 0.1 })),
+      importanceFloor: Type.Optional(Type.Number({ default: 0.2 })),
+    })),
   }) as any),
   register(api: any) {
     const logger = api.logger ?? console;
@@ -621,6 +649,9 @@ export default definePluginEntry({
             `社区: ${result.community.count} 个社区`,
             `社区摘要: ${result.communitySummaries} 个`,
             result.importance ? `重要性评分: scanned=${result.importance.scanned}, avg=${result.importance.avgScore.toFixed(3)}` : "",
+            result.conflictResolution ? `冲突消解: scanned=${result.conflictResolution.scanned}, resolved=${result.conflictResolution.resolved} (合并=${result.conflictResolution.merged})` : "",
+            result.edgeWeights && result.edgeWeights.scanned > 0 ? `边权重: 强化=${result.edgeWeights.strengthened}, 衰减=${result.edgeWeights.decayed}` : "",
+            result.reverseMemory && (result.reverseMemory.watchlistAdded > 0 || result.reverseMemory.decayed > 0) ? `反向记忆: 衰减=${result.reverseMemory.decayed}, 恢复=${result.reverseMemory.watchlistRemoved}` : "",
             `耗时: ${result.durationMs}ms`,
             "",
             healthReport ? "🏥 图谱健康" : "",
@@ -765,3 +796,11 @@ export { AssociationMatrix, createAssociationMatrix } from "./src/recaller/assoc
 export type { AssociationMatrixConfig, MarginalUtilityConfig } from "./src/recaller/association-matrix.js";
 export { computeImportanceScores } from "./src/graph/maintenance.js";
 export type { ImportanceConfig } from "./src/graph/maintenance.js";
+
+// ─── v2.1.2 第四批 结构升级 + 冲突消解 + 嵌入版本 Re-exports ─────────
+export { detectHierarchicalCommunities, drillDownCommunity } from "./src/graph/community.js";
+export type { HierarchicalCommunityResult } from "./src/graph/community.js";
+export { resolveConflicts, adjustEdgeWeights, applyReverseMemory } from "./src/graph/maintenance.js";
+export type { ConflictResolutionConfig, EdgeWeightsConfig, ReverseMemoryConfig } from "./src/graph/maintenance.js";
+export { detectAndMigrateEmbeddings } from "./src/graph/reembed.js";
+export type { MigrationResult } from "./src/graph/reembed.js";
