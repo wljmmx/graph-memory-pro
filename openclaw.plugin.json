@@ -430,6 +430,168 @@
             "minimum": 1
           }
         }
+      },
+      "hierarchicalCommunity": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "depth": {
+            "type": "integer",
+            "enum": [1, 2, 3],
+            "default": 3
+          }
+        }
+      },
+      "conflictResolution": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "temporalPriority": {
+            "type": "boolean",
+            "default": true
+          },
+          "sourcePriority": {
+            "type": "boolean",
+            "default": true
+          },
+          "confidencePriority": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "edgeWeights": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "strengthenFactor": {
+            "type": "number",
+            "default": 1.1,
+            "minimum": 1
+          },
+          "decayFactor": {
+            "type": "number",
+            "default": 0.95,
+            "exclusiveMinimum": 0,
+            "maximum": 1
+          },
+          "minWeight": {
+            "type": "number",
+            "default": 0.1,
+            "minimum": 0
+          },
+          "maxWeight": {
+            "type": "number",
+            "default": 5.0,
+            "minimum": 1
+          }
+        }
+      },
+      "reverseMemory": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "recallThreshold": {
+            "type": "integer",
+            "default": 10,
+            "minimum": 1
+          },
+          "stalenessPenalty": {
+            "type": "number",
+            "default": 0.1,
+            "minimum": 0,
+            "maximum": 1
+          },
+          "importanceFloor": {
+            "type": "number",
+            "default": 0.2,
+            "minimum": 0,
+            "maximum": 1
+          }
+        }
+      },
+      "benchmark": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "dataDir": {
+            "type": "string"
+          },
+          "maxCases": {
+            "type": "integer",
+            "default": 0,
+            "minimum": 0
+          },
+          "buildGraph": {
+            "type": "boolean",
+            "default": true
+          },
+          "caseTimeoutMs": {
+            "type": "integer",
+            "default": 30000,
+            "minimum": 1000
+          }
+        }
+      },
+      "autoTuner": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "regressionThreshold": {
+            "type": "number",
+            "default": 0.02,
+            "minimum": 0,
+            "maximum": 1
+          },
+          "stagnationThreshold": {
+            "type": "integer",
+            "default": 5,
+            "minimum": 1
+          },
+          "maxRounds": {
+            "type": "integer",
+            "default": 10,
+            "minimum": 1
+          },
+          "benchmarkMaxCases": {
+            "type": "integer",
+            "default": 50,
+            "minimum": 0
+          },
+          "llmDiagnosis": {
+            "type": "boolean",
+            "default": true
+          },
+          "warmupFeedbacks": {
+            "type": "integer",
+            "default": 100,
+            "minimum": 1
+          }
+        }
       }
     }
   }
