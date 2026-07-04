@@ -1,13 +1,13 @@
 # Graph Memory Pro 演进路线图
 
 > 版本：2.1.10
-> 基于 Graph-based Agent Memory 论文（arxiv 2602.05665）与自进化记忆系统实践文章的综合规划
+> 基于 Graph-based Agent Memory 论文（arxiv 2602.05665）、自进化记忆系统实践文章、TencentDB Agent Memory 开源项目三方资料的综合规划
 
 ---
 
 ## 一、背景与思路来源
 
-本规划融合两份参考资料的设计思路：
+本规划融合三份参考资料的设计思路：
 
 ### 1. Graph-based Agent Memory 论文（结构维度）
 
@@ -35,41 +35,78 @@
 | 反向记忆项 | 主动弱化过度强化的关联 | validatedCount 只增不减 |
 | 自适应学习率 + 衰减 | 长期运行不膨胀 | 无衰减 |
 
-### 3. 两者融合点
+### 3. TencentDB Agent Memory 开源项目（压缩与层次维度）
+
+**核心贡献**：提供"短期记忆压缩"与"端到端层次沉淀"的工程范式。
+
+**两大支柱**：
+
+**支柱一：短期记忆压缩 = 上下文卸载 + Mermaid 任务画布**
+
+实测节省 61% Token，任务成功率提升 52%。核心是"完整信息卸载到外部，关键状态以高密度形式留存于上下文"。
+
+| 层级 | 内容 | 位置 |
+|---|---|---|
+| Level 0 | 完整工具返回原文 | refs/*.md |
+| Level 1 | 工具调用级摘要 | offload.jsonl |
+| Level 2 | 任务画布节点 | *.mmd |
+| Level 3 | 任务级索引（目标+状态） | 上下文 |
+
+底层保留证据，高层保留结构。任何一层压缩都可沿索引链路 100% 找回。
+
+**支柱二：长期记忆 L0-L3 四层语义金字塔**
+
+| 层级 | 内容 | 价值 |
+|---|---|---|
+| L0 | 原始对话全量保存 | 信息不丢失 |
+| L1 | 原子事实自动提取 | 非结构化→结构化 |
+| L2 | 场景分块聚类 | 场景隔离，防串场 |
+| L3 | 用户画像融合 | 稳定偏好，个性化 |
+
+设计哲学："上层提供方向，下层保留证据"。
+
+### 4. 三方融合点
 
 ```
 论文提供"骨架"（图结构如何组织）
 文章提供"神经"（图如何自我优化）
+TencentDB 提供"压缩"（记忆如何低耗呈现）+ 端到端层次沉淀
 
-graph-memory-pro = 骨架已备 + 神经缺失
+graph-memory-pro = 骨架已备 + 神经缺失 + 压缩缺失
 ```
 
 关键融合洞察：
 
 1. **裁判反馈信号**不仅可驱动 M 矩阵学习，还可驱动**节点衰减**和**边权重调整**——一个反馈源，三个受益点
-2. **Bi-Temporal** 让"反向记忆项"成为可能——不是删除，而是 `validTo = now` 标记失效
-3. **层次化社区** + **历史相似度加权**结合，可实现"从社区代表向下钻取到具体节点"的层次化召回
-4. **来源区分**让衰减策略可差异化——知识记忆衰减慢，经验记忆衰减快
+2. **Bi-Temporal** 让"反向记忆项"成为可能——不是删除，而是 `validTo = now` 标记失效（与 TencentDB 的"可追溯"理念一致）
+3. **TencentDB 的 L0-L3 端到端层次**与论文的层次化社区互补：前者是原始数据→画像的纵向沉淀，后者是社区→主题→领域的横向抽象，两者可叠加
+4. **上下文卸载 + Mermaid 画布**是项目完全缺失的维度——召回结果直接进 prompt，无 Token 优化意识，长期对话会爆窗口
+5. **场景隔离（L2）**解决项目所有节点混在一个图谱、不同项目记忆互相干扰的问题
+6. **用户画像（L3）**是项目完全缺失的节点类型——只有 TASK/SKILL/EVENT，没有用户偏好的沉淀
+7. **来源区分**让衰减策略可差异化——知识记忆衰减慢，经验记忆衰减快（论文），与 TencentDB 的 L1 原子事实来源标记呼应
 
 ---
 
 ## 二、v2.1.10 总体目标
 
-将以下四大方向**统一在 v2.1.10 版本内**完成：
+将以下五大方向**统一在 v2.1.10 版本内**完成：
 
 | 方向 | 核心能力 | 来源 |
 |---|---|---|
 | 基础设施 | 反馈闭环与缓存层 | 文章 P0 |
 | 学习能力 | 在线学习与衰减机制 | 文章 + 论文融合 |
 | 结构升级 | 时态建模与层次化 | 论文 |
+| **短期压缩** | **上下文卸载 + Mermaid 画布** | **TencentDB** |
+| **端到端层次** | **L0-L3 渐进式沉淀 + 用户画像** | **TencentDB + 论文** |
 | 智能进化（评估） | 评测集与防过拟合 | 文章教训 |
 
 **设计原则**：
 
 - **向后兼容**：所有 schema 演进通过可选字段实现，旧数据自动兼容
 - **渐进启用**：新能力默认关闭，通过配置开启
-- **降级安全**：反馈缺失时 M 不更新，裁判不可用时不阻塞召回
+- **降级安全**：反馈缺失时 M 不更新，裁判不可用时不阻塞召回，卸载文件丢失时回退到全量召回
 - **可观测**：所有学习行为有日志与指标
+- **可追溯**：任何一层压缩都可沿索引链路 100% 找回（TencentDB 理念）
 
 ---
 
@@ -478,6 +515,215 @@ type EdgeType =
 
 ---
 
+#### S-6 场景隔离（L2 场景分块）
+
+**目标**：解决不同项目/会话的记忆互相干扰问题（TencentDB L2 痛点）。
+
+**问题背景**：项目当前所有节点混在一个图谱里，不同项目的 TASK/SKILL/EVENT 可能因 RELATES_TO 误连，召回时出现串场。
+
+**实现要点**：
+
+- 节点添加 `sceneId: string` 字段（对应 sessionKey 或项目维度）
+- 召回时支持场景过滤：`WHERE n.sceneId = $sceneId OR n.sceneId IS NULL`（全局记忆+本场景记忆）
+- L2 场景分块：按 sceneId 聚类，形成场景级摘要
+- 跨场景关联显式标记（避免误连）
+
+**Schema 演进**：
+
+```typescript
+interface GmNode {
+  // 现有字段...
+  sceneId?: string;  // 场景/项目标识，null = 全局记忆
+}
+```
+
+**接入点**：
+
+- `src/types.ts` 扩展
+- `src/store/store.ts` upsertNode 持久化 sceneId
+- `src/recaller/recall.ts` 召回时按 sceneId 过滤
+- `src/extractor/extract.ts` 提取时从 sessionKey 推导 sceneId
+
+**配置项**：
+
+```json
+{
+  "scene": {
+    "enabled": false,
+    "isolation": "soft"  // "soft"（全局+本场景） | "strict"（仅本场景）
+  }
+}
+```
+
+**预计成本**：2-3 天
+
+---
+
+#### S-7 用户画像（L3 画像融合）
+
+**目标**：从历史对话中蒸馏用户偏好与工作风格，提供个性化召回方向（TencentDB L3）。
+
+**问题背景**：项目只有 TASK/SKILL/EVENT 三类领域节点，完全没有用户偏好的沉淀。每次对话都像重新开始，无法形成个性化服务。
+
+**实现要点**：
+
+- 新增节点类型 `PROFILE`（或独立标签 `GmProfile`）
+- Schema：
+  ```
+  (GmProfile {
+    id: string,
+    userId: string,
+    preferences: { techStack, codeStyle, workStyle, ... },
+    summary: string,           // 自然语言画像
+    embedding?: number[],
+    updatedAt: number
+  })
+  ```
+- 蒸馏流程：
+  1. 定期扫描历史对话（ConversationMessage）
+  2. LLM 提取用户偏好（技术栈、代码风格、工作习惯）
+  3. 合并到现有 GmProfile（避免冲突，取最新）
+- 召回时优先匹配画像相关节点
+
+**接入点**：
+
+- `src/types.ts` 新增 GmProfile 类型
+- `src/store/store.ts` 新增 upsertProfile / getProfile
+- `src/graph/maintenance.ts` 新增画像蒸馏阶段
+- `src/recaller/recall.ts` 召回时参考画像
+
+**配置项**：
+
+```json
+{
+  "profile": {
+    "enabled": false,
+    "distillInterval": 100,  // 每 N 次维护蒸馏一次
+    "maxPreferences": 20
+  }
+}
+```
+
+**预计成本**：3-5 天
+
+---
+
+### 模块 O：短期压缩（上下文卸载 + Mermaid 画布）
+
+> 来源：TencentDB Agent Memory
+> 价值：实测节省 61% Token，任务成功率提升 52%
+> 定位：项目完全缺失的维度——召回结果直接进 prompt，无 Token 优化意识
+
+#### O-1 上下文卸载
+
+**目标**：召回的原始节点内容卸载到外部文件，上下文只保留摘要+索引。
+
+**问题背景**：当前 [assemble.ts](file:///workspace/src/format/assemble.ts) 把召回节点的完整 content 直接拼进 system prompt，节点多时 token 消耗大，长期对话会爆窗口。
+
+**四层递进存储**（参考 TencentDB）：
+
+| 层级 | 内容 | 位置 |
+|---|---|---|
+| Level 0 | 完整节点 content | refs/{nodeId}.md |
+| Level 1 | 节点级摘要（name+description） | offload.jsonl |
+| Level 2 | 图结构节点（Mermaid 节点） | canvas.mmd |
+| Level 3 | 任务级索引（query+召回节点ID列表） | 上下文 |
+
+**实现要点**：
+
+- 新增 `src/format/offload.ts`
+- 召回后：完整 content 写 `refs/{nodeId}.md`
+- 上下文中只保留：节点 ID + name + 一句话 description + refs 路径
+- Agent 需要细节时通过 `gm_load_ref` 工具按 nodeId 加载
+- 卸载文件丢失时回退到全量召回（降级安全）
+
+**新增工具**：
+
+```typescript
+// gm_load_ref: 按需加载卸载的原始内容
+registerTool("gm_load_ref", {
+  description: "加载已卸载的节点完整内容",
+  params: { nodeId: "string" },
+  handler: async (params) => loadOffloadedRef(params.nodeId)
+});
+```
+
+**接入点**：`src/format/assemble.ts` 改造为支持"摘要模式"
+
+**配置项**：
+
+```json
+{
+  "offload": {
+    "enabled": false,
+    "dir": ".graph-memory/refs",
+    "summaryMode": "description"  // "name" | "description" | "off"
+  }
+}
+```
+
+**预计成本**：2-3 天
+
+---
+
+#### O-2 Mermaid 任务画布
+
+**目标**：把召回的图结构用 Mermaid Flowchart 表示，提供可导航的任务地图。
+
+**问题背景**：当前召回结果以 XML 列表形式进 prompt（[assemble.ts](file:///workspace/src/format/assemble.ts)），Agent 能看到"有什么节点"但看不到"节点间关系如何"，需要读 content 才能推断关系。
+
+**实现要点**：
+
+- 召回后生成 Mermaid Flowchart：
+  ```mermaid
+  flowchart TD
+    T1[Task: 用户认证]
+    S1[Skill: JWT]
+    E1[Event: 登录失败]
+    T1 -->|USED_SKILL| S1
+    E1 -->|SOLVED_BY| S1
+  ```
+- 上下文中用 Mermaid 替代 XML 关系列表
+- 节点详情仍走 O-1 卸载机制
+- 每个节点带 nodeId，可点击加载详情
+
+**接入点**：`src/format/assemble.ts` 新增 Mermaid 输出模式
+
+**配置项**：
+
+```json
+{
+  "canvas": {
+    "enabled": false,
+    "format": "mermaid",  // "mermaid" | "xml" | "both"
+    "maxNodes": 20
+  }
+}
+```
+
+**预计成本**：2-3 天
+
+---
+
+#### O-3 压缩效果度量
+
+**目标**：度量 Token 节省比例，验证压缩效果（参考 TencentDB 的 61% 数据）。
+
+**实现要点**：
+
+- 记录每次召回的：
+  - 原始 token 数（全量 content）
+  - 压缩后 token 数（摘要 + Mermaid）
+  - 节省比例
+- 累计统计：P50/P99 节省比例
+- 验证：压缩后任务成功率不降
+
+**接入点**：`src/timing.ts` 新增 token 节省统计
+
+**预计成本**：1 天
+
+---
+
 ### 模块 E：智能进化（评估与防过拟合）
 
 #### E-1 标准评测集构建
@@ -593,6 +839,29 @@ v2.1.10 新增配置项（全部默认关闭，渐进启用）：
           "temporal": {
             "enabled": false,
             "softDelete": true
+          },
+
+          "scene": {
+            "enabled": false,
+            "isolation": "soft"
+          },
+
+          "profile": {
+            "enabled": false,
+            "distillInterval": 100,
+            "maxPreferences": 20
+          },
+
+          "offload": {
+            "enabled": false,
+            "dir": ".graph-memory/refs",
+            "summaryMode": "description"
+          },
+
+          "canvas": {
+            "enabled": false,
+            "format": "mermaid",
+            "maxNodes": 20
           }
         }
       }
@@ -607,35 +876,45 @@ v2.1.10 新增配置项（全部默认关闭，渐进启用）：
 
 v2.1.10 内部按依赖关系分批实施：
 
-### 第一批：基础设施（无依赖）
+### 第一批：基础设施与 schema 扩展（无依赖）
 
 1. **S-3 来源标记** → schema 扩展，最简单
-2. **I-1 历史查询缓存** → 立即缓解超时
-3. **I-3 反馈持久化** → schema 准备
+2. **S-6 场景隔离字段** → schema 扩展（sceneId）
+3. **I-1 历史查询缓存** → 立即缓解超时
+4. **I-3 反馈持久化** → schema 准备
+5. **S-7 用户画像 schema** → 新增 GmProfile 类型
 
-### 第二批：反馈闭环（依赖第一批）
+### 第二批：反馈闭环与时态（依赖第一批）
 
-4. **I-2 LLM 裁判反馈** → 依赖 I-3 持久化
-5. **S-1 Bi-Temporal 字段** → schema 扩展
-6. **S-5 因果关系扩展** → schema 扩展
+6. **I-2 LLM 裁判反馈** → 依赖 I-3 持久化
+7. **S-1 Bi-Temporal 字段** → schema 扩展
+8. **S-5 因果关系扩展** → schema 扩展
+9. **S-7 用户画像蒸馏** → 依赖 S-7 schema
 
 ### 第三批：学习能力（依赖第二批）
 
-7. **L-1 关联记忆矩阵 M** → 依赖 I-2 反馈
-8. **L-2 节点衰减** → 依赖 I-2 反馈 + S-3 来源
-9. **S-2 软替换** → 依赖 S-1
+10. **L-1 关联记忆矩阵 M** → 依赖 I-2 反馈
+11. **L-2 节点衰减** → 依赖 I-2 反馈 + S-3 来源
+12. **S-2 软替换** → 依赖 S-1
 
 ### 第四批：结构升级（依赖第三批）
 
-10. **L-3 边权重调整** → 依赖 L-2
-11. **L-4 反向记忆项** → 依赖 L-2
-12. **S-4 层次化社区** → 独立
+13. **L-3 边权重调整** → 依赖 L-2
+14. **L-4 反向记忆项** → 依赖 L-2
+15. **S-4 层次化社区** → 独立
+16. **S-6 场景隔离召回过滤** → 依赖 S-6 schema
 
-### 第五批：评估体系（依赖前面所有）
+### 第五批：短期压缩（依赖前面所有）
 
-13. **E-1 评测集构建** → 依赖 I-3 反馈数据
-14. **E-2 随机抽样评测** → 依赖 E-1
-15. **E-3 评测指标扩展** → 依赖 E-1
+17. **O-1 上下文卸载** → 依赖召回稳定
+18. **O-2 Mermaid 任务画布** → 依赖 O-1
+19. **O-3 压缩效果度量** → 依赖 O-1/O-2
+
+### 第六批：评估体系（依赖前面所有）
+
+20. **E-1 评测集构建** → 依赖 I-3 反馈数据
+21. **E-2 随机抽样评测** → 依赖 E-1
+22. **E-3 评测指标扩展** → 依赖 E-1
 
 ---
 
@@ -651,6 +930,11 @@ v2.1.10 内部按依赖关系分批实施：
 | 衰减误删活跃节点 | 原创 | archived 而非删除，可恢复 |
 | 层次化社区计算成本高 | 原创 | 限制 hierarchyDepth ≤ 3，缓存中间结果 |
 | 反馈数据积累慢 | 原创 | 冷启动期用 BM25 + 向量搜索兜底 |
+| **卸载文件丢失** | TencentDB | O-1 回退到全量召回（降级安全） |
+| **Mermaid 画布节点过多** | TencentDB | O-2 限制 maxNodes，超出走 PPR 截断 |
+| **场景隔离误判全局记忆** | TencentDB L2 | S-6 默认 soft 模式（全局+本场景） |
+| **用户画像过拟合历史偏好** | TencentDB L3 | S-7 画像带时间衰减，旧偏好降权 |
+| **压缩后任务成功率下降** | TencentDB | O-3 度量验证，压缩率与成功率双指标监控 |
 
 ---
 
@@ -670,18 +954,27 @@ v2.1.10 发布需满足：
 - [ ] S-3 来源标记：新节点默认 `source = "experience"`
 - [ ] S-4 层次化社区：支持 3 层抽象
 - [ ] S-5 因果关系：支持 CAUSED_BY/LEADS_TO
+- [ ] S-6 场景隔离：召回支持 sceneId 过滤，不串场
+- [ ] S-7 用户画像：可从历史对话蒸馏偏好，召回时参考画像
+- [ ] O-1 上下文卸载：完整 content 写外部文件，上下文只留摘要+索引
+- [ ] O-2 Mermaid 画布：召回结果可用 Mermaid Flowchart 呈现
+- [ ] O-3 压缩效果度量：可统计 token 节省比例
 
 ### 性能验收
 
 - [ ] 召回延迟 P99 < 500ms（含缓存命中场景）
 - [ ] 维护周期不因衰减/边调整显著延长（< 30%）
 - [ ] M 矩阵内存占用 < 50MB（1024×1024 × 4 字节 ≈ 4MB）
+- [ ] **O-1/O-2 压缩后 token 节省 > 40%（参考 TencentDB 61% 基准）**
+- [ ] **O-1/O-2 压缩后任务成功率不下降（误差 < 2pp）**
 
 ### 兼容性验收
 
 - [ ] 旧数据（无新字段）可正常读写
 - [ ] 关闭新功能时行为与 v2.2.0 一致
 - [ ] 现有 HTTP API 不破坏向后兼容
+- [ ] **O-1 卸载文件丢失时可回退到全量召回**
+- [ ] **S-6 场景隔离关闭时行为与无 sceneId 一致**
 
 ---
 
@@ -700,6 +993,14 @@ v2.1.10 发布需满足：
   - 关键数据：26% → 92% 准确率提升
   - 关键教训：评测目标比进化策略更重要；进化会过拟合；90% 反馈下只掉 0.4pp
   - 代码：https://github.com/Fzhiyu1/meomory
+
+### 开源项目
+
+- **TencentDB Agent Memory**（腾讯云数据库团队，2026.05 开源）
+  - 提供短期记忆压缩（上下文卸载 + Mermaid 画布）与 L0-L3 四层渐进式记忆架构
+  - 关键数据：节省 61% Token，任务成功率提升 52%，长期记忆准确率 48% → 76%
+  - 设计哲学："上层提供方向，下层保留证据"，任何一层压缩可 100% 找回
+  - 代码：https://github.com/Tencent/TencentDB-Agent-Memory
 
 ### 项目内相关文件
 
