@@ -15,4 +15,7 @@ auto-tuner-state.json
 config.local.json
 benchmarks/data/
 
+# v2.2.2 工具二进制不入库（CI 中按需下载）
+actionlint
+
 

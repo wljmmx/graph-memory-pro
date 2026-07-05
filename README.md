@@ -79,12 +79,12 @@ graph-memory-pro 是**记忆底层引擎**，只做"图内"操作：
 **P2-1：结构化日志** — 统一 `createLogger(namespace)` 接口，分级 debug/info/warn/error，环境变量 `GM_LOG_LEVEL` 过滤、`GM_LOG_JSON=true` 输出 JSON 行（便于 Loki/ELK 采集），`setTraceId` 跨模块关联请求链路，`setExternalLogger` 注入 OpenClaw SDK logger。已迁移 maintenance + recall + judge 共 44 处 console 调用。
 
 ### 测试覆盖
-- 15 个测试文件，340 个用例（Neo4j mock 基础设施，CI 友好）
-- 覆盖全部 5 批次核心功能 + v2.2.1 新增（Tier 2/3 裁判 / 增量维护 / 结构化日志 / PPR closed session 容错）：指标计算 / AutoTuner / 关联矩阵 / 裁判闭环 / 维护阶段 / 软替换 / 缓存 / 社区 / 类型配置 / HTTP API 路由 / LLM-Embedding 引擎 / 三元组抽取 / 增量维护 / 结构化日志 / PageRank 容错
+- 15 个测试文件，367 个用例（Neo4j mock 基础设施，CI 友好）
+- 覆盖全部 5 批次核心功能 + v2.2.1 新增（Tier 2/3 裁判 / 增量维护 / 结构化日志 / PPR closed session 容错 / 主会话本地模型优先策略）：指标计算 / AutoTuner / 关联矩阵 / 裁判闭环 / 维护阶段 / 软替换 / 缓存 / 社区 / 类型配置 / HTTP API 路由 / LLM-Embedding 引擎 / 三元组抽取 / 增量维护 / 结构化日志 / PageRank 容错 / runtime LLM provider 探测
 
 ## 版本
 
-**当前版本：2.2.1**
+**当前版本：2.2.2**
 
 ## 安装
 

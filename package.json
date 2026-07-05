@@ -1,7 +1,9 @@
 {
   "name": "@openclaw/graph-memory-pro",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "description": "Neo4j Knowledge Graph Memory Engine for OpenClaw — GDS PageRank, community detection, vector index",
+  "author": "Ananas <Wywelljob@gmail.com>",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -52,6 +54,7 @@
   "files": [
     "dist/",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "openclaw.plugin.json"
   ]
 }

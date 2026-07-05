@@ -4,6 +4,43 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.2.2] — 2026-07-06
+
+### 总结
+
+v2.2.1 发布阻断修复版本。修复 3 项 P0 阻断（类型声明缺失 / 文档数字不一致 / 插件清单未发布）+ 3 项 P1 警告（package.json 元数据 / actionlint 二进制入库 / ROADMAP checklist 未勾选），并补充主会话本地模型优先策略测试。测试 340 → 367 用例（+27），tsc 0 错误，全部向后兼容。
+
+### Added — 新增能力
+
+- **主会话本地模型优先策略**：[src/engine/llm.ts](src/engine/llm.ts) 新增 `createRuntimeCompleteFn` 工厂函数。当 `api.runtime.llm` 可用时，首次调用执行轻量 probe（~8 token）探测主会话 provider：
+  - 本地模型（ollama/lmstudio/localai/llamafile/llama.cpp）→ 后续走 runtime LLM，避免云端调用
+  - 云端模型 → 切换到插件配置的 fallback LLM（`createCompleteFn`）
+  - probe 失败 → 降级到 fallback（如未配置仍用 runtime）
+  - 并发安全：所有并发首次调用共享 `detectPromise`，避免重复探测
+  - [index.ts](index.ts) LLM 初始化注入 `api.runtime.llm` 引用
+
+### Added — 测试
+
+- **createRuntimeCompleteFn 测试**：13 用例（ollama/openai/无 fallback/probe 失败/并发共享/probe 缓存/数组 content/空 content/参数透传/probe 极小化/logger info/warn）
+- **isLocalProvider 测试**：9 用例（关键字命中/大小写/ollama-256k 变体/llama.cpp/空安全/关键字列表完整性）
+- 总测试数 340 → **367**（15 文件）
+
+### Fixed — 发布阻断修复
+
+- **P0-1 类型声明缺失**：[tsup.config.ts](tsup.config.ts) `dts: false` → `dts: true`，dist/ 产出 `index.d.ts`。原 `package.json` `types` 字段指向不存在的文件，消费者无法获得 TypeScript 类型提示。
+- **P0-2 文档测试数字不一致**：README/release.yml/AUDIT/ROADMAP 中 340 vs 334 混用，统一为 367（当前实际值）。AUDIT_REPORT 保留 v2.2.1 历史快照 340，但修正第十章 334 → 340 与第七章一致。
+- **P0-3 插件清单未发布**：`package.json` `files` 字段未包含 `openclaw.plugin.json`，npm 发布后 OpenClaw Gateway 无法加载插件。现已加入 files。
+- **P1-1 package.json 元数据缺失**：补 `author: "Ananas <Wywelljob@gmail.com>"` + `license: "MIT"`，与 `openclaw.plugin.json` 一致。LICENSE 版权人署名统一为 `Ananas`（原 `adoresever` 引起身份混淆）。
+- **P1-2 actionlint 二进制入库**：移除 `/workspace/actionlint`（Go 编译产物，跨平台不可用），加入 `.gitignore`，CI 中改用 `go install` 下载。
+- **P1-3 ROADMAP 验收 checklist 未勾选**：已落地项全部勾选 `[x]`，与顶部"已全部落地"声明一致。
+
+### Configuration Migration — 配置迁移（v2.2.1 → v2.2.2）
+
+无破坏性变更，现有 v2.2.1 配置无需任何改动。
+
+**新增行为**：
+- 当插件运行在 OpenClaw 容器内且 `api.runtime.llm` 可用时，会自动探测主会话 provider。本地模型优先用主会话，云端模型回退到插件配置的 `llm`。如不希望使用此行为，可不配置 `api.runtime.llm`（SDK 自动控制），或保持 `llm` 配置作为 fallback。
+
 ## [2.2.1] — 2026-07-05
 
 ### 总结

@@ -1,7 +1,7 @@
 /**
  * graph-memory-pro — Neo4j Knowledge Graph Memory Plugin
  *
- * Version: 2.2.1
+ * Version: 2.2.2
  *
  * 架构定位（A 方案）:
  *   - 不占用 slots（memory/contextEngine）

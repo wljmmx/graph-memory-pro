@@ -101,7 +101,7 @@ jobs:
             ### Verification
             - ✅ tsc --noEmit (0 errors)
             - ✅ npm run build (success)
-            - ✅ npm test (334/334 passed)
+            - ✅ npm test (367/367 passed)
 
             ### Audit Report
             See [AUDIT_REPORT.md](https://github.com/${{ github.repository }}/blob/main/AUDIT_REPORT.md)

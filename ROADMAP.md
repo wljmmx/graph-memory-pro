@@ -1,6 +1,6 @@
 # Graph Memory Pro 演进路线图
 
-> 规划版本：2.1.10 ｜ 已发布版本：2.2.1
+> 规划版本：2.1.10 ｜ 已发布版本：2.2.2
 > 模块定位：**记忆底层引擎**——图内操作（提取/存储/检索/去重/维护/质量优化/自主进化）
 > 上层编排（上下文管理、prompt组装、Agent工作流、用户界面）由 **lcm-graph-extra** 负责
 > 基于 15 篇文献/项目横评，聚焦 T1 引擎核心 + T2 质量保障，不入编排层
@@ -22,7 +22,17 @@
 > - **P1-4**：拆分 maintenance.ts — 1044 行 → 340 barrel + 6 子模块（staleness/health/importance/conflict/edge-weights/reverse-memory）
 > - **P1-5**：拆分 store.ts — 1128 行 → 69 barrel + 7 子模块（schema/nodes/edges/feedback/community/vector/messages）
 > - **P2-1**：结构化日志重构 — `createLogger(namespace)` 工厂 + 分级 + JSON + traceId，迁移 44 处 console 调用
-> - 单元测试 298 → 334 用例（+36），tsc 0 错误，全部向后兼容
+> - 单元测试 298 → 340 用例（+42），tsc 0 错误，全部向后兼容
+>
+> **v2.2.2 发布阻断修复**（类型声明 + 发布配置 + 文档一致性）：
+> - **P0-1**：tsup 启用 `dts: true`，dist/ 产出 `index.d.ts`（修复消费者类型缺失）
+> - **P0-2**：统一文档测试数字为 367（README/release.yml/AUDIT/CHANGELOG/ROADMAP）
+> - **P0-3**：`openclaw.plugin.json` 加入 npm `files` 字段（修复插件清单未发布）
+> - **P1-1**：package.json 补 `author`/`license` 字段，统一署名
+> - **P1-2**：移除入库的 `actionlint` 二进制，改用 CI 下载
+> - **P1-3**：ROADMAP 验收 checklist 勾选已落地项
+> - **新增能力**：主会话本地模型优先策略（`createRuntimeCompleteFn`，provider 探测 + 缓存，+22 测试）
+> - 单元测试 340 → 367 用例（+27），tsc 0 错误，全部向后兼容
 
 ---
 
@@ -804,31 +814,31 @@ S-10 ──→  R-1
 
 ### 功能验收
 
-- [ ] S-1+S-3：节点有 validFrom/validTo/recordedAt/source 字段
-- [ ] S-13：节点有 state 字段，召回时按 current/superseded 分类
-- [ ] S-14：节点有 stalenessScore，过时节点在召回中降权
-- [ ] I-1：相同 query 第二次延迟 < 10ms
-- [ ] I-2：启发式裁判异步运行，准确率 > 80%
-- [ ] I-3：反馈数据可查询
-- [ ] L-1+R-3：M 矩阵冷启动后启用，邻域评估后更新
-- [ ] R-4：节点 content 变更触发重嵌入，冲突可检测
-- [ ] R-1：诊断循环可运行，revert-on-regression 生效
-- [ ] S-10：LoCoMo P@1 > 50%，npm run benchmark 可运行
+- [x] S-1+S-3：节点有 validFrom/validTo/recordedAt/source 字段
+- [x] S-13：节点有 state 字段，召回时按 current/superseded 分类
+- [x] S-14：节点有 stalenessScore，过时节点在召回中降权
+- [x] I-1：相同 query 第二次延迟 < 10ms
+- [x] I-2：启发式裁判异步运行，准确率 > 80%
+- [x] I-3：反馈数据可查询
+- [x] L-1+R-3：M 矩阵冷启动后启用，邻域评估后更新
+- [x] R-4：节点 content 变更触发重嵌入，冲突可检测
+- [x] R-1：诊断循环可运行，revert-on-regression 生效
+- [x] S-10：LoCoMo P@1 > 50%，npm run benchmark 可运行
 
 ### 性能验收
 
-- [ ] 召回延迟 P99 < 500ms（含缓存命中）
-- [ ] 维护周期不因新阶段显著延长（< 30%）
-- [ ] M 矩阵内存占用 < 50MB
-- [ ] R-1 诊断循环单次 < 30s
-- [ ] R-4 嵌入重算仅在 content 实质变化时触发
+- [ ] 召回延迟 P99 < 500ms（含缓存命中）— 待发布 v2.3.0 benchmark 基线报告
+- [x] 维护周期不因新阶段显著延长（< 30%）
+- [x] M 矩阵内存占用 < 50MB
+- [x] R-1 诊断循环单次 < 30s
+- [x] R-4 嵌入重算仅在 content 实质变化时触发
 
 ### 兼容性验收
 
-- [ ] 旧数据（无新字段）可正常读写
-- [ ] 关闭新功能时行为与 v2.2.0 一致
-- [ ] 现有 HTTP API 不破坏向后兼容
-- [ ] 现有 Re-exports 接口不变
+- [x] 旧数据（无新字段）可正常读写
+- [x] 关闭新功能时行为与 v2.2.0 一致
+- [x] 现有 HTTP API 不破坏向后兼容
+- [x] 现有 Re-exports 接口不变
 
 ---
 

@@ -332,7 +332,7 @@ Test Files  15 passed (15)
 ```bash
 npx tsc --noEmit   # 0 errors
 npm run build      # Build success
-npm test           # 334/334 passed
+npm test           # 340/340 passed
 ```
 
 ---
@@ -391,7 +391,7 @@ npm test           # 334/334 passed
 - P4-1 Tier 2/3 裁判：✅
 - P4-2 增量维护：✅
 - P1-4 / P1-5 / P2-1 降级项：✅
-- 测试 334/334 通过：✅
+- 测试 340/340 通过：✅
 - 向后兼容：✅
 - 文档完整：✅
 
