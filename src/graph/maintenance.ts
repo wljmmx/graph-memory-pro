@@ -13,6 +13,7 @@ import { computeGlobalPageRank, type GlobalPageRankResult } from "./pagerank.ts"
 import { detectCommunities, detectHierarchicalCommunities, summarizeCommunities, type CommunityResult } from "./community.ts";
 import { dedup, type DedupResult } from "./dedup.ts";
 import { getSession } from "../store/db.ts";
+import { mergeNodes, saveVector, computeEmbeddingHash } from "../store/store.ts";
 export interface RepairEdgeResult {
   relatesToCreated: number;
   messageCount: number;
@@ -31,8 +32,8 @@ async function deriveRelatesFromMentions(
   const session = getSession(driver);
   try {
     const result = await session.run(
-      `MATCH (msg:ConversationMessage)-[:MENTIONS]->(a:Task|Skill|Event {status: active})
-       MATCH (msg)-[:MENTIONS]->(b:Task|Skill|Event {status: active})
+      `MATCH (msg:ConversationMessage)-[:MENTIONS]->(a:Task|Skill|Event {status: 'active'})
+       MATCH (msg)-[:MENTIONS]->(b:Task|Skill|Event {status: 'active'})
        WHERE a.id < b.id
        WITH a, b, count(DISTINCT msg) AS coOccur
        MERGE (a)-[r:RELATES_TO]->(b)
@@ -187,6 +188,7 @@ export async function runMaintenance(
       } catch (err) {
         console.warn(`[graph-memory-pro] community summaries failed: ${err}`);
       }
+      _lockTimestamp = Date.now();
     }
 
     // ── Phase 5: S-14 Staleness 重算（v2.1.2，默认开启） ──
@@ -235,7 +237,7 @@ export async function runMaintenance(
     // 依赖：S-13 state + S-14 staleness（检测）+ 本任务（消解）
     if (cfg?.conflictResolution?.enabled !== false) {
       try {
-        conflictResult = await resolveConflicts(driver, cfg?.conflictResolution);
+        conflictResult = await resolveConflicts(driver, cfg?.conflictResolution, embedFn, cfg?.embedding?.model);
         console.log(
           `[graph-memory-pro] conflict-resolution: scanned ${conflictResult.scanned}, resolved ${conflictResult.resolved} (superseded=${conflictResult.superseded}, merged=${conflictResult.merged})`,
         );
@@ -681,6 +683,8 @@ export interface ConflictResolutionConfig {
 export async function resolveConflicts(
   driver: Driver,
   cfg?: ConflictResolutionConfig,
+  embedFn?: EmbedFn,
+  embeddingModel?: string,
 ): Promise<{ scanned: number; resolved: number; superseded: number; merged: number }> {
   const session = getSession(driver);
   try {
@@ -771,32 +775,23 @@ export async function resolveConflicts(
               const mergedContent = [rec.get("aContent"), rec.get("bContent")]
                 .filter(Boolean)
                 .join("\n---\n");
-              await session.run(
-                `MATCH (winner:Task|Skill|Event {id: $winnerId}),
-                       (loser:Task|Skill|Event {id: $loserId})
+              const mergeSetResult = await session.run(
+                `MATCH (winner:Task|Skill|Event {id: $winnerId})
                  SET winner.content = $mergedContent,
-                     winner.validatedCount = $totalValidated,
                      winner.state = 'current',
-                     winner.stalenessScore = 0.0,
-                     loser.state = 'superseded',
-                     loser.validTo = timestamp(),
-                     loser.supersededBy = $winnerId
-                 WITH winner, loser
-                 MATCH (loser)-[r]->(related)
-                 WHERE NOT type(r) IN ['NEXT_SESSION', 'CONTAINS']
-                 MERGE (winner)-[r2:type(r)]->(related)
-                   SET r2.id = coalesce(r2.id, 'edge-' + toString(timestamp()) + '-' + toString(rand())),
-                       r2.weight = coalesce(r2.weight, 1.0) * 0.5,
-                       r2.createdAt = coalesce(r2.createdAt, timestamp()),
-                       r2.updatedAt = timestamp()
-                 DETACH DELETE loser`,
-                {
-                  winnerId: mergeWinnerId,
-                  loserId: mergeLoserId,
-                  mergedContent,
-                  totalValidated: aValidated + bValidated,
-                },
+                     winner.stalenessScore = 0.0
+                 RETURN winner.name AS name, winner.description AS description`,
+                { winnerId: mergeWinnerId, mergedContent },
               );
+              await mergeNodes(driver, mergeWinnerId, mergeLoserId);
+              if (embedFn) {
+                const winnerName = mergeSetResult.records[0]?.get("name") ?? "";
+                const winnerDesc = mergeSetResult.records[0]?.get("description") ?? "";
+                const vec = await embedFn(mergedContent);
+                if (vec && vec.length > 0) {
+                  await saveVector(driver, mergeWinnerId, vec, computeEmbeddingHash(winnerName, winnerDesc, mergedContent), embeddingModel);
+                }
+              }
               merged++;
               resolved++;
               continue;
@@ -904,8 +899,8 @@ export async function adjustEdgeWeights(
        WHERE NOT type(r) IN ['NEXT_SESSION', 'CONTAINS']
        WITH r, count(DISTINCT f) AS usageCount
        SET r.weight = CASE
-         WHEN r.weight * $factor * (1 + usageCount * 0.05) > $max THEN $max
-         ELSE r.weight * $factor * (1 + usageCount * 0.05)
+         WHEN COALESCE(r.weight, 1.0) * $factor * (1 + usageCount * 0.05) > $max THEN $max
+         ELSE COALESCE(r.weight, 1.0) * $factor * (1 + usageCount * 0.05)
        END,
        r.updatedAt = timestamp()
        RETURN count(DISTINCT r) AS strengthened`,
@@ -921,8 +916,8 @@ export async function adjustEdgeWeights(
          AND r.weight > $min
        WITH r, count(DISTINCT f) AS unusedCount
        SET r.weight = CASE
-         WHEN r.weight * $factor < $min THEN $min
-         ELSE r.weight * $factor
+         WHEN COALESCE(r.weight, 1.0) * $factor < $min THEN $min
+         ELSE COALESCE(r.weight, 1.0) * $factor
        END,
        r.updatedAt = timestamp()
        RETURN count(DISTINCT r) AS decayed`,

@@ -86,11 +86,14 @@ function parseExtractResult(raw: string): ExtractResult {
       edges: Array.isArray(parsed.edges) ? parsed.edges.filter(isValidEdge).slice(0, 8) : [],
     };
   } catch {
-    // 非贪婪匹配，避免匹配过多内容
-    const match = cleaned.match(/\{[\s\S]*?"nodes"[\s\S]*?\}/);
-    if (match) {
+    // 用首尾大括号截取完整 JSON 子串（避免非贪婪匹配在嵌套对象内部提前停止）
+    const firstBrace = cleaned.indexOf("{");
+    const lastBrace = cleaned.lastIndexOf("}");
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
       try {
-        const parsed = JSON.parse(match[0]);
+        const jsonStr = cleaned.slice(firstBrace, lastBrace + 1);
+        const parsed = JSON.parse(jsonStr);
+        if (!parsed || typeof parsed !== "object") return FALLBACK;
         return {
           nodes: Array.isArray(parsed.nodes) ? parsed.nodes.filter(isValidNode).slice(0, 5) : [],
           edges: Array.isArray(parsed.edges) ? parsed.edges.filter(isValidEdge).slice(0, 8) : [],

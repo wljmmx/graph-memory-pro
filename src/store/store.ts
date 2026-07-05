@@ -7,7 +7,7 @@
 import type { Driver } from "neo4j-driver";
 import neo4j from "neo4j-driver";
 import { createHash } from "crypto";
-import type { GmNode, GmEdge, GmMessage, NodeType, EdgeType, CommunitySummary } from "../types.ts";
+import type { GmNode, GmEdge, GmMessage, NodeType, EdgeType, CommunitySummary, GmConfig } from "../types.ts";
 import { VALID_EDGE_TYPES } from "../types.ts";
 import { getSession } from "./db.ts";
 
@@ -227,6 +227,9 @@ export async function upsertNode(
            n.state = COALESCE($state, 'current'),
            n.stalenessScore = COALESCE($stalenessScore, 0.0),
            n.importanceScore = COALESCE($importanceScore, 0.0),
+           n.communityId = COALESCE($communityId, n.communityId),
+           n.topicId = COALESCE($topicId, n.topicId),
+           n.domainId = COALESCE($domainId, n.domainId),
            n.embeddingHash = COALESCE($embeddingHash, n.embeddingHash)
        SET n.validTo = $validTo,
            n.supersededBy = $supersededBy,
@@ -255,6 +258,9 @@ export async function upsertNode(
         supersededBy: node.supersededBy ?? null,
         embeddingModel: node.embeddingModel ?? null,
         embeddingHash: finalEmbeddingHash,
+        communityId: node.communityId ?? null,
+        topicId: node.topicId ?? null,
+        domainId: node.domainId ?? null,
       },
     );
   } finally {
@@ -392,6 +398,7 @@ export async function graphWalk(
       `MATCH path = (start:Task|Skill|Event)-[r:${relTypes}*1..${depth}]-(end:Task|Skill|Event)
        WHERE start.id IN $seedIds
          AND start.status = 'active'
+         AND ALL(x IN nodes(path) WHERE x.status = 'active')
        UNWIND nodes(path) AS n
        UNWIND relationships(path) AS rel
        WITH COLLECT(DISTINCT n) AS nodeList, COLLECT(DISTINCT rel) AS relList
@@ -585,9 +592,10 @@ export async function getNodesByType(
 ): Promise<GmNode[]> {
   const session = getSession(driver);
   try {
+    const label = typeToLabel(type);
     const q = limit
-      ? `MATCH (n:${type} {status: 'active'}) RETURN n ORDER BY n.validatedCount DESC LIMIT toInteger($limit)`
-      : `MATCH (n:${type} {status: 'active'}) RETURN n ORDER BY n.validatedCount DESC`;
+      ? `MATCH (n:${label} {status: 'active'}) RETURN n ORDER BY n.validatedCount DESC LIMIT toInteger($limit)`
+      : `MATCH (n:${label} {status: 'active'}) RETURN n ORDER BY n.validatedCount DESC`;
     const result = await session.run(q, { limit: limit ?? 0 });
     return result.records.map((r) => recordToNode(r.get("n"))).filter((n): n is GmNode => n !== null);
   } finally {
@@ -659,6 +667,7 @@ export async function mergeNodes(
   driver: Driver,
   keepId: string,
   mergeId: string,
+  cfg?: GmConfig,
 ): Promise<void> {
   const session = getSession(driver);
   try {
@@ -757,20 +766,27 @@ export async function mergeNodes(
     // 新实现：保留节点，标记 state=superseded，validTo=now，supersededBy 指向 keep
     //         边 weight 降为 0.1 不参与 GDS 计算（但仍可追溯）
     //         state.enabled=false 时退化为旧行为（物理删除）
-    // 注：当前默认走软替换；如需旧行为可由调用方在 mergeNodes 前判断 cfg.state.enabled
-    await session.run(
-      `MATCH (merge:Task|Skill|Event {id: $mergeId})
-       SET merge.state = 'superseded',
-           merge.validTo = timestamp(),
-           merge.supersededBy = $keepId,
-           merge.updatedAt = timestamp()
-       WITH merge
-       MATCH (merge)-[r]-()
-       WHERE NOT type(r) IN ['NEXT_SESSION', 'CONTAINS', 'MENTIONS']
-       SET r.weight = 0.1
-      `,
-      { keepId, mergeId },
-    );
+    if (cfg?.state?.enabled === false) {
+      await session.run(
+        `MATCH (merge:Task|Skill|Event {id: $mergeId})
+         DETACH DELETE merge`,
+        { mergeId },
+      );
+    } else {
+      await session.run(
+        `MATCH (merge:Task|Skill|Event {id: $mergeId})
+         SET merge.state = 'superseded',
+             merge.validTo = timestamp(),
+             merge.supersededBy = $keepId,
+             merge.updatedAt = timestamp()
+         WITH merge
+         MATCH (merge)-[r]-()
+         WHERE NOT type(r) IN ['NEXT_SESSION', 'CONTAINS', 'MENTIONS']
+         SET r.weight = 0.1
+        `,
+        { keepId, mergeId },
+      );
+    }
   } finally {
     await session.close();
   }
@@ -814,8 +830,10 @@ export async function updateCommunities(
         );
       }
       await tx.commit();
-    } catch {
+    } catch (err) {
       await tx.rollback();
+      console.warn('[graph-memory-pro] updateCommunities failed:', err);
+      throw err;
     }
   } finally {
     await session.close();
@@ -983,8 +1001,9 @@ export async function saveVector(
       `MATCH (n:Task|Skill|Event {id: $nodeId})
        SET n.embedding = $vec,
            n.embeddingHash = $hash,
-           n.embeddingModel = $model`,
-      { nodeId, vec, hash, model: embeddingModel ?? null },
+           // v2.2.0 fix: 用 COALESCE 保护，避免调用方未传 embeddingModel 时清空已有值
+           n.embeddingModel = COALESCE($embeddingModel, n.embeddingModel)`,
+      { nodeId, vec, hash, embeddingModel: embeddingModel ?? null },
     );
   } finally {
     await session.close();
@@ -1103,6 +1122,8 @@ function recordToNode(rec: any): GmNode | null {
     content: p.content ?? "",
     status: p.status ?? "active",
     communityId: p.communityId,
+    topicId: p.topicId,
+    domainId: p.domainId,
     pagerank: typeof p.pagerank === "number" ? p.pagerank : (p.pagerank?.toNumber?.() ?? 0),
     validatedCount: p.validatedCount?.toNumber?.() ?? 0,
     createdAt: p.createdAt?.toNumber?.() ?? 0,

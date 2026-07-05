@@ -87,7 +87,14 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
           throw new Error("Ollama embedding API returned no embedding data");
         }
 
-        return data.embeddings[0];
+        const vec = data.embeddings[0];
+        if (config.dimensions && Array.isArray(vec) && vec.length !== config.dimensions) {
+          throw new Error(
+            `Embedding dimension mismatch: expected ${config.dimensions}, got ${vec.length}. ` +
+            `Check model "${model}" actual dimensions vs config.dimensions setting.`
+          );
+        }
+        return vec;
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
         lastErr.push(error);

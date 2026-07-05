@@ -31,7 +31,8 @@ const RETRY_DELAYS = [2000, 5000, 10_000];
 
 /**
  * 判断是否使用 Ollama 原生 API
- * 规则：baseURL 不含 /v1 且不含 openai.com → 视为 Ollama 原生
+ * 规则：仅当 baseURL 明确指向 Ollama 时才走原生 API；
+ * 第三方 OpenAI 兼容服务（如 deepseek.com、moonshot.cn）默认走 OpenAI 兼容格式
  */
 function isOllamaNative(baseURL: string): boolean {
   const lower = baseURL.toLowerCase();
@@ -39,8 +40,12 @@ function isOllamaNative(baseURL: string): boolean {
   if (lower.includes("/v1") || lower.includes("openai.com")) {
     return false;
   }
-  // 其他情况视为 Ollama 原生（如 http://localhost:11434）
-  return true;
+  // Ollama 特征：默认端口 11434 或 URL 含 "ollama" 关键字
+  if (lower.includes("11434") || lower.includes("ollama")) {
+    return true;
+  }
+  // 其他第三方域名（deepseek.com、moonshot.cn 等）默认走 OpenAI 兼容格式
+  return false;
 }
 
 /**

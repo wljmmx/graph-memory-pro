@@ -78,26 +78,30 @@ export class Recaller {
       return cached;
     }
 
-    const precise = await this.recallPrecise(query, limit);
-    const generalized = await this.recallGeneralized(query, limit);
-    const merged = this.mergeResults(precise, generalized);
-
-    // v2.1.2 I-1: 缓存写入（若启用 embed 则尝试相似匹配）
+    // 计算 queryEmbedding 一次，复用于 recallPrecise/Generalized 与 queryCache
     let queryEmbedding: number[] | undefined;
     if (this.embed) {
       try {
         queryEmbedding = await this.embed(query);
-        // 相似匹配：找到相似查询时降权返回
-        const similar = this.queryCache.getSimilar(queryEmbedding);
-        if (similar) {
-          logPhase("recall_cache_similar_hit", 0, {
-            similarity: similar.similarity.toFixed(3),
-          });
-          // 这里不直接返回相似结果，因为已经做了完整召回
-          // 相似命中仅作为统计，下次相同 query 时直接命中精确缓存
-        }
       } catch {
-        // embed 失败不影响主流程
+        // embed 失败不影响主流程，recallPrecise/Generalized 内部仍会尝试 this.embed
+      }
+    }
+
+    const precise = await this.recallPrecise(query, limit, queryEmbedding);
+    const generalized = await this.recallGeneralized(query, limit, queryEmbedding);
+    const merged = this.mergeResults(precise, generalized);
+
+    // v2.1.2 I-1: 缓存写入（若启用 embed 则尝试相似匹配）
+    if (queryEmbedding) {
+      // 相似匹配：找到相似查询时降权返回
+      const similar = this.queryCache.getSimilar(queryEmbedding);
+      if (similar) {
+        logPhase("recall_cache_similar_hit", 0, {
+          similarity: similar.similarity.toFixed(3),
+        });
+        // 这里不直接返回相似结果，因为已经做了完整召回
+        // 相似命中仅作为统计，下次相同 query 时直接命中精确缓存
       }
     }
     this.queryCache.put(query, merged, queryEmbedding);
@@ -218,7 +222,7 @@ export class Recaller {
     }
   }
 
-  private async recallPrecise(query: string, limit: number): Promise<RecallResult> {
+  private async recallPrecise(query: string, limit: number, queryEmbedding?: number[]): Promise<RecallResult> {
     const tPrecise = Date.now();
 
     const tFts = Date.now();
@@ -229,7 +233,7 @@ export class Recaller {
     if (this.embed) {
       try {
         const tEmbed = Date.now();
-        const vec = await this.embed(query);
+        const vec = queryEmbedding ?? await this.embed(query);
         logPhase("vec_embed", Date.now() - tEmbed, { dims: vec.length });
 
         if (vec.length) {
@@ -304,14 +308,14 @@ export class Recaller {
     return { nodes: finalNodes, edges, tokenEstimate: finalNodes.length * 50 + edges.length * 20 };
   }
 
-  private async recallGeneralized(query: string, limit: number): Promise<RecallResult> {
+  private async recallGeneralized(query: string, limit: number, queryEmbedding?: number[]): Promise<RecallResult> {
     if (!this.embed) return { nodes: [], edges: [], tokenEstimate: 0 };
 
     const tGen = Date.now();
 
     try {
       const tEmbed = Date.now();
-      const vec = await this.embed(query);
+      const vec = queryEmbedding ?? await this.embed(query);
       logPhase("vec_embed", Date.now() - tEmbed, { context: "generalized" });
       if (!vec.length) return { nodes: [], edges: [], tokenEstimate: 0 };
 
@@ -345,8 +349,23 @@ export class Recaller {
       scored.sort((a, b) => b.score - a.score);
 
       const finalNodes = scored.slice(0, limit).map(s => s.node);
+
+      // M-8: 用 finalNodes 的 id 列表调用 graphWalk 获取关联边，
+      // 只保留两端都在 finalNodes 中的边。finalNodes 为空则返回空 edges。
+      let edges: GmEdge[] = [];
+      if (finalNodes.length) {
+        const finalIds = finalNodes.map(n => n.id);
+        const finalIdSet = new Set(finalIds);
+        const tGw = Date.now();
+        const walked = await graphWalk(this.driver, finalIds, this.cfg.recallMaxDepth);
+        logPhase("graph_walk", Date.now() - tGw, { nodes: walked.nodes.length, edges: walked.edges.length, context: "generalized" });
+        edges = walked.edges.filter(e =>
+          finalIdSet.has(e.fromId) && finalIdSet.has(e.toId)
+        );
+      }
+
       logPhase("recall_generalized", Date.now() - tGen, { finalNodes: finalNodes.length });
-      return { nodes: finalNodes, edges: [], tokenEstimate: finalNodes.length * 30 };
+      return { nodes: finalNodes, edges, tokenEstimate: finalNodes.length * 30 + edges.length * 20 };
     } catch (e) {
       if (process.env.GM_DEBUG) console.log("[recall-generalized] failed: " + e);
       return { nodes: [], edges: [], tokenEstimate: 0 };

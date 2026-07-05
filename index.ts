@@ -45,6 +45,7 @@ let _extractor: Extractor | null = null;
 let _recaller: Recaller | null = null;
 let _extractorTimer: ReturnType<typeof setInterval> | null = null;
 let _maintenanceTimer: ReturnType<typeof setInterval> | null = null;
+let _maintenanceInitTimer: ReturnType<typeof setTimeout> | null = null;
 
 // ─── 辅助函数 ──────────────────────────────────────────
 
@@ -92,10 +93,11 @@ async function extractInBackground(
   llm: CompleteFn | null,
   logger: any,
   pendingMessages: Array<{ user: string; assistant: string }>,
-): Promise<void> {
-  if (!extractor || !driver || !llm || pendingMessages.length === 0) return;
+): Promise<number> {
+  if (!extractor || !driver || !llm || pendingMessages.length === 0) return 0;
 
   let extracted = 0;
+  let processed = 0;
   const maxPairs = 3;
   const pairs = pendingMessages.slice(0, maxPairs);
 
@@ -104,12 +106,13 @@ async function extractInBackground(
       const result = await extractor.extract(llm, pair.user, pair.assistant);
       if (result.nodes.length > 0) {
         extracted++;
+        // v2.2.0 fix: 用 name+description 做 key 避免同名节点覆盖导致边指向错误节点
         const nodeIdMap = new Map<string, string>();
         for (const enode of result.nodes) {
           try {
             const now = Date.now();
             const id = `auto-${now}-${Math.random().toString(36).slice(2, 8)}`;
-            nodeIdMap.set(enode.name, id);
+            nodeIdMap.set(`${enode.name}|${enode.description}`, id);
             await upsertNode(driver, {
               id,
               type: enode.type,
@@ -130,8 +133,13 @@ async function extractInBackground(
         }
         for (const eedge of result.edges) {
           try {
-            const fromId = nodeIdMap.get(eedge.fromName);
-            const toId = nodeIdMap.get(eedge.toName);
+            // v2.2.0 fix: 先精确匹配 fromName，找不到再按 name|description 模糊匹配
+            let fromId: string | undefined;
+            let toId: string | undefined;
+            for (const [key, id] of nodeIdMap) {
+              if (key.startsWith(eedge.fromName + "|") && fromId === undefined) fromId = id;
+              if (key.startsWith(eedge.toName + "|") && toId === undefined) toId = id;
+            }
             if (!fromId || !toId) continue;
             const now = Date.now();
             await upsertEdge(driver, {
@@ -150,13 +158,17 @@ async function extractInBackground(
           }
         }
       }
+      processed++;
     } catch (err) {
       if (process.env.GM_DEBUG) logger?.debug?.(`  [graph-memory-pro] extract pair failed: ${err}`);
+      // 失败的 pair 不计入 processed，保留在队列中供下次重试
+      break;
     }
   }
   if (extracted > 0) {
     logger?.info?.(`[graph-memory-pro] background extractor: ${extracted} turns processed`);
   }
+  return processed;
 }
 
 // ─── Plugin Entry ──────────────────────────────────────
@@ -183,6 +195,7 @@ export default definePluginEntry({
       baseURL: Type.Optional(Type.String()),
       model: Type.Optional(Type.String()),
       keepAlive: Type.Optional(Type.String()),
+      options: Type.Optional(Type.Record(Type.String(), Type.Union([Type.Number(), Type.Boolean(), Type.String()]))),
     })),
     embedding: Type.Optional(Type.Object({
       apiKey: Type.Optional(Type.String()),
@@ -190,6 +203,7 @@ export default definePluginEntry({
       model: Type.Optional(Type.String()),
       dimensions: Type.Optional(Type.Number({ default: 1024 })),
       keepAlive: Type.Optional(Type.String()),
+      options: Type.Optional(Type.Record(Type.String(), Type.Union([Type.Number(), Type.Boolean(), Type.String()]))),
     })),
     timing: Type.Optional(Type.Object({
       enabled: Type.Boolean({ default: false }),
@@ -399,6 +413,20 @@ export default definePluginEntry({
         const { createAssociationMatrix } = await import("./src/recaller/association-matrix.ts");
         const amDim = resolveEmbedDimension(_cfg);
         const am = createAssociationMatrix(amDim, _cfg);
+        // v2.2.0 fix D-3: 从持久化文件恢复 M 矩阵状态，避免重启后丢失训练成果
+        try {
+          const { readFile } = await import("node:fs/promises");
+          const { join } = await import("node:path");
+          const amStatePath = join(
+            process.env.HOME || process.env.USERPROFILE || ".",
+            ".openclaw", "graph-memory-pro", "association-matrix-state.json",
+          );
+          const saved = await readFile(amStatePath, "utf-8");
+          if (saved.trim()) {
+            am.deserialize(saved);
+            logger?.info?.(`[graph-memory-pro] association-matrix state restored from ${amStatePath}`);
+          }
+        } catch { /* 首次运行无状态文件 */ }
         _recaller.setAssociationMatrix(am);
         logger?.info?.(`[graph-memory-pro] association-matrix enabled (dim=${amDim}, warmup=${_cfg.associationMatrix?.warmupFeedbacks ?? _cfg.warmup?.warmupFeedbacks ?? 100})`);
       }
@@ -481,13 +509,22 @@ export default definePluginEntry({
             }
 
             if (pairs.length === 0) return;
-            await extractInBackground(_extractor, _driver, _llm, logger, pairs);
+            const processed = await extractInBackground(_extractor, _driver, _llm, logger, pairs);
 
-            // 清空队列文件（保留空文件）
+            // v2.2.0 fix: 只清理已成功处理的 pair，未处理的保留在队列中供下次重试
             const { writeFile, mkdir } = await import('node:fs/promises');
             const { dirname } = await import('node:path');
             await mkdir(dirname(queuePath), { recursive: true }).catch(() => {});
-            await writeFile(queuePath, '').catch(() => {});
+            if (processed >= pairs.length) {
+              // 全部处理成功，清空队列
+              await writeFile(queuePath, '').catch(() => {});
+            } else if (processed > 0) {
+              // v2.2.0 fix H-9: 按 pairs 索引切片重写队列
+              // 旧实现用 lines.slice(processed)，但 lines 含损坏行（已被过滤进 pairs），
+              // 索引与 pairs 不对齐 → 已处理 pair 残留 → 重复 embed。修复：用 pairs 切片并重序列化。
+              const remaining = pairs.slice(processed);
+              await writeFile(queuePath, remaining.map(p => JSON.stringify(p)).join('\n') + '\n').catch(() => {});
+            }
           } catch (err) {
             logger?.warn?.(`[graph-memory-pro] extractor tick failed: ${err}`);
           }
@@ -516,14 +553,31 @@ export default definePluginEntry({
             logger?.info?.("[graph-memory-pro] background maintenance start");
             const result = await runMaintenance(_driver, _cfg, _llm ?? undefined, _embed ?? undefined);
             logger?.info?.(`[graph-memory-pro] maintenance done: ${result.dedup.merged} merged, ${result.community.count} communities`);
+            // v2.2.0 fix D-3: maintenance 后持久化 M 矩阵状态
+            const am = _recaller?.getAssociationMatrix?.();
+            if (am) {
+              try {
+                const { writeFile, mkdir } = await import("node:fs/promises");
+                const { join, dirname } = await import("node:path");
+                const amStatePath = join(
+                  process.env.HOME || process.env.USERPROFILE || ".",
+                  ".openclaw", "graph-memory-pro", "association-matrix-state.json",
+                );
+                await mkdir(dirname(amStatePath), { recursive: true });
+                await writeFile(amStatePath, am.serialize());
+              } catch (err) {
+                logger?.warn?.(`[graph-memory-pro] association-matrix state persist failed: ${err}`);
+              }
+            }
           } catch (err) {
             logger?.warn?.(`[graph-memory-pro] maintenance error: ${err}`);
           }
         };
-        setTimeout(runOnce, initialDelay);
+        _maintenanceInitTimer = setTimeout(runOnce, initialDelay);
         _maintenanceTimer = setInterval(runOnce, interval);
       },
       async stop() {
+        if (_maintenanceInitTimer) { clearTimeout(_maintenanceInitTimer); _maintenanceInitTimer = null; }
         if (_maintenanceTimer) { clearInterval(_maintenanceTimer); _maintenanceTimer = null; }
       },
     });
@@ -539,7 +593,9 @@ export default definePluginEntry({
         method: route.method,
         path: route.path,
         handler: async (req: any) => {
-          const result = await route.handler(req?.params ?? req?.query ?? {});
+          // v2.2.0 fix: 合并 path params + query + body，旧实现 ?? 单选会丢失字段
+          const merged = { ...(req?.params ?? {}), ...(req?.query ?? {}), ...(req?.body ?? {}) };
+          const result = await route.handler(merged);
           return { status: result.status, body: result.body };
         },
       });
@@ -762,6 +818,14 @@ export default definePluginEntry({
         if (!_driver || !_recaller) {
           return { content: [{ type: "text", text: "Graph Memory Pro not connected" }], details: {} };
         }
+        // v2.2.0 fix: judge disabled 时返回明确提示，避免误导用户以为反馈已记录
+        const jm = _recaller.getJudgeManager();
+        if (!jm) {
+          return {
+            content: [{ type: "text", text: "Feedback skipped: judge is disabled. Set judge.enabled=true in config to enable." }],
+            details: { submitted: false },
+          };
+        }
         try {
           // 加载召回的节点（用于裁判判断）
           const { findById } = await import("./src/store/store.ts");
@@ -778,7 +842,6 @@ export default definePluginEntry({
             params.sessionId,
           );
 
-          const jm = _recaller.getJudgeManager();
           const text = [
             "✅ Feedback submitted",
             `Recalled: ${recalledNodes.length} nodes`,
@@ -807,7 +870,7 @@ export default definePluginEntry({
         buildGraph: Type.Optional(Type.Boolean({ description: "Build graph from conversation history before evaluation (default true)" })),
       }),
       async execute(_callId: string, params: any) {
-        if (!_recaller || !_cfg) {
+        if (!_driver || !_recaller || !_cfg) {
           return { content: [{ type: "text", text: "Graph Memory Pro not connected" }], details: {} };
         }
         try {
@@ -839,7 +902,7 @@ export default definePluginEntry({
         rounds: Type.Optional(Type.Number({ description: "Number of tune cycles to run (default 1, max bounded by config maxRounds)" })),
       }),
       async execute(_callId: string, params: any) {
-        if (!_recaller || !_cfg) {
+        if (!_driver || !_recaller || !_cfg) {
           return { content: [{ type: "text", text: "Graph Memory Pro not connected" }], details: {} };
         }
         if (_cfg.autoTuner?.enabled !== true) {
@@ -856,12 +919,22 @@ export default definePluginEntry({
             ".openclaw", "graph-memory-pro", "auto-tuner-state.json",
           );
           const tuner = new AutoTuner(_cfg.autoTuner, _llm ?? undefined);
-          tuner.setInitialAction(_cfg);
-          // 尝试从持久化文件恢复状态
+          // v2.2.0 fix: 先尝试从持久化文件恢复，无状态文件时才用 setInitialAction
+          // 避免 setInitialAction 被 deserialize 覆盖，同时保证首次运行有合理初始值
+          let hasSavedState = false;
           try {
             const saved = await readFile(statePath, "utf-8");
-            if (saved.trim()) tuner.deserialize(saved);
+            if (saved.trim()) {
+              tuner.deserialize(saved);
+              hasSavedState = true;
+            }
           } catch { /* 首次运行无状态文件 */ }
+          if (!hasSavedState) {
+            tuner.setInitialAction(_cfg);
+          }
+
+          const { dirname } = await import("node:path");
+          await mkdir(dirname(statePath), { recursive: true });
 
           const rounds = Math.max(1, Math.min(params.rounds ?? 1, _cfg.autoTuner?.maxRounds ?? 10));
           const results: any[] = [];
@@ -869,14 +942,15 @@ export default definePluginEntry({
             const r = await tuner.runTuneCycle(_recaller, _driver, _cfg);
             results.push(r);
             if (!r.applied) break;
+            // v2.2.0 fix: 每轮持久化，避免异常路径丢失已完成轮次的状态
+            try {
+              await writeFile(statePath, tuner.serialize());
+            } catch (err) {
+              console.warn(`[graph-memory-pro] auto-tuner state persist (round ${i + 1}) failed: ${err}`);
+            }
           }
-          // 持久化最新状态
+          // 最终持久化
           try {
-            // v2.2.0 fix: 旧实现 join(statePath, "..").replace(/\/[^/]+$/, "") 会误删一级目录
-            // 实际创建的是祖父目录而非父目录，导致 writeFile 因父目录不存在而 ENOENT
-            // 改用 dirname 直接获取父目录
-            const { dirname } = await import("node:path");
-            await mkdir(dirname(statePath), { recursive: true });
             await writeFile(statePath, tuner.serialize());
           } catch (err) {
             console.warn(`[graph-memory-pro] auto-tuner state persist failed: ${err}`);
