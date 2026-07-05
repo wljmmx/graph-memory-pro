@@ -12,10 +12,6 @@ export interface LlmConfig {
   apiKey?: string;
   baseURL?: string;
   model?: string;
-  /** Ollama keep_alive 参数（如 "5m"/"1h"/"-1" 永久驻留），仅 Ollama 原生 API 生效 */
-  keepAlive?: string;
-  /** Ollama options 字段（覆盖默认 temperature/num_predict 等） */
-  options?: Record<string, number | boolean | string>;
 }
 
 export interface EmbeddingConfig {
@@ -255,21 +251,19 @@ export interface GmConfig {
     warmupFeedbacks?: number;
   };
 
-  // ── v2.2.0 MCP Server 对外暴露 ────────────
-
-  /** MCP Server 配置（默认关闭，启用后通过 Streamable HTTP 对外暴露工具） */
+  /** MCP Server 配置（v2.2.0 新增，对外暴露 13 个 tools） */
   mcp?: {
     /** 是否启用 MCP server（默认 false） */
     enabled?: boolean;
     /** 监听端口（默认 7800） */
     port?: number;
-    /** 监听地址（默认 127.0.0.1，仅本机；设为 0.0.0.0 对外开放） */
+    /** 监听地址（默认 127.0.0.1，对外暴露设为 0.0.0.0） */
     host?: string;
-    /** 路径（默认 /mcp） */
+    /** HTTP 路径（默认 /mcp） */
     path?: string;
-    /** 鉴权 Bearer Token（设置后客户端需在 Authorization 头中携带） */
+    /** Bearer Token 鉴权（为空则不鉴权） */
     authToken?: string;
-    /** 启用的工具集（默认全部启用） */
+    /** 启用的工具列表（省略则全部启用） */
     enabledTools?: string[];
   };
 }
@@ -286,12 +280,6 @@ export type EdgeType =
   // S-5 因果关系（v2.1.2 新增）
   | "CAUSED_BY"   // EVENT → EVENT：A 事件直接导致 B 事件
   | "LEADS_TO";   // TASK → EVENT：任务执行产生了某事件
-
-/** 运行时边类型白名单（防御 LLM 提取产生非预期类型） */
-export const VALID_EDGE_TYPES: ReadonlySet<string> = new Set([
-  "USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES",
-  "CONFLICTS_WITH", "RELATES_TO", "CAUSED_BY", "LEADS_TO",
-]);
 
 export type NodeStatus = "active" | "deprecated" | "merged";
 
@@ -416,8 +404,6 @@ export interface ExtractNode {
   name: string;
   description: string;
   content: string;
-  /** S-3 来源标记：自动提取默认 experience，外部文档导入为 knowledge，手工录入为 imported */
-  source?: NodeSource;
 }
 
 export interface ExtractEdge {

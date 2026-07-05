@@ -242,8 +242,7 @@ export class AssociationMatrix {
 
     // Hebbian 梯度：reward · vec[j] · out[i]
     // 沿 query 方向增强 → outer(queryVec, out) * reward
-    // H-8: 不在此处乘 learningRate（η 由 applyUpdate 中的 Adam 步统一缩放，避免 η² 双重缩放）
-    const scale = reward;
+    const scale = this.cfg.learningRate * reward;
     for (let i = 0; i < N; i++) {
       const rowOffset = i * N;
       const outI = out[i];

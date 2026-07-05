@@ -60,8 +60,8 @@ graph-memory-pro 是**记忆底层引擎**，只做"图内"操作：
   - 8 参数动作空间 + LLM 诊断 + 启发式 fallback
 
 ### 测试覆盖
-- 9 个测试文件，230 个用例（Neo4j mock 基础设施，CI 友好）
-- 覆盖全部 5 批次核心功能：指标计算 / AutoTuner / 关联矩阵 / 裁判闭环 / 维护阶段 / 软替换 / 缓存 / 社区 / 类型配置
+- 12 个测试文件，298 个用例（Neo4j mock 基础设施，CI 友好）
+- 覆盖全部 5 批次核心功能：指标计算 / AutoTuner / 关联矩阵 / 裁判闭环 / 维护阶段 / 软替换 / 缓存 / 社区 / 类型配置 / HTTP API 路由 / LLM-Embedding 引擎 / 三元组抽取
 
 ## 版本
 
@@ -75,7 +75,7 @@ npm install @openclaw/graph-memory-pro
 
 ## 配置
 
-在 `openclaw.json` 中配置（31 项配置项，全部可选）：
+在 `openclaw.json` 中配置（32 项配置项，全部可选）：
 
 ```json
 {
@@ -112,7 +112,7 @@ npm install @openclaw/graph-memory-pro
 }
 ```
 
-完整配置项参见 [openclaw.plugin.json](openclaw.plugin.json) 的 `configSchema`（31 项）。
+完整配置项参见 [openclaw.plugin.json](openclaw.plugin.json) 的 `configSchema`（32 项，含 v2.2.0 MCP）。
 
 ## Agent 工具
 
@@ -214,6 +214,27 @@ const { result } = await res.json();
 | GET | `/api/nodes-by-type/:type` | 按类型获取节点 |
 | POST | `/api/maintain` | 触发维护 |
 | POST | `/api/staleness/refresh` | S-14 手动刷新过时评分（v2.1.2） |
+| GET | `/api/metrics` | Prometheus 指标导出（v2.2.0） |
+| GET | `/api/auto-tuner/state` | AutoTuner 调优状态（v2.2.0） |
+| GET | `/api/association-matrix/state` | 关联矩阵 M 状态（v2.2.0） |
+
+### Prometheus 指标
+
+`/api/metrics` 输出 Prometheus text exposition format，可直接被 Prometheus / Grafana 抓取：
+
+```
+# HELP graph_memory_nodes_total Total nodes in the graph.
+# TYPE graph_memory_nodes_total gauge
+graph_memory_nodes_total{plugin="graph-memory-pro",version="2.2.0"} 5
+# HELP graph_memory_cache_hit_rate Query cache hit rate [0,1].
+# TYPE graph_memory_cache_hit_rate gauge
+graph_memory_cache_hit_rate{plugin="graph-memory-pro",version="2.2.0"} 0.123
+# HELP graph_memory_association_matrix_updates_applied Total accepted M updates.
+# TYPE graph_memory_association_matrix_updates_applied gauge
+graph_memory_association_matrix_updates_applied{plugin="graph-memory-pro",version="2.2.0"} 42
+```
+
+覆盖指标：`graph_memory_up` / `nodes_total` / `edges_total` / `feedback_total` / `cache_size` / `cache_hit_rate` / `judge_cold_start` / `association_matrix_t` / `association_matrix_updates_applied` / `association_matrix_updates_rejected`。
 
 ## 知识图谱结构
 
@@ -253,11 +274,47 @@ const { result } = await res.json();
 ## 开发
 
 ```bash
-npm install      # 安装依赖
-npm run build    # 构建（tsup）
-npm test         # 运行测试（vitest）
-npx tsc --noEmit # 类型检查
+npm install          # 安装依赖
+npm run build        # 构建（tsup）
+npm test            # 运行测试（vitest）
+npx tsc --noEmit     # 类型检查
+npm run benchmark    # 运行 S-10 Benchmark 评测（需 Neo4j + LLM 配置）
+npm run lint         # ESLint
 ```
+
+### Benchmark 评测
+
+```bash
+# 1. 启动 Neo4j（推荐 docker-compose）
+docker-compose up -d neo4j
+
+# 2. 通过配置文件运行
+npm run benchmark -- --config=./config.example.json --max-cases=10
+
+# 3. 或通过环境变量
+GM_NEO4J_URI=bolt://localhost:7687 \
+GM_NEO4J_USER=neo4j \
+GM_NEO4J_PASSWORD=testpass \
+GM_LLM_API_KEY=sk-xxx \
+GM_LLM_MODEL=gpt-4o-mini \
+GM_EMBED_BASE_URL=http://localhost:11434 \
+GM_EMBED_MODEL=nomic-embed-text \
+npm run benchmark -- --max-cases=10 --no-build-graph
+```
+
+### Docker
+
+```bash
+# 启动 Neo4j + 插件开发环境
+docker-compose up -d neo4j
+
+# 构建镜像（含本插件）
+docker build -t graph-memory-pro:dev .
+```
+
+### CI
+
+GitHub Actions 工作流定义在 `.github/workflows/ci.yml`，覆盖 Node 20/22，执行 `tsc --noEmit` / `npm run build` / `npm test`。
 
 ## 项目结构
 
@@ -287,16 +344,17 @@ src/
 ├── benchmark/
 │   ├── types.ts          # S-10 指标计算
 │   ├── datasets.ts       # S-10 LoCoMo/LongMemEval 适配器
-│   └── runner.ts        # S-10 评测运行器
+│   ├── runner.ts         # S-10 评测运行器
+│   └── cli.ts            # S-10 Benchmark CLI 入口（v2.2.0）
 ├── routes/
-│   └── crud.ts           # HTTP 路由（含 /api/health, /api/staleness/refresh）
+│   └── crud.ts           # HTTP 路由（含 /api/metrics, /api/auto-tuner/state 等 v2.2.0 端点）
 ├── mcp/
 │   └── server.ts         # MCP Server（Streamable HTTP，13 个 tools）
 ├── store/
 │   ├── db.ts             # Neo4j 连接管理
-│   └── store.ts         # 数据操作层（含 R-4 可进化嵌入）
+│   └── store.ts          # 数据操作层（含 R-4 可进化嵌入）
 ├── timing.ts             # 延迟分布统计
-└── types.ts              # 类型定义（GmConfig 31 项 + GmNode 完整字段）
+└── types.ts              # 类型定义（GmConfig 32 项 + GmNode 完整字段 + McpConfig）
 test/
 ├── helpers/
 │   └── neo4j-mock.ts     # Neo4j mock 测试基础设施
@@ -308,12 +366,15 @@ test/
 ├── store-softreplace-r4.test.ts
 ├── query-cache.test.ts
 ├── community.test.ts
-└── types-config.test.ts
+├── types-config.test.ts
+├── crud-routes.test.ts          # HTTP API 路由测试（v2.2.0）
+├── engine-llm-embed.test.ts     # LLM/Embedding 引擎测试（v2.2.0）
+└── extract.test.ts              # 三元组抽取测试（v2.2.0）
 ```
 
 ## 路线图
 
-详见 [ROADMAP.md](ROADMAP.md) — v2.1.10 路线图（17 任务，5 批次，已全部落地）。
+详见 [ROADMAP.md](ROADMAP.md) — v2.1.10 路线图（22 项方案，5 批次，已全部落地，发布为 v2.2.0）。
 
 ## 许可证
 

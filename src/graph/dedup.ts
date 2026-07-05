@@ -90,7 +90,7 @@ export async function dedup(driver: Driver, cfg: GmConfig): Promise<DedupResult>
       mergeId = keepId === a.id ? b.id : a.id;
     }
 
-    await mergeNodes(driver, keepId, mergeId, cfg);
+    await mergeNodes(driver, keepId, mergeId);
     consumed.add(mergeId);
     merged++;
   }

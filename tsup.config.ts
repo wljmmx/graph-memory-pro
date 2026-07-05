@@ -7,5 +7,5 @@ export default defineConfig({
   sourcemap: true,
   clean: true,
   target: "es2022",
-  external: [/^node:/, "openclaw", "neo4j-driver", "@modelcontextprotocol/sdk"],
+  external: [/^node:/, "openclaw", "neo4j-driver", "@modelcontextprotocol/sdk", "zod"],
 });

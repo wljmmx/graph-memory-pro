@@ -7,7 +7,6 @@
 
 import type { CompleteFn } from "../engine/llm.ts";
 import type { ExtractNode, ExtractResult, ExtractEdge } from "../types.ts";
-import { VALID_EDGE_TYPES } from "../types.ts";
 import type { Driver } from "neo4j-driver";
 
 const EXTRACT_SYSTEM_PROMPT = `你是知识图谱三元组提取专家。
@@ -86,14 +85,11 @@ function parseExtractResult(raw: string): ExtractResult {
       edges: Array.isArray(parsed.edges) ? parsed.edges.filter(isValidEdge).slice(0, 8) : [],
     };
   } catch {
-    // 用首尾大括号截取完整 JSON 子串（避免非贪婪匹配在嵌套对象内部提前停止）
-    const firstBrace = cleaned.indexOf("{");
-    const lastBrace = cleaned.lastIndexOf("}");
-    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    // 非贪婪匹配，避免匹配过多内容
+    const match = cleaned.match(/\{[\s\S]*?"nodes"[\s\S]*?\}/);
+    if (match) {
       try {
-        const jsonStr = cleaned.slice(firstBrace, lastBrace + 1);
-        const parsed = JSON.parse(jsonStr);
-        if (!parsed || typeof parsed !== "object") return FALLBACK;
+        const parsed = JSON.parse(match[0]);
         return {
           nodes: Array.isArray(parsed.nodes) ? parsed.nodes.filter(isValidNode).slice(0, 5) : [],
           edges: Array.isArray(parsed.edges) ? parsed.edges.filter(isValidEdge).slice(0, 8) : [],
@@ -120,8 +116,6 @@ function isValidNode(node: any): boolean {
 function isValidEdge(edge: any): boolean {
   if (!edge || typeof edge !== "object") return false;
   if (typeof edge.type !== "string" || !edge.type.trim()) return false;
-  // v2.2.0: 防御 LLM 产生非预期边类型
-  if (!VALID_EDGE_TYPES.has(edge.type)) return false;
   if (typeof edge.fromName !== "string" || !edge.fromName.trim()) return false;
   if (typeof edge.toName !== "string" || !edge.toName.trim()) return false;
   return true;

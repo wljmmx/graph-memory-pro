@@ -11,3 +11,8 @@ package-lock.json
 auto-tuner-state.json
 ~/.openclaw/graph-memory-pro/
 
+# v2.2.0 本地配置 / Benchmark 数据
+config.local.json
+benchmarks/data/
+
+

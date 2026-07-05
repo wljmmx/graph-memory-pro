@@ -10,6 +10,7 @@ import {
   searchNodes, vectorSearchWithScore,
   graphWalk, communityRepresentatives,
   communityVectorSearch, nodesByCommunityIds,
+  saveVector, getVectorHash, computeEmbeddingHash,
   upsertFeedback, getFeedbackCount,
 } from "../store/store.ts";
 import { getCommunityPeers } from "../graph/community.ts";
@@ -78,30 +79,26 @@ export class Recaller {
       return cached;
     }
 
-    // 计算 queryEmbedding 一次，复用于 recallPrecise/Generalized 与 queryCache
+    const precise = await this.recallPrecise(query, limit);
+    const generalized = await this.recallGeneralized(query, limit);
+    const merged = this.mergeResults(precise, generalized);
+
+    // v2.1.2 I-1: 缓存写入（若启用 embed 则尝试相似匹配）
     let queryEmbedding: number[] | undefined;
     if (this.embed) {
       try {
         queryEmbedding = await this.embed(query);
+        // 相似匹配：找到相似查询时降权返回
+        const similar = this.queryCache.getSimilar(queryEmbedding);
+        if (similar) {
+          logPhase("recall_cache_similar_hit", 0, {
+            similarity: similar.similarity.toFixed(3),
+          });
+          // 这里不直接返回相似结果，因为已经做了完整召回
+          // 相似命中仅作为统计，下次相同 query 时直接命中精确缓存
+        }
       } catch {
-        // embed 失败不影响主流程，recallPrecise/Generalized 内部仍会尝试 this.embed
-      }
-    }
-
-    const precise = await this.recallPrecise(query, limit, queryEmbedding);
-    const generalized = await this.recallGeneralized(query, limit, queryEmbedding);
-    const merged = this.mergeResults(precise, generalized);
-
-    // v2.1.2 I-1: 缓存写入（若启用 embed 则尝试相似匹配）
-    if (queryEmbedding) {
-      // 相似匹配：找到相似查询时降权返回
-      const similar = this.queryCache.getSimilar(queryEmbedding);
-      if (similar) {
-        logPhase("recall_cache_similar_hit", 0, {
-          similarity: similar.similarity.toFixed(3),
-        });
-        // 这里不直接返回相似结果，因为已经做了完整召回
-        // 相似命中仅作为统计，下次相同 query 时直接命中精确缓存
+        // embed 失败不影响主流程
       }
     }
     this.queryCache.put(query, merged, queryEmbedding);
@@ -222,7 +219,7 @@ export class Recaller {
     }
   }
 
-  private async recallPrecise(query: string, limit: number, queryEmbedding?: number[]): Promise<RecallResult> {
+  private async recallPrecise(query: string, limit: number): Promise<RecallResult> {
     const tPrecise = Date.now();
 
     const tFts = Date.now();
@@ -233,7 +230,7 @@ export class Recaller {
     if (this.embed) {
       try {
         const tEmbed = Date.now();
-        const vec = queryEmbedding ?? await this.embed(query);
+        const vec = await this.embed(query);
         logPhase("vec_embed", Date.now() - tEmbed, { dims: vec.length });
 
         if (vec.length) {
@@ -308,14 +305,14 @@ export class Recaller {
     return { nodes: finalNodes, edges, tokenEstimate: finalNodes.length * 50 + edges.length * 20 };
   }
 
-  private async recallGeneralized(query: string, limit: number, queryEmbedding?: number[]): Promise<RecallResult> {
+  private async recallGeneralized(query: string, limit: number): Promise<RecallResult> {
     if (!this.embed) return { nodes: [], edges: [], tokenEstimate: 0 };
 
     const tGen = Date.now();
 
     try {
       const tEmbed = Date.now();
-      const vec = queryEmbedding ?? await this.embed(query);
+      const vec = await this.embed(query);
       logPhase("vec_embed", Date.now() - tEmbed, { context: "generalized" });
       if (!vec.length) return { nodes: [], edges: [], tokenEstimate: 0 };
 
@@ -349,23 +346,8 @@ export class Recaller {
       scored.sort((a, b) => b.score - a.score);
 
       const finalNodes = scored.slice(0, limit).map(s => s.node);
-
-      // M-8: 用 finalNodes 的 id 列表调用 graphWalk 获取关联边，
-      // 只保留两端都在 finalNodes 中的边。finalNodes 为空则返回空 edges。
-      let edges: GmEdge[] = [];
-      if (finalNodes.length) {
-        const finalIds = finalNodes.map(n => n.id);
-        const finalIdSet = new Set(finalIds);
-        const tGw = Date.now();
-        const walked = await graphWalk(this.driver, finalIds, this.cfg.recallMaxDepth);
-        logPhase("graph_walk", Date.now() - tGw, { nodes: walked.nodes.length, edges: walked.edges.length, context: "generalized" });
-        edges = walked.edges.filter(e =>
-          finalIdSet.has(e.fromId) && finalIdSet.has(e.toId)
-        );
-      }
-
       logPhase("recall_generalized", Date.now() - tGen, { finalNodes: finalNodes.length });
-      return { nodes: finalNodes, edges, tokenEstimate: finalNodes.length * 30 + edges.length * 20 };
+      return { nodes: finalNodes, edges: [], tokenEstimate: finalNodes.length * 30 };
     } catch (e) {
       if (process.env.GM_DEBUG) console.log("[recall-generalized] failed: " + e);
       return { nodes: [], edges: [], tokenEstimate: 0 };
@@ -400,7 +382,6 @@ export class Recaller {
     //   - 高过时节点（stalenessScore > threshold）排到末尾
     //   - 同 staleness 等级按 score × importanceScore × (1 - stalenessScore) 降序
     //   - 旧版本（无 importanceScore）回退到 pagerank
-    // v2.2.0 fix: 两节点均为新节点时（importanceScore=0），增加 validatedCount + updatedAt 二级排序
     const stalenessThreshold = this.cfg?.staleness?.threshold ?? 0.7;
     nodes.sort((x, y) => {
       const sx = x.stalenessScore ?? 0;
@@ -414,16 +395,33 @@ export class Recaller {
       const iy = y.importanceScore ?? 0;
       const wx = ix * (1 - sx);
       const wy = iy * (1 - sy);
-      // 优先 importance 加权；若均无 importanceScore → 回退 pagerank + validatedCount
-      if (wx === 0 && wy === 0) {
-        return (y.validatedCount - x.validatedCount) || (y.pagerank - x.pagerank) || (y.updatedAt - x.updatedAt);
-      }
+      // 优先 importance 加权；若均无 importanceScore → 回退 pagerank
+      if (wx === 0 && wy === 0) return y.pagerank - x.pagerank;
       return wy - wx;
     });
 
     logPhase("merge_results", Date.now() - tMerge, { nodes: nodes.length, edges: edges.size });
 
     return { nodes, edges: Array.from(edges.values()), tokenEstimate: nodes.length * 40 + edges.size * 15 };
+  }
+
+  async syncEmbed(node: GmNode): Promise<void> {
+    if (!this.embed) return;
+    // v2.2.0 fix: 使用统一的 computeEmbeddingHash 格式 (md5(name|desc|content))
+    // 之前单独用 md5(text) 与 upsertNode/reEmbedNodes 不一致，导致 R-4 误触发
+    const hash = computeEmbeddingHash(node.name, node.description, node.content);
+    const existingHash = await getVectorHash(this.driver, node.id);
+    if (existingHash === hash) return;
+    // 跳过已有 embedding 且 hash 匹配的节点，避免冗余查询
+    if (node.embedding && Array.isArray(node.embedding) && node.embedding.length > 0 && existingHash === hash) return;
+    try {
+      const tSync = Date.now();
+      // 嵌入文本使用截断格式（与 reEmbedNodes 一致），但 hash 使用全量格式
+      const text = node.name + ": " + node.description + "\n" + node.content.slice(0, 500);
+      const vec = await this.embed(text);
+      logPhase("vec_embed", Date.now() - tSync, { context: "syncEmbed" });
+      if (vec.length) await saveVector(this.driver, node.id, vec, hash, node.embeddingModel);
+    } catch {}
   }
 }
 

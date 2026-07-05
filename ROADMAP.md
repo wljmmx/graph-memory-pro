@@ -1,9 +1,20 @@
 # Graph Memory Pro 演进路线图
 
-> 版本：2.1.10
+> 规划版本：2.1.10 ｜ 已发布版本：2.2.0
 > 模块定位：**记忆底层引擎**——图内操作（提取/存储/检索/去重/维护/质量优化/自主进化）
 > 上层编排（上下文管理、prompt组装、Agent工作流、用户界面）由 **lcm-graph-extra** 负责
 > 基于 15 篇文献/项目横评，聚焦 T1 引擎核心 + T2 质量保障，不入编排层
+>
+> **发布说明**：v2.1.10 路线图 22 项方案已全部落地，发布为 v2.2.0。
+>
+> **v2.2.0 工程化补强**（路线图之外的对外接口/可观测性/工程化）：
+> - MCP Server（13 tools，Streamable HTTP，Bearer Token 鉴权）
+> - `/api/metrics`（Prometheus text exposition format，10+ 指标）
+> - `/api/auto-tuner/state` + `/api/association-matrix/state`（状态查询入口）
+> - `npm run benchmark` CLI + `config.example.json` 配置示例
+> - 单元测试补全（HTTP API / LLM-Embedding / 抽取器，230 → 298 用例）
+> - Dockerfile + docker-compose + GitHub Actions CI
+> - CHANGELOG.md（含配置迁移指南）
 
 ---
 

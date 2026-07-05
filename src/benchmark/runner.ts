@@ -118,7 +118,7 @@ export async function runBenchmark(
   if (buildGraph && driver && llm) {
     const extractor = new Extractor(driver);
     for (const dataset of targetDatasets) {
-      for (const testCase of (maxCases > 0 ? dataset.cases.slice(0, maxCases) : dataset.cases)) {
+      for (const testCase of dataset.cases) {
         if (!testCase.conversation) continue;
         await buildGraphFromConversation(extractor, driver, llm, testCase, embedFn);
       }
@@ -269,15 +269,12 @@ async function buildGraphFromConversation(
  * 带超时的 Promise
  */
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`timeout after ${timeoutMs}ms`)), timeoutMs);
-  });
-  try {
-    return await Promise.race([promise, timeoutPromise]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`timeout after ${timeoutMs}ms`)), timeoutMs),
+    ),
+  ]);
 }
 
 /**

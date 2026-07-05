@@ -1,0 +1,116 @@
+{
+  "$schema": "Graph Memory Pro v2.2.0 配置示例",
+  "$comment": "复制为 config.json 后通过 --config 参数传给 npm run benchmark，或填入 openclaw.json plugins.entries.graph-memory-pro.config",
+  "neo4j": {
+    "uri": "bolt://localhost:7687",
+    "user": "neo4j",
+    "password": "your-password"
+  },
+  "llm": {
+    "apiKey": "sk-xxx",
+    "baseURL": "https://api.openai.com/v1",
+    "model": "gpt-4o-mini"
+  },
+  "embedding": {
+    "apiKey": "",
+    "baseURL": "http://localhost:11434",
+    "model": "nomic-embed-text",
+    "dimensions": 768,
+    "keepAlive": "5m"
+  },
+  "recallMaxNodes": 6,
+  "recallMaxDepth": 2,
+  "freshTailCount": 10,
+  "dedupThreshold": 0.9,
+  "pagerankDamping": 0.85,
+  "pagerankIterations": 20,
+  "compactTurnCount": 6,
+  "timing": { "enabled": false, "reportEveryN": 50 },
+  "background": {
+    "extractorIntervalMs": 60000,
+    "maintenanceIntervalMs": 21600000
+  },
+  "temporal": { "enabled": true, "defaultSource": "experience" },
+  "state": { "enabled": true, "filterSupersededInRecall": false },
+  "staleness": { "enabled": true, "threshold": 0.7, "mode": "heuristic" },
+  "causalEdges": { "enabled": true, "extract": true },
+  "graphHealth": { "enabled": true, "alertOnAnomaly": true },
+  "queryCache": {
+    "enabled": true,
+    "maxSize": 100,
+    "ttlMs": 1800000,
+    "similarityThreshold": 0.95
+  },
+  "judge": {
+    "enabled": true,
+    "asyncMode": true,
+    "judgeWarmupFeedbacks": 50,
+    "heuristicMatch": "both"
+  },
+  "feedback": { "enabled": true, "retentionDays": 90 },
+  "warmup": { "warmupFeedbacks": 100, "judgeWarmupFeedbacks": 50 },
+  "associationMatrix": {
+    "enabled": false,
+    "learningRate": 0.01,
+    "momentum": 0.9,
+    "adamBeta1": 0.9,
+    "adamBeta2": 0.999,
+    "warmupFeedbacks": 100
+  },
+  "marginalUtility": { "enabled": true, "neighborhoodSize": 5, "minImprovement": 0.0 },
+  "evolvableEmbedding": {
+    "enabled": true,
+    "reembedOnContentChange": true,
+    "archiveKeepCount": 3
+  },
+  "importance": {
+    "enabled": true,
+    "weights": { "recency": 0.3, "frequency": 0.3, "centrality": 0.2, "source": 0.2 },
+    "recencyDecayDays": 30,
+    "frequencySaturation": 10
+  },
+  "hierarchicalCommunity": { "enabled": true, "depth": 3 },
+  "conflictResolution": {
+    "enabled": true,
+    "temporalPriority": true,
+    "sourcePriority": true,
+    "confidencePriority": true
+  },
+  "edgeWeights": {
+    "enabled": true,
+    "strengthenFactor": 1.1,
+    "decayFactor": 0.95,
+    "minWeight": 0.1,
+    "maxWeight": 5.0
+  },
+  "reverseMemory": {
+    "enabled": true,
+    "recallThreshold": 10,
+    "stalenessPenalty": 0.1,
+    "importanceFloor": 0.2
+  },
+  "benchmark": {
+    "enabled": false,
+    "dataDir": "",
+    "maxCases": 50,
+    "buildGraph": true,
+    "caseTimeoutMs": 30000
+  },
+  "autoTuner": {
+    "enabled": false,
+    "regressionThreshold": 0.02,
+    "stagnationThreshold": 5,
+    "maxRounds": 10,
+    "benchmarkMaxCases": 50,
+    "llmDiagnosis": true,
+    "warmupFeedbacks": 100
+  },
+  "mcp": {
+    "enabled": false,
+    "port": 7800,
+    "host": "127.0.0.1",
+    "path": "/mcp",
+    "authToken": "",
+    "enabledTools": []
+  }
+}

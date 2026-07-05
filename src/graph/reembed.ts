@@ -1,6 +1,6 @@
 import type { Driver } from "neo4j-driver";
 import type { EmbedFn } from "../engine/embed.ts";
-import { computeEmbeddingHash, saveVector } from "../store/store.ts";
+import { computeEmbeddingHash } from "../store/store.ts";
 
 export interface ReEmbedResult {
   totalScanned: number;
@@ -26,7 +26,6 @@ export async function reEmbedNodes(
   let failed = 0;
   let skipped = 0;
   let consecutiveFailures = 0;
-  let batchSuccess = 0;
   const MAX_CONSECUTIVE_FAILURES = 5;
 
   while (true) {
@@ -37,15 +36,15 @@ export async function reEmbedNodes(
           "MATCH (n:Task|Skill|Event)" +
           " WHERE n.status = 'active' AND (n.embedding IS NULL OR size(n.embedding) = 0)" +
           " RETURN n.id AS id, labels(n)[0] AS label, n.name, n.description, n.content" +
-          " ORDER BY n.id LIMIT $limit",
-          { limit: batchSize },
+          " ORDER BY n.id SKIP $skip LIMIT $limit",
+          { skip: totalScanned, limit: batchSize },
         );
 
         const nodes = result.records;
         if (nodes.length === 0) break;
 
-        // v2.2.0 fix D-4: 每轮重置本批成功嵌入计数
-        batchSuccess = 0;
+        // Reset failure counter on successful query
+        consecutiveFailures = 0;
 
         for (const rec of nodes) {
           try {
@@ -64,27 +63,24 @@ export async function reEmbedNodes(
 
             const vec = await embedFn(text);
             if (vec && vec.length > 0) {
-              await saveVector(driver, nodeId, vec, computeEmbeddingHash(name, desc, content), embeddingModel);
+              // v2.2.0 fix: embeddingHash 统一使用 computeEmbeddingHash (md5(name|desc|content))
+              await session.run(
+                "MATCH (n:Task|Skill|Event {id: $nodeId})" +
+                " SET n.embedding = $vec, n.embeddingHash = $hash, n.embeddingModel = $model",
+                {
+                  nodeId,
+                  vec,
+                  hash: computeEmbeddingHash(name, desc, content),
+                  model: embeddingModel ?? null,
+                },
+              );
               reEmbedded++;
-              batchSuccess++;
             } else {
               skipped++;
             }
           } catch (err) {
             failed++;
           }
-        }
-
-        // v2.2.0 fix D-4: 本轮查到节点但零成功嵌入 → 节点无法被嵌入，
-        // 连续 MAX_CONSECUTIVE_FAILURES 轮零成功即中止，避免无限循环
-        if (batchSuccess === 0) {
-          consecutiveFailures++;
-          if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-            console.warn(`[graph-memory-pro] reEmbed: ${MAX_CONSECUTIVE_FAILURES} consecutive zero-success batches, aborting`);
-            break;
-          }
-        } else {
-          consecutiveFailures = 0;
         }
 
         totalScanned += nodes.length;

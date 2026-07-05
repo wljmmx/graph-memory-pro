@@ -1,6 +1,6 @@
 {
   "name": "@openclaw/graph-memory-pro",
-  "version": "2.1.2",
+  "version": "2.2.0",
   "description": "Neo4j Knowledge Graph Memory Engine for OpenClaw — GDS PageRank, community detection, vector index",
   "type": "module",
   "main": "./dist/index.js",
@@ -17,12 +17,14 @@
     "dev": "tsup index.ts --format esm --watch",
     "test": "vitest run",
     "lint": "eslint src/",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "benchmark": "tsx src/benchmark/cli.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "neo4j-driver": "^6.0.1",
-    "typebox": "^1.1.39"
+    "typebox": "^1.1.39",
+    "zod": "^3.24.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

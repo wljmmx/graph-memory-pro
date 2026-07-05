@@ -1,0 +1,36 @@
+# Graph Memory Pro — 本地开发编排
+#
+# 用途：一键启动 Neo4j + 插件开发环境。
+#
+# 启动：
+#   docker-compose up -d neo4j
+#   # 等待 Neo4j 就绪后
+#   GM_NEO4J_PASSWORD=testpass npm test
+#   GM_NEO4J_PASSWORD=testpass npm run benchmark -- --max-cases=10
+#
+# 说明：本插件作为 OpenClaw 宿主 plugin 运行，因此 compose 仅编排 Neo4j。
+# 插件本体在宿主进程内运行，无需独立容器。
+
+services:
+  neo4j:
+    image: neo4j:5.20-community
+    container_name: graph-memory-neo4j
+    ports:
+      - "7687:7687"   # Bolt
+      - "7474:7474"   # Browser
+    environment:
+      - NEO4J_AUTH=neo4j/testpass
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_server_memory_heap_max__size=1G
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  neo4j-data:
+  neo4j-logs:
