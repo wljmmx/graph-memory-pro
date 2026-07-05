@@ -24,7 +24,7 @@ import type { Driver } from "neo4j-driver";
 import type { GmConfig, GmNode, GmEdge } from "./src/types.ts";
 import type { CompleteFn } from "./src/engine/llm.ts";
 import type { EmbedFn } from "./src/engine/embed.ts";
-import { createCompleteFn } from "./src/engine/llm.ts";
+import { createCompleteFn, createRuntimeCompleteFn } from "./src/engine/llm.ts";
 import { createEmbedFn } from "./src/engine/embed.ts";
 import { initDriver, closeDriver, verifyWithRetry, getDriver } from "./src/store/db.ts";
 import { ensureSchema, getNodeCount, getEdgeCount, searchNodes, getEdgesForNodes, upsertNode, upsertEdge, findById } from "./src/store/store.ts";
@@ -393,7 +393,22 @@ export default definePluginEntry({
       }
 
       // 3. 初始化 LLM / Embedding
-      _llm = createCompleteFn(_cfg.llm);
+      //
+      // 主会话本地模型优先策略（v2.2.1）：
+      // - 若 SDK 提供 api.runtime.llm，则用主会话模型 provider 探测：
+      //   * 本地模型（ollama/lmstudio/localai 等）→ 后续走主会话 runtime LLM
+      //   * 云端模型 → 切换到插件配置的 llm（fallback）
+      // - 否则回退到原有 createCompleteFn(_cfg.llm) 路径
+      const runtimeLlm = api.runtime?.llm;
+      if (runtimeLlm && typeof runtimeLlm.complete === "function") {
+        _llm = createRuntimeCompleteFn(runtimeLlm, _cfg.llm, logger);
+        logger?.info?.("[graph-memory-pro] LLM initialized via runtime (provider detection deferred to first call)");
+      } else {
+        _llm = createCompleteFn(_cfg.llm);
+        if (_llm) {
+          logger?.info?.("[graph-memory-pro] LLM initialized via plugin config (api.runtime.llm unavailable)");
+        }
+      }
       _embed = _cfg.embedding ? createEmbedFn(_cfg.embedding) : null;
 
       // 4. 初始化 Recaller / Extractor

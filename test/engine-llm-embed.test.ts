@@ -17,7 +17,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createCompleteFn } from "../src/engine/llm.ts";
+import { createCompleteFn, createRuntimeCompleteFn, __test__ } from "../src/engine/llm.ts";
 import { createEmbedFn } from "../src/engine/embed.ts";
 
 /** 构造一个最小可用的 mock Response（避免依赖真实 Response 构造器） */
@@ -269,6 +269,358 @@ describe("createCompleteFn", () => {
     await complete("s", "u");
     const [url] = fetchSpy.mock.calls[0];
     expect(url).toBe("https://api.openai.com/v1/chat/completions");
+  });
+});
+
+// ────────────────────────────────────────────────────────────
+// 主会话本地模型优先策略（createRuntimeCompleteFn）
+// ────────────────────────────────────────────────────────────
+
+describe("createRuntimeCompleteFn", () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.spyOn(globalThis, "fetch");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  /** 构造一个 mock runtime LLM，complete 由调用方提供实现 */
+  function mockRuntimeLlm(impl: (params: any) => Promise<any>) {
+    return { complete: vi.fn(impl) };
+  }
+
+  it("provider 为 ollama 时，后续调用继续走 runtime LLM（不触发 fallback）", async () => {
+    const runtimeLlm = mockRuntimeLlm(async (params) => {
+      // 第一次调用是 probe（content: "ping"，maxTokens: 8）
+      // 后续是真实任务调用
+      const isProbe = params.messages?.[0]?.content === "ping";
+      return {
+        text: isProbe ? "ok" : "real answer",
+        provider: "ollama",
+        model: "qwen3.5:9b",
+        agentId: "main",
+      };
+    });
+
+    const complete = createRuntimeCompleteFn(
+      runtimeLlm,
+      { model: "gpt-4o-mini", baseURL: "https://api.openai.com/v1" },
+    );
+
+    const r1 = await complete("sys", "usr1");
+    const r2 = await complete("sys", "usr2");
+    expect(r1).toBe("real answer");
+    expect(r2).toBe("real answer");
+    // 2 次调用 + 1 次 probe = 3 次 complete
+    expect(runtimeLlm.complete).toHaveBeenCalledTimes(3);
+    // 没有触发 fetch（fallback 路径）
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("provider 为 ollama-256k（变体）时仍识别为本地模型", async () => {
+    const runtimeLlm = mockRuntimeLlm(async (params) => ({
+      text: "answer",
+      provider: "ollama-256k",
+      model: "qwen3:32k",
+      agentId: "main",
+    }));
+    const complete = createRuntimeCompleteFn(runtimeLlm, {
+      model: "gpt-4o-mini",
+      baseURL: "https://api.openai.com/v1",
+    });
+    const result = await complete("sys", "usr");
+    expect(result).toBe("answer");
+    // runtime 调用 = 1 probe + 1 真实任务
+    expect(runtimeLlm.complete).toHaveBeenCalledTimes(2);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("provider 为 openai（云端）且有 fallback 配置时，切换到 fallback LLM", async () => {
+    const runtimeLlm = mockRuntimeLlm(async (params) => ({
+      text: "probe-ok",
+      provider: "openai",
+      model: "gpt-4o",
+      agentId: "main",
+    }));
+    // fallback fetch mock
+    fetchSpy.mockResolvedValue(
+      mockResponse({ choices: [{ message: { content: "fallback-answer" } }] }),
+    );
+
+    const complete = createRuntimeCompleteFn(runtimeLlm, {
+      model: "gpt-4o-mini",
+      baseURL: "https://api.openai.com/v1",
+      apiKey: "sk-test",
+    });
+
+    const result = await complete("sys", "usr");
+    expect(result).toBe("fallback-answer");
+    // runtime 仅调用 1 次（probe），后续走 fetch
+    expect(runtimeLlm.complete).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("provider 为云端但无 fallback 配置时，继续使用 runtime LLM", async () => {
+    const runtimeLlm = mockRuntimeLlm(async (params) => {
+      const isProbe = params.messages?.[0]?.content === "ping";
+      return {
+        text: isProbe ? "ok" : "runtime-answer",
+        provider: "anthropic",
+        model: "claude-sonnet-4",
+        agentId: "main",
+      };
+    });
+
+    // fallbackConfig 为 undefined
+    const complete = createRuntimeCompleteFn(runtimeLlm, undefined);
+    const result = await complete("sys", "usr");
+    expect(result).toBe("runtime-answer");
+    // 1 probe + 1 真实任务
+    expect(runtimeLlm.complete).toHaveBeenCalledTimes(2);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("probe 失败时降级到 fallback LLM", async () => {
+    const runtimeLlm = mockRuntimeLlm(async () => {
+      throw new Error("runtime unavailable");
+    });
+    fetchSpy.mockResolvedValue(
+      mockResponse({ choices: [{ message: { content: "fallback-after-error" } }] }),
+    );
+
+    const complete = createRuntimeCompleteFn(runtimeLlm, {
+      model: "gpt-4o-mini",
+      baseURL: "https://api.openai.com/v1",
+    });
+
+    const result = await complete("sys", "usr");
+    expect(result).toBe("fallback-after-error");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("probe 失败且无 fallback 时，runtimeComplete 抛出真实错误", async () => {
+    const runtimeLlm = mockRuntimeLlm(async () => {
+      throw new Error("runtime down");
+    });
+    const complete = createRuntimeCompleteFn(runtimeLlm, undefined);
+    await expect(complete("sys", "usr")).rejects.toThrow(/runtime down/);
+  });
+
+  it("并发首次调用共享 detectPromise，避免重复探测", async () => {
+    let probeCount = 0;
+    const runtimeLlm = mockRuntimeLlm(async (params) => {
+      const isProbe = params.messages?.[0]?.content === "ping";
+      if (isProbe) {
+        probeCount++;
+        // 模拟异步延迟，让并发调用堆积
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      return {
+        text: isProbe ? "ok" : "answer",
+        provider: "ollama",
+        model: "qwen3.5:9b",
+        agentId: "main",
+      };
+    });
+
+    const complete = createRuntimeCompleteFn(runtimeLlm);
+    // 同时发起 3 个并发首次调用
+    const [r1, r2, r3] = await Promise.all([
+      complete("sys", "u1"),
+      complete("sys", "u2"),
+      complete("sys", "u3"),
+    ]);
+
+    expect(r1).toBe("answer");
+    expect(r2).toBe("answer");
+    expect(r3).toBe("answer");
+    // probe 只调用 1 次（共享 detectPromise）
+    expect(probeCount).toBe(1);
+    // runtime complete = 1 probe + 3 真实任务
+    expect(runtimeLlm.complete).toHaveBeenCalledTimes(4);
+  });
+
+  it("后续调用不再触发 probe（decision 已缓存）", async () => {
+    const runtimeLlm = mockRuntimeLlm(async (params) => ({
+      text: "ok",
+      provider: "ollama",
+      model: "qwen3.5:9b",
+      agentId: "main",
+    }));
+
+    const complete = createRuntimeCompleteFn(runtimeLlm);
+    // 5 次连续调用
+    for (let i = 0; i < 5; i++) {
+      await complete("sys", `usr${i}`);
+    }
+    // 1 probe + 5 真实任务 = 6 次 complete 调用
+    expect(runtimeLlm.complete).toHaveBeenCalledTimes(6);
+  });
+
+  it("runtime 返回数组 content 时正确规范化拼接", async () => {
+    const runtimeLlm = mockRuntimeLlm(async (params) => {
+      const isProbe = params.messages?.[0]?.content === "ping";
+      return {
+        text: isProbe
+          ? "ok"
+          : [
+              { type: "text", text: "第一段" },
+              { type: "text", text: "第二段" },
+            ] as any,
+        provider: "ollama",
+        model: "qwen3.5:9b",
+        agentId: "main",
+      };
+    });
+
+    const complete = createRuntimeCompleteFn(runtimeLlm);
+    const result = await complete("sys", "usr");
+    expect(result).toBe("第一段第二段");
+  });
+
+  it("runtime 返回空 text 时抛 'runtime LLM returned no content'", async () => {
+    const runtimeLlm = mockRuntimeLlm(async (params) => {
+      const isProbe = params.messages?.[0]?.content === "ping";
+      return {
+        text: isProbe ? "ok" : "",
+        provider: "ollama",
+        model: "qwen3.5:9b",
+        agentId: "main",
+      };
+    });
+
+    const complete = createRuntimeCompleteFn(runtimeLlm);
+    await expect(complete("sys", "usr")).rejects.toThrow(/runtime LLM returned no content/);
+  });
+
+  it("调用 complete 时透传 system + user 消息及 maxTokens/temperature", async () => {
+    const runtimeLlm = mockRuntimeLlm(async (params) => ({
+      text: "ok",
+      provider: "ollama",
+      model: "qwen3.5:9b",
+      agentId: "main",
+    }));
+
+    const complete = createRuntimeCompleteFn(runtimeLlm);
+    await complete("system-prompt", "user-prompt");
+
+    // 第二次调用是真实任务，第一次是 probe
+    const realCall = runtimeLlm.complete.mock.calls[1][0];
+    expect(realCall.messages).toEqual([
+      { role: "system", content: "system-prompt" },
+      { role: "user", content: "user-prompt" },
+    ]);
+    expect(realCall.maxTokens).toBe(1024);
+    expect(realCall.temperature).toBe(0.3);
+    expect(realCall.purpose).toBe("graph-memory-pro:llm");
+  });
+
+  it("probe 调用使用极小 maxTokens=8 + purpose 标识", async () => {
+    const runtimeLlm = mockRuntimeLlm(async () => ({
+      text: "ok",
+      provider: "ollama",
+      model: "qwen3.5:9b",
+      agentId: "main",
+    }));
+
+    const complete = createRuntimeCompleteFn(runtimeLlm);
+    await complete("sys", "usr");
+
+    const probeCall = runtimeLlm.complete.mock.calls[0][0];
+    expect(probeCall.messages).toEqual([{ role: "user", content: "ping" }]);
+    expect(probeCall.maxTokens).toBe(8);
+    expect(probeCall.temperature).toBe(0);
+    expect(probeCall.purpose).toBe("graph-memory-pro:provider-detect");
+  });
+
+  it("logger 收到 provider detected 信息", async () => {
+    const runtimeLlm = mockRuntimeLlm(async () => ({
+      text: "ok",
+      provider: "ollama",
+      model: "qwen3.5:9b",
+      agentId: "main",
+    }));
+    const logger = { info: vi.fn(), warn: vi.fn() };
+
+    const complete = createRuntimeCompleteFn(runtimeLlm, undefined, logger);
+    await complete("sys", "usr");
+
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringMatching(/runtime provider detected.*provider=ollama.*model=qwen3\.5:9b.*local=true/),
+    );
+  });
+
+  it("云端 provider + 无 fallback 时 logger warn 提示 staying on runtime", async () => {
+    const runtimeLlm = mockRuntimeLlm(async () => ({
+      text: "ok",
+      provider: "openai",
+      model: "gpt-4o",
+      agentId: "main",
+    }));
+    const logger = { info: vi.fn(), warn: vi.fn() };
+
+    const complete = createRuntimeCompleteFn(runtimeLlm, undefined, logger);
+    await complete("sys", "usr");
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringMatching(/cloud but no fallback llm config — staying on runtime/),
+    );
+  });
+});
+
+// ────────────────────────────────────────────────────────────
+// isLocalProvider / 关键字匹配（白盒测试）
+// ────────────────────────────────────────────────────────────
+
+describe("isLocalProvider", () => {
+  const { isLocalProvider, LOCAL_PROVIDER_KEYWORDS } = __test__;
+
+  it("ollama 命中", () => {
+    expect(isLocalProvider("ollama")).toBe(true);
+  });
+
+  it("Ollama 大小写不敏感", () => {
+    expect(isLocalProvider("Ollama")).toBe(true);
+    expect(isLocalProvider("OLLAMA")).toBe(true);
+  });
+
+  it("ollama-256k 变体命中", () => {
+    expect(isLocalProvider("ollama-256k")).toBe(true);
+  });
+
+  it("lmstudio / localai / llamafile 命中", () => {
+    expect(isLocalProvider("lmstudio")).toBe(true);
+    expect(isLocalProvider("localai")).toBe(true);
+    expect(isLocalProvider("llamafile")).toBe(true);
+  });
+
+  it("llama.cpp / llamacpp 命中", () => {
+    expect(isLocalProvider("llama.cpp")).toBe(true);
+    expect(isLocalProvider("llamacpp")).toBe(true);
+  });
+
+  it("openai / anthropic 不命中", () => {
+    expect(isLocalProvider("openai")).toBe(false);
+    expect(isLocalProvider("anthropic")).toBe(false);
+  });
+
+  it("空字符串 / null 安全返回 false", () => {
+    expect(isLocalProvider("")).toBe(false);
+    expect(isLocalProvider(null as any)).toBe(false);
+    expect(isLocalProvider(undefined as any)).toBe(false);
+  });
+
+  it("关键字列表覆盖所有支持的本地 provider", () => {
+    expect(LOCAL_PROVIDER_KEYWORDS).toContain("ollama");
+    expect(LOCAL_PROVIDER_KEYWORDS).toContain("lmstudio");
+    expect(LOCAL_PROVIDER_KEYWORDS).toContain("localai");
+    expect(LOCAL_PROVIDER_KEYWORDS).toContain("llamafile");
+    expect(LOCAL_PROVIDER_KEYWORDS).toContain("llama.cpp");
+    expect(LOCAL_PROVIDER_KEYWORDS).toContain("llamacpp");
   });
 });
 

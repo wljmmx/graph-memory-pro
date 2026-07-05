@@ -133,3 +133,182 @@ function normalizeContent(content: unknown): string {
   // 兜底：未知类型转字符串
   try { return String(content); } catch { return ""; }
 }
+
+// ─── 主会话本地模型优先策略 ────────────────────────────────────────
+//
+// 设计目标：当插件运行在 OpenClaw 容器内时，如果主会话模型是本地模型
+// （ollama / lmstudio / localai / llamafile 等），优先使用主会话模型进行
+// LLM 能力处理；如果主会话模型是云端模型（如 OpenAI / Anthropic），
+// 则切换到插件配置的 llm（fallbackConfig）。
+//
+// 探测策略：首次调用时执行一次轻量 probe（maxTokens=8，单条 user 消息
+// "ping"），从返回的 result.provider 判断本地/云端，结果缓存为 decision，
+// 所有后续调用按 decision 分发，避免重复探测。
+
+/**
+ * 本地模型 provider 关键字（小写匹配）
+ *
+ * 主会话模型 provider 命中以下任一关键字时视为本地模型：
+ *   ollama / ollama-256k / lmstudio / localai / llamafile / llama.cpp / llamacpp
+ */
+const LOCAL_PROVIDER_KEYWORDS = [
+  "ollama",
+  "lmstudio",
+  "localai",
+  "llamafile",
+  "llama.cpp",
+  "llamacpp",
+];
+
+function isLocalProvider(provider: string): boolean {
+  if (!provider) return false;
+  const lower = provider.toLowerCase();
+  return LOCAL_PROVIDER_KEYWORDS.some((k) => lower.includes(k));
+}
+
+/**
+ * OpenClaw 主会话 runtime LLM 接口（仅依赖 complete 方法）
+ *
+ * 与 SDK 的 LlmCompleteParams / LlmCompleteResult 保持结构兼容，
+ * 但用结构化类型避免直接依赖 SDK 内部类型。
+ */
+export interface RuntimeLlm {
+  complete: (params: {
+    messages: Array<{ role: string; content: string }>;
+    model?: string;
+    maxTokens?: number;
+    temperature?: number;
+    systemPrompt?: string;
+    signal?: AbortSignal;
+    purpose?: string;
+    agentId?: string;
+  }) => Promise<{
+    text: string;
+    provider: string;
+    model: string;
+    agentId?: string;
+    usage?: unknown;
+    audit?: unknown;
+  }>;
+}
+
+/** logger 最小接口（兼容 console 与 SDK logger） */
+interface RuntimeLogger {
+  info?: (...args: unknown[]) => void;
+  warn?: (...args: unknown[]) => void;
+}
+
+/**
+ * 创建基于 OpenClaw 主会话 runtime LLM 的补全函数（带 provider 探测 + 缓存）
+ *
+ * 策略：
+ * 1. 首次调用时执行一次轻量 probe（~8 token）探测主会话 provider
+ * 2. 检查 result.provider：
+ *    - 本地模型 → 后续继续用 runtime LLM（避免云端调用与费用）
+ *    - 云端模型 → 后续切换到 fallbackConfig 配置的 LLM
+ * 3. 探测结果缓存为 decision，所有后续调用按 decision 分发
+ *
+ * 设计目标：
+ * - 仅一次 ~8 token 的 probe 调用即可完成 provider 探测
+ * - 并发安全：所有并发调用共享 detectPromise，避免重复探测
+ * - probe 失败时优雅降级到 fallback LLM（如未配置则仍用 runtime LLM）
+ */
+export function createRuntimeCompleteFn(
+  runtimeLlm: RuntimeLlm,
+  fallbackConfig?: LlmConfig,
+  logger?: RuntimeLogger,
+): CompleteFn {
+  let decision: "runtime" | "fallback" | null = null;
+  let detectPromise: Promise<void> | null = null;
+  // fallback CompleteFn（lazy init — 仅在 decision === "fallback" 时创建）
+  let cachedFallback: CompleteFn | null = null;
+
+  function getFallback(): CompleteFn | null {
+    if (!cachedFallback) {
+      cachedFallback = createCompleteFn(fallbackConfig);
+    }
+    return cachedFallback;
+  }
+
+  /**
+   * 基于 runtime LLM 的补全调用（含 content 规范化）
+   */
+  async function runtimeComplete(system: string, user: string): Promise<string> {
+    const result = await runtimeLlm.complete({
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+      maxTokens: 1024,
+      temperature: 0.3,
+      purpose: "graph-memory-pro:llm",
+    });
+    const text = normalizeContent(result?.text);
+    if (!text) {
+      throw new Error("runtime LLM returned no content");
+    }
+    return text.trim();
+  }
+
+  /**
+   * 探测主会话 runtime LLM 的 provider，缓存 decision
+   *
+   * 使用极小 probe（maxTokens=8，单条 "ping" 消息）以最小化 token 开销。
+   * probe 失败时优雅降级到 fallback（如未配置则 decision 仍为 runtime，
+   * 后续 runtimeComplete 调用会抛出真实错误）。
+   */
+  async function detectProvider(): Promise<void> {
+    try {
+      const result = await runtimeLlm.complete({
+        messages: [{ role: "user", content: "ping" }],
+        maxTokens: 8,
+        temperature: 0,
+        purpose: "graph-memory-pro:provider-detect",
+      });
+      const provider = (result?.provider ?? "").toString();
+      const model = (result?.model ?? "").toString();
+      const local = isLocalProvider(provider);
+      logger?.info?.(
+        `[graph-memory-pro:llm] runtime provider detected: provider=${provider} model=${model} local=${local}`,
+      );
+      if (local) {
+        decision = "runtime";
+      } else if (fallbackConfig?.model || fallbackConfig?.baseURL) {
+        decision = "fallback";
+      } else {
+        // 云端 provider 但无 fallback 配置 → 继续用 runtime
+        logger?.warn?.(
+          `[graph-memory-pro:llm] runtime provider is cloud but no fallback llm config — staying on runtime`,
+        );
+        decision = "runtime";
+      }
+    } catch (err) {
+      logger?.warn?.(
+        `[graph-memory-pro:llm] provider detection failed — switching to fallback: ${err}`,
+      );
+      decision = "fallback";
+    }
+  }
+
+  return async (system: string, user: string): Promise<string> => {
+    // 首次调用：执行 provider 探测（所有并发调用共享同一个 detectPromise）
+    if (decision === null) {
+      if (!detectPromise) {
+        detectPromise = detectProvider();
+      }
+      await detectPromise;
+    }
+
+    if (decision === "fallback") {
+      const fb = getFallback();
+      if (fb) return fb(system, user);
+      // fallback 配置无效（如未配置 model/baseURL）→ 退回 runtime
+    }
+
+    // decision === "runtime" 或 fallback 无效时
+    return runtimeComplete(system, user);
+  };
+}
+
+// 导出内部辅助函数供测试使用（仅测试引用，不影响打包）
+export const __test__ = { isLocalProvider, normalizeContent, LOCAL_PROVIDER_KEYWORDS };
