@@ -12,6 +12,10 @@ export interface LlmConfig {
   apiKey?: string;
   baseURL?: string;
   model?: string;
+  /** Ollama keep_alive 参数（如 "5m"/"1h"/"-1" 永久驻留），仅 Ollama 原生 API 生效 */
+  keepAlive?: string;
+  /** Ollama options 字段（覆盖默认 temperature/num_predict 等） */
+  options?: Record<string, number | boolean | string>;
 }
 
 export interface EmbeddingConfig {

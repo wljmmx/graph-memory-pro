@@ -1,14 +1,19 @@
 /**
  * graph-memory-pro — Embedding 引擎（原生 fetch，无外部依赖）
  *
- * 使用 Ollama 原生 API: baseURL/api/embed
- * 返回格式: data.embeddings[0]
+ * 使用 Ollama 新 API: baseURL/api/embed
+ * 请求格式: { model, input, keep_alive }  （注意：input 不是 prompt）
+ * 返回格式: data.embeddings[0]  （二维数组）
  *
  * 处理逻辑:
  *   1. 如果 baseURL 包含 /v1 → 删除 /v1，使用 Ollama 原生 API
  *   2. 如果不包含 /v1 → 直接使用 Ollama 原生 API
  *   3. 清洗 baseURL 中的反引号/首尾空格（防止 markdown 代码块标记误入 JSON）
  *   4. 传递 keep_alive 参数到 Ollama（默认 5m，可配置 1h/-1 永久）
+ *
+ * 参考: https://mintlify.wiki/ollama/ollama/api/endpoints/embed
+ *   - 新端点 /api/embed: 参数 input (string|string[])，返回 embeddings (number[][])
+ *   - 旧端点 /api/embeddings (legacy): 参数 prompt (string)，返回 embedding (number[])
  */
 
 import type { EmbeddingConfig } from "../types.ts";
@@ -32,7 +37,7 @@ function sanitizeBaseURL(url: string): string {
 
 /**
  * 内置 embedding 引擎
- * 统一使用 Ollama 原生 API
+ * 统一使用 Ollama 新 API /api/embed
  */
 export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
   const apiKey = config.apiKey || "";
@@ -53,6 +58,8 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
 
     for (let attempt = 0; attempt <= delays.length; attempt++) {
       try {
+        // v2.2.0 fix: 使用新 API 参数名 input（旧端点 /api/embeddings 用 prompt）
+        // 新端点 /api/embed 期望 input 字段，传 prompt 会被忽略，返回空数据
         const response = await fetch(`${baseURL}/api/embed`, {
           method: "POST",
           headers: {
@@ -61,7 +68,7 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
           },
           body: JSON.stringify({
             model,
-            prompt: text,
+            input: text,
             keep_alive: keepAlive,
             ...(config.options ? { options: config.options } : {}),
           }),
@@ -75,6 +82,7 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
 
         const data = await response.json() as any;
 
+        // 新 API /api/embed 返回 embeddings (二维数组)
         if (!data.embeddings?.[0]) {
           throw new Error("Ollama embedding API returned no embedding data");
         }
