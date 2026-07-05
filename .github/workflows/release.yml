@@ -116,8 +116,6 @@ jobs:
     name: Publish to npm
     needs: verify
     runs-on: ubuntu-latest
-    # 仅在有 NPM_TOKEN 时发布；未配置则跳过
-    if: ${{ secrets.NPM_TOKEN != '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -135,7 +133,12 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Publish
-        run: npm publish --access public
+      - name: Publish (skip if NPM_TOKEN not set)
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "NPM_TOKEN secret not set, skipping npm publish"
+            exit 0
+          fi
+          npm publish --access public
