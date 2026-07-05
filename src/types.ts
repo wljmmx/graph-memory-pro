@@ -416,6 +416,8 @@ export interface ExtractNode {
   name: string;
   description: string;
   content: string;
+  /** S-3 来源标记：自动提取默认 experience，外部文档导入为 knowledge，手工录入为 imported */
+  source?: NodeSource;
 }
 
 export interface ExtractEdge {

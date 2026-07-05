@@ -252,16 +252,17 @@ export async function startMcpServer(
       "gm_record",
       {
         title: "Record Knowledge Node",
-        description: "Manually record a knowledge node (TASK / SKILL / EVENT) into the graph.",
+        description: "Manually record a knowledge node (TASK / SKILL / EVENT) into the graph. Source: experience(default) / knowledge(external authoritative) / imported(manual).",
         inputSchema: {
           type: z.enum(["TASK", "SKILL", "EVENT"]).describe("Node type"),
           name: z.string().min(1).describe("Node name"),
           description: z.string().describe("Short description"),
           content: z.string().describe("Detailed content"),
+          source: z.enum(["experience", "knowledge", "imported"]).optional().describe("S-3 source: experience(default) / knowledge(external) / imported(manual)"),
         },
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
       },
-      async ({ type, name, description, content }: { type: "TASK" | "SKILL" | "EVENT"; name: string; description: string; content: string }) => {
+      async ({ type, name, description, content, source }: { type: "TASK" | "SKILL" | "EVENT"; name: string; description: string; content: string; source?: "experience" | "knowledge" | "imported" }) => {
         try {
           const now = Date.now();
           const id = `mcp-${now}-${Math.random().toString(36).slice(2, 8)}`;
@@ -274,10 +275,11 @@ export async function startMcpServer(
             createdAt: now,
             updatedAt: now,
             embeddingModel: cfg.embedding?.model,
+            source: source ?? "experience",
           });
           return {
-            content: [{ type: "text", text: `Recorded: ${id}` }],
-            structuredContent: { id },
+            content: [{ type: "text", text: `Recorded: ${id} (source=${source ?? "experience"})` }],
+            structuredContent: { id, source: source ?? "experience" },
           };
         } catch (err: any) {
           return { content: [{ type: "text", text: `Error: ${err.message}` }] };

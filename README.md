@@ -60,7 +60,7 @@ graph-memory-pro 是**记忆底层引擎**，只做"图内"操作：
   - 8 参数动作空间 + LLM 诊断 + 启发式 fallback
 
 ### 测试覆盖
-- 11 个测试文件，256 个用例（Neo4j mock 基础设施，CI 友好）
+- 9 个测试文件，230 个用例（Neo4j mock 基础设施，CI 友好）
 - 覆盖全部 5 批次核心功能：指标计算 / AutoTuner / 关联矩阵 / 裁判闭环 / 维护阶段 / 软替换 / 缓存 / 社区 / 类型配置
 
 ## 版本
@@ -118,12 +118,88 @@ npm install @openclaw/graph-memory-pro
 
 | 工具 | 说明 |
 |---|---|
-| `gm_record` | 手动记录知识到图谱 |
+| `gm_record` | 手动记录知识到图谱（type/name/description/content，可选 source: experience/knowledge/imported） |
 | `gm_maintain` | 触发图谱维护（11 阶段管线） |
 | `gm_reembed` | 批量为缺失向量的节点重新生成嵌入 |
 | `gm_feedback` | 提交反馈（query + recalledNodeIds + assistantReply），驱动 I-2 裁判 + I-3 持久化 + L-1 M 更新 |
 | `gm_benchmark` | 运行 S-10 Benchmark 评测（LoCoMo/LongMemEval） |
 | `gm_tune` | 触发 R-1 EvolveMem 自主调优循环 |
+
+## MCP Server（v2.2.0 新增）
+
+通过 Model Context Protocol 对外暴露图谱能力，供 lcm-graph-extra dashboard 或任意 MCP client（Claude Desktop / Cursor / 自研 client）调用。
+
+### 启用配置
+
+```json
+{
+  "mcp": {
+    "enabled": true,
+    "port": 7800,
+    "host": "127.0.0.1",
+    "path": "/mcp",
+    "authToken": "your-secret-token",
+    "enabledTools": ["gm_status", "gm_stats", "gm_search"]
+  }
+}
+```
+
+- `host: "127.0.0.1"` 仅本机；`"0.0.0.0"` 对外开放
+- `authToken` 设置后客户端需在 `Authorization: Bearer <token>` 头携带
+- `enabledTools` 省略则启用全部 13 个工具
+
+### 端点
+- `POST http://<host>:<port>/mcp` — MCP JSON-RPC
+- `GET http://<host>:<port>/health` — 健康探活（无需鉴权）
+
+### 暴露的 13 个 MCP tools
+
+| 工具 | 类型 | 说明 |
+|---|---|---|
+| `gm_status` | read | Neo4j 连接状态 + 版本 |
+| `gm_stats` | read | 节点/边总数 |
+| `gm_health` | read | G-5 健康报告 |
+| `gm_get_node` | read | 按 ID 取节点 |
+| `gm_search` | read | 全文搜索 + 关联边 |
+| `gm_top` | read | PageRank Top-N |
+| `gm_nodes_by_type` | read | 按类型筛选 |
+| `gm_record` | write | 手动记录节点（含 source 参数） |
+| `gm_maintain` | write | 触发维护管线 |
+| `gm_reembed` | write | 批量重嵌入 |
+| `gm_feedback` | write | 提交召回反馈 |
+| `gm_benchmark` | write | S-10 评测 |
+| `gm_tune` | write | R-1 调优循环（需 autoTuner.enabled） |
+
+### Dashboard 接入示例
+
+```typescript
+const res = await fetch("http://127.0.0.1:7800/mcp", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "Authorization": "Bearer your-secret-token",
+  },
+  body: JSON.stringify({
+    jsonrpc: "2.0", id: 1,
+    method: "tools/call",
+    params: { name: "gm_search", arguments: { query: "React hooks", limit: 5 } },
+  }),
+});
+const { result } = await res.json();
+```
+
+### Claude Desktop / Cursor 接入
+
+```json
+{
+  "mcpServers": {
+    "graph-memory-pro": {
+      "url": "http://127.0.0.1:7800/mcp",
+      "headers": { "Authorization": "Bearer your-secret-token" }
+    }
+  }
+}
+```
 
 ## HTTP API
 
@@ -214,6 +290,8 @@ src/
 │   └── runner.ts        # S-10 评测运行器
 ├── routes/
 │   └── crud.ts           # HTTP 路由（含 /api/health, /api/staleness/refresh）
+├── mcp/
+│   └── server.ts         # MCP Server（Streamable HTTP，13 个 tools）
 ├── store/
 │   ├── db.ts             # Neo4j 连接管理
 │   └── store.ts         # 数据操作层（含 R-4 可进化嵌入）

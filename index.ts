@@ -126,6 +126,8 @@ async function extractInBackground(
               createdAt: now,
               updatedAt: now,
               embeddingModel: _cfg?.embedding?.model,
+              // S-3: 节点 source（自动提取 = experience，外部导入由调用方标记）
+              source: enode.source ?? _cfg?.temporal?.defaultSource ?? "experience",
             });
           } catch (e) {
             if (process.env.GM_DEBUG) logger?.debug?.(`  [graph-memory-pro] upsertNode failed: ${e}`);
@@ -696,8 +698,9 @@ export default definePluginEntry({
         name: Type.String({ description: "节点英文名" }),
         description: Type.String({ description: "描述" }),
         content: Type.String({ description: "详细内容" }),
+        source: Type.Optional(Type.String({ description: "S-3 来源: experience(默认,经验) / knowledge(外部权威知识) / imported(手工导入)" })),
       }),
-      async execute(_callId: string, params: { type: string; name: string; description: string; content: string }) {
+      async execute(_callId: string, params: { type: string; name: string; description: string; content: string; source?: string }) {
         if (!_driver) {
           return { content: [{ type: "text", text: "Graph Memory Pro 未连接" }], details: {} };
         }
@@ -708,6 +711,11 @@ export default definePluginEntry({
           const nodeType = p.type.toUpperCase();
           if (!["TASK", "SKILL", "EVENT"].includes(nodeType)) {
             return { content: [{ type: "text", text: `无效的节点类型: ${p.type}` }], details: {} };
+          }
+          // S-3: 校验 source 取值
+          const src = (p.source ?? "experience") as "experience" | "knowledge" | "imported";
+          if (!["experience", "knowledge", "imported"].includes(src)) {
+            return { content: [{ type: "text", text: `无效的 source: ${p.source}（应为 experience/knowledge/imported）` }], details: {} };
           }
           await upsertNode(_driver, {
             id,
@@ -722,8 +730,9 @@ export default definePluginEntry({
             createdAt: now,
             updatedAt: now,
             embeddingModel: _cfg?.embedding?.model,
+            source: src,
           });
-          return { content: [{ type: "text", text: `已记录知识节点: ${id}` }], details: { id } };
+          return { content: [{ type: "text", text: `已记录知识节点: ${id} (source=${src})` }], details: { id, source: src } };
         } catch (err: any) {
           return { content: [{ type: "text", text: `记录失败: ${err.message}` }], details: {} };
         }
