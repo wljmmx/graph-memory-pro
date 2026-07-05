@@ -9,11 +9,10 @@ import type { EmbedFn } from "../engine/embed.ts";
 import {
   searchNodes, vectorSearchWithScore,
   graphWalk, communityRepresentatives,
-  communityVectorSearch, nodesByCommunityIds,
+  communityVectorSearch,
   saveVector, getVectorHash, computeEmbeddingHash,
-  upsertFeedback, getFeedbackCount,
+  upsertFeedback,
 } from "../store/store.ts";
-import { getCommunityPeers } from "../graph/community.ts";
 import { personalizedPageRank } from "../graph/pagerank.ts";
 import { logPhase, isTimingEnabled, printAllDistributions, resetAllDistributions } from "../timing.ts";
 import { QueryCache } from "./query-cache.ts";

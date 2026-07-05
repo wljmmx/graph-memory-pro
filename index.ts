@@ -1,7 +1,7 @@
 /**
  * graph-memory-pro — Neo4j Knowledge Graph Memory Plugin
  *
- * Version: 2.2.2
+ * Version: 2.3.0
  *
  * 架构定位（A 方案）:
  *   - 不占用 slots（memory/contextEngine）
@@ -21,19 +21,19 @@
 import { definePluginEntry, buildJsonPluginConfigSchema } from "openclaw/plugin-sdk/plugin-entry";
 import { Type } from "typebox";
 import type { Driver } from "neo4j-driver";
-import type { GmConfig, GmNode, GmEdge } from "./src/types.ts";
+import type { GmConfig } from "./src/types.ts";
 import type { CompleteFn } from "./src/engine/llm.ts";
 import type { EmbedFn } from "./src/engine/embed.ts";
 import { createCompleteFn, createRuntimeCompleteFn } from "./src/engine/llm.ts";
 import { createEmbedFn } from "./src/engine/embed.ts";
-import { initDriver, closeDriver, verifyWithRetry, getDriver } from "./src/store/db.ts";
-import { ensureSchema, getNodeCount, getEdgeCount, searchNodes, getEdgesForNodes, upsertNode, upsertEdge, findById } from "./src/store/store.ts";
+import { initDriver, closeDriver, verifyWithRetry } from "./src/store/db.ts";
+import { ensureSchema, getNodeCount, getEdgeCount, searchNodes, upsertNode, upsertEdge, findById } from "./src/store/store.ts";
 import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
 import { runMaintenance } from "./src/graph/maintenance.ts";
 import { reEmbedNodes } from "./src/graph/reembed.ts";
 import { initRoutes, getRoutes } from "./src/routes/crud.ts";
-import { setTimingEnabled, printAllDistributions, resetAllDistributions } from "./src/timing.ts";
+import { setTimingEnabled } from "./src/timing.ts";
 
 // ─── 全局状态 ──────────────────────────────────────────
 
@@ -721,7 +721,7 @@ export default definePluginEntry({
           try {
             const { healthCheck } = await import("./src/graph/maintenance.ts");
             healthReport = await healthCheck(_driver);
-          } catch (err: any) {
+          } catch {
             // 健康检查失败不影响主流程
           }
 

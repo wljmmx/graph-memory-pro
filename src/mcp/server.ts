@@ -26,10 +26,10 @@ import type { Recaller } from "../recaller/recall.ts";
 import {
   upsertNode, findById, searchNodes, getTopNodes, getNodesByType,
   getNodeCount, getEdgeCount, getEdgesForNodes,
-  upsertFeedback, getFeedbackCount,
+  upsertFeedback,
 } from "../store/store.ts";
 import {
-  runMaintenance, healthCheck, computeStalenessScores,
+  runMaintenance, healthCheck,
 } from "../graph/maintenance.ts";
 import { reEmbedNodes } from "../graph/reembed.ts";
 
@@ -74,7 +74,7 @@ export async function startMcpServer(
   // ── 创建 MCP server ──────────────────────────────────────────────
   const mcpServer = new McpServer({
     name: "graph-memory-pro",
-    version: "2.2.1",
+    version: "2.3.0",
   });
 
   // ── read-only tools ─────────────────────────────────────────────
@@ -92,8 +92,8 @@ export async function startMcpServer(
         try {
           await driver.verifyConnectivity();
           return {
-            content: [{ type: "text", text: `connected, version=2.2.1` }],
-            structuredContent: asStructured({ status: "connected", version: "2.2.1" }),
+            content: [{ type: "text", text: `connected, version=2.3.0` }],
+            structuredContent: asStructured({ status: "connected", version: "2.3.0" }),
           };
         } catch (err: any) {
           return {

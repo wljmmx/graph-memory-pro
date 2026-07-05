@@ -100,7 +100,7 @@ describe("handleStatus", () => {
 
     expect(result.status).toBe(200);
     expect(result.body.status).toBe("connected");
-    expect(result.body.version).toBe("2.2.1");
+    expect(result.body.version).toBe("2.3.0");
   });
 
   it("disconnected: verifyConnectivity 抛错 → 503", async () => {

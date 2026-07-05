@@ -28,12 +28,6 @@ import { getSession } from "../store/db.ts";
 import {
   dedup, type DedupResult,
 } from "./dedup.ts";
-import {
-  computeStalenessScores,
-  computeImportanceScores,
-  resolveConflicts,
-  adjustEdgeWeights,
-} from "./maintenance.ts";
 
 export interface IncrementalMaintenanceResult {
   /** 处理的脏节点数 */
@@ -291,7 +285,7 @@ async function incrementalConflictResolution(
     );
     let resolved = 0;
     let superseded = 0;
-    let merged = 0;
+    const merged = 0;
     for (const rec of result.records) {
       const dirtyId = rec.get("dirtyId") as string;
       const candidateId = rec.get("candidateId") as string;
@@ -341,13 +335,12 @@ async function incrementalEdgeWeights(
     );
     const scanned = result.records.length;
     const now = Date.now();
-    const decayFactor = cfg?.edgeWeights?.decayFactor ?? 0.95;
     const strengthenFactor = cfg?.edgeWeights?.strengthenFactor ?? 1.1;
     const minWeight = cfg?.edgeWeights?.minWeight ?? 0.1;
     const maxWeight = cfg?.edgeWeights?.maxWeight ?? 5.0;
 
     let strengthened = 0;
-    let decayed = 0;
+    const decayed = 0;
     // 脏节点被访问 = 强化；其他时间流逝 = 衰减
     for (const rec of result.records) {
       const edgeId = rec.get("edgeId");

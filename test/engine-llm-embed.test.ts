@@ -754,6 +754,40 @@ describe("createEmbedFn", () => {
     expect(body.keep_alive).toBe("1h");
   });
 
+  it("v2.3.0 维度校验：返回维度与 config.dimensions 一致时通过", async () => {
+    fetchSpy.mockResolvedValue(mockResponse({ embeddings: [[0.1, 0.2, 0.3]] }));
+    const embed = createEmbedFn({
+      baseURL: "http://localhost:11434",
+      dimensions: 3,
+    });
+    const result = await embed("text");
+    expect(result).toEqual([0.1, 0.2, 0.3]);
+  });
+
+  it("v2.3.0 维度校验：返回维度不匹配时抛错（含 expected/got/model）", async () => {
+    vi.useFakeTimers();
+    fetchSpy.mockResolvedValue(mockResponse({ embeddings: [[0.1, 0.2, 0.3]] }));
+    const embed = createEmbedFn({
+      baseURL: "http://localhost:11434",
+      model: "nomic-embed-text",
+      dimensions: 768,  // 期望 768，实际返回 3
+    });
+    const promise = embed("text");
+    const assertion = expect(promise).rejects.toThrow(/Embedding dimension mismatch.*expected 768.*got 3.*nomic-embed-text/);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await assertion;
+  });
+
+  it("v2.3.0 维度校验：未配置 dimensions 时不校验（向后兼容）", async () => {
+    fetchSpy.mockResolvedValue(mockResponse({ embeddings: [[0.1, 0.2]] }));
+    const embed = createEmbedFn({
+      baseURL: "http://localhost:11434",
+      // 未设置 dimensions
+    });
+    const result = await embed("text");
+    expect(result).toEqual([0.1, 0.2]);
+  });
+
   it("config.options 透传到请求体 options 字段", async () => {
     fetchSpy.mockResolvedValue(mockResponse({ embeddings: [[0.1]] }));
     const embed = createEmbedFn({

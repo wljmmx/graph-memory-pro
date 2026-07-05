@@ -6,7 +6,7 @@
  */
 
 import type { CompleteFn } from "../engine/llm.ts";
-import type { ExtractNode, ExtractResult, ExtractEdge } from "../types.ts";
+import type { ExtractResult } from "../types.ts";
 import type { Driver } from "neo4j-driver";
 
 const EXTRACT_SYSTEM_PROMPT = `你是知识图谱三元组提取专家。

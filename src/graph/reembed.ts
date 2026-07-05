@@ -78,7 +78,7 @@ export async function reEmbedNodes(
             } else {
               skipped++;
             }
-          } catch (err) {
+          } catch {
             failed++;
           }
         }
@@ -87,7 +87,7 @@ export async function reEmbedNodes(
       } finally {
         await session.close();
       }
-    } catch (err) {
+    } catch {
       failed++;
       consecutiveFailures++;
       if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
@@ -154,7 +154,7 @@ export async function detectAndMigrateEmbeddings(
   }
 
   const session = driver.session();
-  let modelDistribution = new Map<string, number>();
+  const modelDistribution = new Map<string, number>();
   let needsMigration = 0;
   let cleared = 0;
   let migrationTriggered = false;

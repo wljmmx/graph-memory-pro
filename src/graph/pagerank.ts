@@ -7,7 +7,7 @@
 import type { Driver, Session } from "neo4j-driver";
 import type { GmConfig } from "../types.ts";
 import { getSession } from "../store/db.ts";
-import { logPhase, isTimingEnabled } from "../timing.ts";
+import { logPhase } from "../timing.ts";
 import { createLogger } from "../logger.ts";
 
 const log = createLogger("pagerank");

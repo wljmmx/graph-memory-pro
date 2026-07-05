@@ -46,6 +46,9 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
   // Ollama keep_alive 参数：默认 "5m"，可配置 "1h"/"30m"/-1（永久驻留）
   // 不传时 Ollama 默认 5m 后卸载模型，导致下次调用冷启动延迟
   const keepAlive = config.keepAlive || "5m";
+  // v2.3.0: 预期向量维度（可选）。配置后引擎层校验返回向量维度一致性，
+  // 防止模型更换后维度与向量索引不一致（如 nomic-embed-text 768 → 1024）
+  const expectedDim = config.dimensions;
 
   return async function embed(text: string): Promise<number[]> {
     const lastErr: Error[] = [];
@@ -87,7 +90,18 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
           );
         }
 
-        return data.embeddings[0];
+        const vec: number[] = data.embeddings[0];
+
+        // v2.3.0: 维度校验 — 若 config.dimensions 已配置，校验返回向量维度一致
+        // 防止模型更换后维度与向量索引不一致（如 nomic-embed-text 768 → 1024）
+        if (expectedDim && vec.length !== expectedDim) {
+          throw new Error(
+            `Embedding dimension mismatch: expected ${expectedDim}, got ${vec.length} (model=${model}). ` +
+            `Check embedding.model or embedding.dimensions in config.`,
+          );
+        }
+
+        return vec;
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
         lastErr.push(error);

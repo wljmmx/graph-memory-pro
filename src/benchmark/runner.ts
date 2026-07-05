@@ -145,7 +145,7 @@ export async function runBenchmark(
 
         const caseResult = evaluateCase(testCase, recallResult, latencyMs);
         caseResults.push(caseResult);
-      } catch (err) {
+      } catch {
         // 超时或失败的样本记为未命中
         caseResults.push({
           caseId: testCase.id,

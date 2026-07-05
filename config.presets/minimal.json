@@ -1,0 +1,42 @@
+{
+  "$comment": "最小配置预设：仅 neo4j + llm + embedding 三项必需配置，关闭所有可选增强功能。适用场景：快速试用、开发环境验证连通性、最小依赖部署。所有敏感字段为占位符，请替换为实际值后使用。Ollama LLM baseURL 含 /v1（OpenAI 兼容路径），Embedding baseURL 不含 /v1（走原生 /api/embed）。",
+  "neo4j": {
+    "uri": "bolt://localhost:7687",
+    "user": "neo4j",
+    "password": "your-password-here"
+  },
+  "llm": {
+    "$comment": "Ollama LLM 端点：baseURL 必须含 /v1；Ollama 用法下 apiKey 替换为空字符串；OpenAI 用户改 baseURL 为 https://api.openai.com/v1 并填 sk-xxx",
+    "apiKey": "your-llm-api-key-here",
+    "baseURL": "http://localhost:11434/v1",
+    "model": "qwen2.5:7b",
+    "keepAlive": "5m"
+  },
+  "embedding": {
+    "$comment": "Ollama Embedding 端点：baseURL 不含 /v1（embed.ts 会自动剥离 /v1）；Ollama 用法下 apiKey 替换为空字符串；模型须为 embedding 模型（如 nomic-embed-text），不能用 LLM 模型",
+    "apiKey": "your-embedding-api-key-here",
+    "baseURL": "http://localhost:11434",
+    "model": "nomic-embed-text",
+    "dimensions": 768,
+    "keepAlive": "5m"
+  },
+  "temporal": { "enabled": false },
+  "state": { "enabled": false },
+  "staleness": { "enabled": false },
+  "causalEdges": { "enabled": false },
+  "graphHealth": { "enabled": false },
+  "queryCache": { "enabled": false },
+  "judge": { "enabled": false },
+  "feedback": { "enabled": false },
+  "marginalUtility": { "enabled": false },
+  "evolvableEmbedding": { "enabled": false },
+  "importance": { "enabled": false },
+  "hierarchicalCommunity": { "enabled": false },
+  "conflictResolution": { "enabled": false },
+  "edgeWeights": { "enabled": false },
+  "reverseMemory": { "enabled": false },
+  "associationMatrix": { "enabled": false },
+  "autoTuner": { "enabled": false },
+  "mcp": { "enabled": false },
+  "benchmark": { "enabled": false }
+}

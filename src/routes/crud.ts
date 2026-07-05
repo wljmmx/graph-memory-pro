@@ -7,19 +7,16 @@
  */
 
 import type { Driver } from "neo4j-driver";
-import neo4j from "neo4j-driver";
 import type { GmConfig } from "../types.ts";
-import { getSession } from "../store/db.ts";
 import {
   findById, searchNodes, getTopNodes, getNodesByType,
   getNodeCount, getEdgeCount, getEdgesForNodes,
   getFeedbackCount,
 } from "../store/store.ts";
-import { runMaintenance, type MaintenanceResult } from "../graph/maintenance.ts";
+import { runMaintenance } from "../graph/maintenance.ts";
 import {
   runIncrementalMaintenance,
   markDirty, getDirtyNodeIds, clearDirty,
-  type IncrementalMaintenanceResult,
 } from "../graph/incremental-maintenance.ts";
 import type { CompleteFn } from "../engine/llm.ts";
 import type { EmbedFn } from "../engine/embed.ts";
@@ -73,6 +70,10 @@ export function getRoutes(): RouteHandler[] {
     { method: "GET", path: "/api/auto-tuner/state", handler: handleAutoTunerState },
     // v2.2.0 P2-4: 关联矩阵 M 状态查询
     { method: "GET", path: "/api/association-matrix/state", handler: handleAssociationMatrixState },
+    // v2.3.0: 配置自检 — 验证 Neo4j/LLM/Embedding 连通性
+    { method: "GET", path: "/api/doctor", handler: handleDoctor },
+    // v2.3.0: LLM token 用量查询
+    { method: "GET", path: "/api/usage", handler: handleUsage },
   ];
 }
 
@@ -80,7 +81,7 @@ async function handleStatus(): Promise<{ status: number; body: any }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   try {
     await _driver.verifyConnectivity();
-    return { status: 200, body: { status: "connected", version: "2.2.1" } };
+    return { status: 200, body: { status: "connected", version: "2.3.0" } };
   } catch (err: any) {
     return { status: 503, body: { status: "disconnected", error: err.message } };
   }
@@ -290,7 +291,7 @@ async function handleMetrics(): Promise<{ status: number; body: string }> {
   }
 
   const lines: string[] = [];
-  const labels = `plugin="graph-memory-pro",version="2.2.1"`;
+  const labels = `plugin="graph-memory-pro",version="2.3.0"`;
 
   // 基础计数
   let nodeCount = 0;
@@ -386,9 +387,30 @@ async function handleMetrics(): Promise<{ status: number; body: string }> {
     lines.push(`graph_memory_association_matrix_updates_rejected{${labels}} ${amStats.updatesRejected}`);
 
     lines.push("# HELP graph_memory_association_matrix_history_size M training history samples.");
-    lines.push("# TYPE graph_memory_association_matrix_history_size gauge");
-    lines.push(`graph_memory_association_matrix_history_size{${labels}} ${amStats.historySize}`);
+  lines.push("# TYPE graph_memory_association_matrix_history_size gauge");
+  lines.push(`graph_memory_association_matrix_history_size{${labels}} ${amStats.historySize}`);
   }
+
+  // v2.3.0: LLM token 用量（进程累计）
+  try {
+    const { getUsageStats } = await import("../store/usage.ts");
+    const usage = getUsageStats();
+    lines.push("# HELP graph_memory_llm_calls_total Total LLM calls since process start.");
+    lines.push("# TYPE graph_memory_llm_calls_total gauge");
+    lines.push(`graph_memory_llm_calls_total{${labels}} ${usage.total.calls}`);
+
+    lines.push("# HELP graph_memory_llm_tokens_total Total LLM tokens consumed (prompt + completion).");
+    lines.push("# TYPE graph_memory_llm_tokens_total gauge");
+    lines.push(`graph_memory_llm_tokens_total{${labels}} ${usage.total.totalTokens}`);
+
+    lines.push("# HELP graph_memory_llm_prompt_tokens_total Total LLM prompt tokens.");
+    lines.push("# TYPE graph_memory_llm_prompt_tokens_total gauge");
+    lines.push(`graph_memory_llm_prompt_tokens_total{${labels}} ${usage.total.promptTokens}`);
+
+    lines.push("# HELP graph_memory_llm_completion_tokens_total Total LLM completion tokens.");
+    lines.push("# TYPE graph_memory_llm_completion_tokens_total gauge");
+    lines.push(`graph_memory_llm_completion_tokens_total{${labels}} ${usage.total.completionTokens}`);
+  } catch { /* usage 查询失败不影响 metrics 输出 */ }
 
   return { status: 200, body: lines.join("\n") + "\n" };
 }
@@ -457,6 +479,199 @@ async function handleAssociationMatrixState(): Promise<{ status: number; body: a
         available: true,
         config: _cfg?.associationMatrix ?? null,
         stats,
+      },
+    };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+// ── v2.3.0: 配置自检（gm_doctor）───────────────────────────
+//
+// 一次性验证 Neo4j / LLM / Embedding 三大依赖的连通性 + 配置完整性。
+// 返回各项的 ok/warn/error 状态 + 诊断提示，便于用户排查配置问题。
+// 设计参考 MySQL "SHOW STATUS" + 健康检查端点的组合。
+async function handleDoctor(): Promise<{ status: number; body: any }> {
+  const checks: Array<{
+    name: string;
+    status: "ok" | "warn" | "error";
+    latencyMs?: number;
+    detail?: string;
+    hint?: string;
+  }> = [];
+
+  // 1. Neo4j 连通性
+  const neo4jStart = Date.now();
+  if (!_driver) {
+    checks.push({
+      name: "neo4j",
+      status: "error",
+      detail: "driver not initialized",
+      hint: "Check neo4j.uri/user/password in config",
+    });
+  } else {
+    try {
+      await _driver.verifyConnectivity();
+      checks.push({
+        name: "neo4j",
+        status: "ok",
+        latencyMs: Date.now() - neo4jStart,
+      });
+    } catch (err: any) {
+      checks.push({
+        name: "neo4j",
+        status: "error",
+        latencyMs: Date.now() - neo4jStart,
+        detail: err.message,
+        hint: `Check neo4j.uri (current: ${_cfg?.neo4j?.uri ?? "unset"})`,
+      });
+    }
+  }
+
+  // 2. 图谱基础计数（验证 schema 已初始化）
+  if (_driver) {
+    try {
+      const [nodeCount, edgeCount] = await Promise.all([
+        getNodeCount(_driver),
+        getEdgeCount(_driver),
+      ]);
+      checks.push({
+        name: "graph_schema",
+        status: "ok",
+        detail: `nodes=${nodeCount}, edges=${edgeCount}`,
+      });
+    } catch (err: any) {
+      checks.push({
+        name: "graph_schema",
+        status: "error",
+        detail: err.message,
+        hint: "Schema may not be initialized; call ensureSchema(driver, dim) on startup",
+      });
+    }
+  }
+
+  // 3. LLM 连通性（仅探测配置是否就绪，不发起真实调用避免消耗 token）
+  const llmConfig = _cfg?.llm;
+  if (!llmConfig?.model && !llmConfig?.baseURL) {
+    // 未配置 llm 时不报错，只标记 warn（可能依赖 api.runtime.llm 主会话）
+    checks.push({
+      name: "llm",
+      status: "warn",
+      detail: "no llm config (will use api.runtime.llm if available)",
+      hint: "Set llm.model + llm.baseURL, or rely on OpenClaw primary session",
+    });
+  } else if (!_llm) {
+    checks.push({
+      name: "llm",
+      status: "error",
+      detail: "llm config present but CompleteFn not initialized",
+      hint: "Check llm.baseURL format (Ollama: http://localhost:11434/v1, OpenAI: https://api.openai.com/v1)",
+    });
+  } else {
+    checks.push({
+      name: "llm",
+      status: "ok",
+      detail: `model=${llmConfig?.model ?? "default"}, baseURL=${llmConfig?.baseURL ?? "default"}`,
+    });
+  }
+
+  // 4. Embedding 连通性（发起一次最小调用，验证模型可用 + 维度匹配）
+  const embedConfig = _cfg?.embedding;
+  if (!embedConfig?.baseURL) {
+    checks.push({
+      name: "embedding",
+      status: "warn",
+      detail: "no embedding config",
+      hint: "Set embedding.baseURL + embedding.model for vector search",
+    });
+  } else if (!_embed) {
+    checks.push({
+      name: "embedding",
+      status: "error",
+      detail: "embedding config present but EmbedFn not initialized",
+      hint: "Check embedding.baseURL (Ollama native API, no /v1 suffix)",
+    });
+  } else {
+    const embedStart = Date.now();
+    try {
+      const vec = await _embed("gm_doctor probe");
+      const expectedDim = embedConfig.dimensions;
+      if (expectedDim && vec.length !== expectedDim) {
+        checks.push({
+          name: "embedding",
+          status: "error",
+          latencyMs: Date.now() - embedStart,
+          detail: `dimension mismatch: expected ${expectedDim}, got ${vec.length}`,
+          hint: `Model "${embedConfig.model}" returns ${vec.length}-dim, but config.dimensions=${expectedDim}. Update one of them.`,
+        });
+      } else {
+        checks.push({
+          name: "embedding",
+          status: "ok",
+          latencyMs: Date.now() - embedStart,
+          detail: `model=${embedConfig.model}, dim=${vec.length}${expectedDim ? ` (expected=${expectedDim})` : ""}`,
+        });
+      }
+    } catch (err: any) {
+      checks.push({
+        name: "embedding",
+        status: "error",
+        latencyMs: Date.now() - embedStart,
+        detail: err.message,
+        hint: `Check embedding.model (must be embed model, not LLM model like qwen3.5:9b). Current: ${embedConfig.model ?? "unset"}`,
+      });
+    }
+  }
+
+  // 5. 反馈系统状态（JudgeManager 冷启动）
+  const jm = _recaller?.getJudgeManager();
+  if (jm) {
+    const coldStart = jm.isColdStart();
+    const feedbackCount = jm.getFeedbackCount();
+    checks.push({
+      name: "judge",
+      status: coldStart ? "warn" : "ok",
+      detail: `feedbackCount=${feedbackCount}, coldStart=${coldStart}`,
+      hint: coldStart ? `Need ${_cfg?.judge?.judgeWarmupFeedbacks ?? 50} feedbacks to exit cold start` : undefined,
+    });
+  }
+
+  // 汇总
+  const errorCount = checks.filter(c => c.status === "error").length;
+  const warnCount = checks.filter(c => c.status === "warn").length;
+  const overallStatus = errorCount > 0 ? "error" : warnCount > 0 ? "warn" : "ok";
+
+  return {
+    status: errorCount > 0 ? 503 : 200,
+    body: {
+      status: overallStatus,
+      version: "2.3.0",
+      timestamp: new Date().toISOString(),
+      summary: {
+        ok: checks.filter(c => c.status === "ok").length,
+        warn: warnCount,
+        error: errorCount,
+        total: checks.length,
+      },
+      checks,
+    },
+  };
+}
+
+// ── v2.3.0: LLM token 用量查询 ───────────────────────────
+//
+// 返回进程级累计的 LLM token 用量，供成本监控。
+// 数据来源：src/store/usage.ts（内存累计，重启清零）
+async function handleUsage(): Promise<{ status: number; body: any }> {
+  try {
+    const { getUsageStats } = await import("../store/usage.ts");
+    const stats = getUsageStats();
+    return {
+      status: 200,
+      body: {
+        version: "2.3.0",
+        timestamp: new Date().toISOString(),
+        ...stats,
       },
     };
   } catch (err: any) {

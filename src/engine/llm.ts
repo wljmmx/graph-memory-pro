@@ -78,6 +78,7 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
 
         const data = await response.json() as {
           choices: Array<{ message: { content: unknown } }>;
+          usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
         };
 
         const rawContent = data.choices?.[0]?.message?.content;
@@ -85,6 +86,17 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
         if (!content) {
           throw new Error("LLM returned no content");
         }
+
+        // v2.3.0: 记录 token 用量（OpenAI-compatible API 通常返回 usage 字段，Ollama 不返回）
+        try {
+          const { recordUsage } = await import("../store/usage.ts");
+          recordUsage(
+            "config-llm",  // provider 标识（配置的 LLM，非 runtime）
+            "unknown",     // purpose 由上层调用方通过包装注入，此处默认 unknown
+            data.usage?.prompt_tokens ?? 0,
+            data.usage?.completion_tokens ?? 0,
+          );
+        } catch { /* usage 记录失败不影响主流程 */ }
 
         return content.trim();
       } catch (err) {
@@ -247,6 +259,19 @@ export function createRuntimeCompleteFn(
     if (!text) {
       throw new Error("runtime LLM returned no content");
     }
+
+    // v2.3.0: 记录 runtime LLM token 用量（usage 字段来自 OpenClaw runtime）
+    try {
+      const { recordUsage } = await import("../store/usage.ts");
+      const usage = (result as any)?.usage;
+      recordUsage(
+        result?.provider ? `runtime-${result.provider}` : "runtime",
+        "unknown",
+        usage?.promptTokens ?? 0,
+        usage?.completionTokens ?? 0,
+      );
+    } catch { /* usage 记录失败不影响主流程 */ }
+
     return text.trim();
   }
 

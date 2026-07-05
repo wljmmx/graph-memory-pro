@@ -4,6 +4,46 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.3.0] — 2026-07-06
+
+### 总结
+
+v2.3.0 聚焦工程化与用户体验增强。落地 eslint 阻塞 CI、Embedding 维度校验、gm_doctor 自检工具、3 档预设配置、QUICKSTART.md、LLM token 用量监控等 8 项能力。测试 367 → 370 用例（+3），tsc 0 错误，lint 0 errors，全部向后兼容。
+
+### Added — 新增能力
+
+- **gm_doctor 自检工具**：[src/routes/crud.ts](src/routes/crud.ts) 新增 `GET /api/doctor` 端点。一次性验证 Neo4j / LLM / Embedding 三大依赖的连通性 + 配置完整性，返回 5 项 checks（neo4j/graph_schema/llm/embedding/judge）的 ok/warn/error 状态 + 诊断 hint。降低新用户排查配置问题成本。
+- **Embedding 维度校验**：[src/engine/embed.ts](src/engine/embed.ts) 在返回向量后校验 `vec.length === config.dimensions`。防止模型更换后维度与向量索引不一致（如 nomic-embed-text 768 → 1024）。未配置 dimensions 时不校验（向后兼容）。
+- **LLM token 用量监控**：
+  - [src/store/usage.ts](src/store/usage.ts) 新增进程级 usage 累计（按 provider/purpose 分组）
+  - [src/engine/llm.ts](src/engine/llm.ts) 在 `createOpenAICompatibleComplete` 和 `createRuntimeCompleteFn` 中记录 token 用量
+  - [src/routes/crud.ts](src/routes/crud.ts) 新增 `GET /api/usage` 端点查询累计用量
+  - `/api/metrics` Prometheus 输出新增 4 个指标：`graph_memory_llm_calls_total` / `graph_memory_llm_tokens_total` / `graph_memory_llm_prompt_tokens_total` / `graph_memory_llm_completion_tokens_total`
+- **3 档预设配置**：[config.presets/](config.presets/) 新增 minimal / balanced / full 三档预设配置 + README 选用指南。降低新用户面对 32 项配置的认知负担。
+  - `minimal.json`：仅 neo4j + llm + embedding，19 项功能全关
+  - `balanced.json`：8 项核心功能 ON（推荐生产起点）
+  - `full.json`：17 项功能全开（评测/高级用户）
+- **QUICKSTART.md**：[QUICKSTART.md](QUICKSTART.md) 新增 5 分钟端到端教程（前置准备 → 最小配置 → 启动自检 → 首次记录 → 下一步），含 3 个常见错误排查。
+
+### Changed — 工程化增强
+
+- **eslint 正式接入 CI**：[eslint.config.js](eslint.config.js) flat config + `@typescript-eslint/eslint-plugin`。`npm run lint` 覆盖 src/ + index.ts，CI lint job 移除 `continue-on-error: true`，lint 失败将阻塞 CI。清理 30 个历史 lint errors（未使用 import / 未使用 catch err / prefer-const）。
+- **package-lock.json 入库**：从 .gitignore 移除 `package-lock.json`，确保 CI `npm ci` 可重现构建。
+- **lint 脚本扩展**：`eslint src/` → `eslint src/ index.ts`，覆盖入口文件。
+
+### Added — 测试
+
+- **Embedding 维度校验测试**：3 用例（维度一致通过 / 维度不匹配抛错 / 未配置 dimensions 不校验）
+- 总测试数 367 → **370**（15 文件）
+
+### Configuration Migration — 配置迁移（v2.2.2 → v2.3.0）
+
+无破坏性变更，现有 v2.2.2 配置无需任何改动。
+
+**新增可选能力**：
+- `embedding.dimensions` 现在会被引擎层校验（v2.2.2 仅用于 schema 初始化）。如维度不匹配会抛错，请核对模型实际维度。
+- 新增 `GET /api/doctor` 和 `GET /api/usage` 两个只读端点，无需配置。
+
 ## [2.2.2] — 2026-07-06
 
 ### 总结

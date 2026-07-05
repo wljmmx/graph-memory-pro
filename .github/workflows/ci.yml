@@ -50,5 +50,5 @@ jobs:
           cache: npm
       - run: npm ci
       - name: ESLint
+        # v2.3.0 起 lint 阻塞 CI（eslint 已正式安装 + flat config 配置）
         run: npm run lint
-        continue-on-error: true # lint 不阻塞 CI（非关键路径）

@@ -105,7 +105,7 @@ export async function detectCommunities(driver: Driver, maxIter = 50): Promise<C
       communities: finalCommunities,
       count: finalCommunities.size,
     };
-  } catch (err) {
+  } catch {
     try { await session.run("CALL gds.graph.drop($graphName)", { graphName }); } catch {}
     return { labels: new Map(), communities: new Map(), count: 0 };
   } finally {
@@ -218,7 +218,7 @@ export async function detectHierarchicalCommunities(
         level3ToLevel2.set(domainId, memberTopics);
         // 把 domainId 写到所有属于该领域的节点
         for (const topicId of memberTopics) {
-          for (const [nodeId, h] of hierarchy) {
+          for (const [_nodeId, h] of hierarchy) {
             if (h.level2 === topicId) {
               h.level3 = domainId;
             }
