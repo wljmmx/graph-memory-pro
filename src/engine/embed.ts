@@ -61,7 +61,7 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
           },
           body: JSON.stringify({
             model,
-            prompt: text,
+            input: [text],
             keep_alive: keepAlive,
             ...(config.options ? { options: config.options } : {}),
           }),
