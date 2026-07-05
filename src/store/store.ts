@@ -230,7 +230,8 @@ export async function upsertNode(
            n.embeddingHash = COALESCE($embeddingHash, n.embeddingHash)
        SET n.validTo = $validTo,
            n.supersededBy = $supersededBy,
-           n.embeddingModel = $embeddingModel
+           // v2.2.0 fix: 用 COALESCE 保护，避免调用方未传 embeddingModel 时清空已有值
+           n.embeddingModel = COALESCE($embeddingModel, n.embeddingModel)
        `,
       {
         id: node.id,
@@ -385,7 +386,8 @@ export async function graphWalk(
   try {
     // ✅ 优化：限制关系类型为有意义的业务关系，排除 NEXT_SESSION/CONTAINS 等高频低价值边
     // v2.1.2: 新增 CAUSED_BY / LEADS_TO 因果边类型
-    const relTypes = "USED_SKILL|SOLVED_BY|REQUIRES|PATCHES|CONFLICTS_WITH|CAUSED_BY|LEADS_TO";
+    // v2.2.0 fix: 补回遗漏的 RELATES_TO（白名单 8 种业务边必须全部覆盖，否则跨领域节点无法被图遍历召回）
+    const relTypes = "USED_SKILL|SOLVED_BY|REQUIRES|PATCHES|CONFLICTS_WITH|RELATES_TO|CAUSED_BY|LEADS_TO";
     const result = await session.run(
       `MATCH path = (start:Task|Skill|Event)-[r:${relTypes}*1..${depth}]-(end:Task|Skill|Event)
        WHERE start.id IN $seedIds

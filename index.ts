@@ -871,9 +871,15 @@ export default definePluginEntry({
           }
           // 持久化最新状态
           try {
-            await mkdir(join(statePath, "..").replace(/\/[^/]+$/, ""), { recursive: true }).catch(() => {});
-            await writeFile(statePath, tuner.serialize()).catch(() => {});
-          } catch { /* 持久化失败不影响调优结果 */ }
+            // v2.2.0 fix: 旧实现 join(statePath, "..").replace(/\/[^/]+$/, "") 会误删一级目录
+            // 实际创建的是祖父目录而非父目录，导致 writeFile 因父目录不存在而 ENOENT
+            // 改用 dirname 直接获取父目录
+            const { dirname } = await import("node:path");
+            await mkdir(dirname(statePath), { recursive: true });
+            await writeFile(statePath, tuner.serialize());
+          } catch (err) {
+            console.warn(`[graph-memory-pro] auto-tuner state persist failed: ${err}`);
+          }
 
           const lines = [
             "🔧 EvolveMem Auto-Tuning",
