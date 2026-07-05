@@ -76,7 +76,15 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
         const data = await response.json() as any;
 
         if (!data.embeddings?.[0]) {
-          throw new Error("Ollama embedding API returned no embedding data");
+          // 打印 Ollama 实际返回内容，便于诊断（如模型不支持 embed、模型名错误等）
+          const respPreview = JSON.stringify(data).slice(0, 300);
+          console.warn(
+            `[graph-memory-pro:embed] Ollama /api/embed returned no embedding data`,
+            { model, responsePreview: respPreview, hasEmbeddings: Array.isArray(data.embeddings), embeddingsLen: data.embeddings?.length },
+          );
+          throw new Error(
+            `Ollama embedding API returned no embedding data (model=${model}, response=${respPreview})`,
+          );
         }
 
         return data.embeddings[0];

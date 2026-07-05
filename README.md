@@ -79,8 +79,8 @@ graph-memory-pro 是**记忆底层引擎**，只做"图内"操作：
 **P2-1：结构化日志** — 统一 `createLogger(namespace)` 接口，分级 debug/info/warn/error，环境变量 `GM_LOG_LEVEL` 过滤、`GM_LOG_JSON=true` 输出 JSON 行（便于 Loki/ELK 采集），`setTraceId` 跨模块关联请求链路，`setExternalLogger` 注入 OpenClaw SDK logger。已迁移 maintenance + recall + judge 共 44 处 console 调用。
 
 ### 测试覆盖
-- 14 个测试文件，334 个用例（Neo4j mock 基础设施，CI 友好）
-- 覆盖全部 5 批次核心功能 + v2.2.1 新增（Tier 2/3 裁判 / 增量维护 / 结构化日志）：指标计算 / AutoTuner / 关联矩阵 / 裁判闭环 / 维护阶段 / 软替换 / 缓存 / 社区 / 类型配置 / HTTP API 路由 / LLM-Embedding 引擎 / 三元组抽取 / 增量维护 / 结构化日志
+- 15 个测试文件，340 个用例（Neo4j mock 基础设施，CI 友好）
+- 覆盖全部 5 批次核心功能 + v2.2.1 新增（Tier 2/3 裁判 / 增量维护 / 结构化日志 / PPR closed session 容错）：指标计算 / AutoTuner / 关联矩阵 / 裁判闭环 / 维护阶段 / 软替换 / 缓存 / 社区 / 类型配置 / HTTP API 路由 / LLM-Embedding 引擎 / 三元组抽取 / 增量维护 / 结构化日志 / PageRank 容错
 
 ## 版本
 
@@ -400,9 +400,10 @@ test/
 ├── benchmark-metrics.test.ts
 ├── auto-tuner.test.ts
 ├── association-matrix.test.ts
-├── judge-feedback.test.ts       # 裁判闭环 + Tier 2/3 策略（v2.2.1 扩展）
+├── test/judge-feedback.test.ts       # 裁判闭环 + Tier 2/3 策略（v2.2.1 扩展）
 ├── maintenance-phases.test.ts
 ├── incremental-maintenance.test.ts  # 增量维护（v2.2.1 新增）
+├── pagerank.test.ts            # PageRank PPR closed session 容错（v2.2.1 新增）
 ├── logger.test.ts              # 结构化日志（v2.2.1 新增）
 ├── store-softreplace-r4.test.ts
 ├── query-cache.test.ts

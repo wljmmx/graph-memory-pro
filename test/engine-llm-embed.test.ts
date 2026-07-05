@@ -249,6 +249,18 @@ describe("createEmbedFn", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(4);
   });
 
+  it("无 embeddings 数据时错误消息包含模型名和响应预览（便于诊断）", async () => {
+    vi.useFakeTimers();
+    // 模拟 Ollama 返回错误（如模型不支持 embed）
+    fetchSpy.mockResolvedValue(mockResponse({ error: "model 'qwen3.5:9b' does not support embed" }));
+    const embed = createEmbedFn({ baseURL: "http://localhost:11434", model: "qwen3.5:9b" });
+    const promise = embed("text");
+    // 错误消息应同时包含模型名 + 响应预览
+    const assertion = expect(promise).rejects.toThrow(/model=qwen3\.5:9b.*does not support embed/);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await assertion;
+  });
+
   it("网络错误后重试，第二次成功", async () => {
     vi.useFakeTimers();
     fetchSpy

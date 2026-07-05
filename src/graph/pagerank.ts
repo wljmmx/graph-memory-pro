@@ -8,6 +8,9 @@ import type { Driver, Session } from "neo4j-driver";
 import type { GmConfig } from "../types.ts";
 import { getSession } from "../store/db.ts";
 import { logPhase, isTimingEnabled } from "../timing.ts";
+import { createLogger } from "../logger.ts";
+
+const log = createLogger("pagerank");
 
 // v2.1.2: 新增 CAUSED_BY / LEADS_TO 因果边类型
 const ALL_REL_TYPES = ["NEXT_SESSION", "CONTAINS", "MENTIONS", "USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES", "CONFLICTS_WITH", "RELATES_TO", "CAUSED_BY", "LEADS_TO"];
@@ -124,15 +127,24 @@ export async function personalizedPageRank(
 
     return runPPR(session, SHARED_GRAPH_NAME, seedIds, candidateIds, cfg);
   } catch (gdsErr) {
-    // GDS error: invalidate cache and fallback
+    // GDS error 或 session 已失效（如 driver 被并发关闭）：
+    // invalidate cache and fallback to uniform scores
     _cachedRelTypeHash = null;
     _cachedTimestamp = 0;
-    try { await session.run(`CALL gds.graph.drop('${SHARED_GRAPH_NAME}')`); } catch {}
+    // 不在 catch 路径中复用原 session（可能已 closed，session.run 会抛
+    // "You cannot run more transactions on a closed session" 二次错误，掩盖原始错误）。
+    // GDS 图会在下次 ensureSharedProjection 时自动 drop+recreate，无需在此清理。
+    log.warn("personalizedPageRank failed, fallback to uniform scores", {
+      error: String(gdsErr),
+      seedCount: seedIds.length,
+      candidateCount: candidateIds.length,
+    });
     const scores = new Map<string, number>();
     candidateIds.forEach((id, i) => scores.set(id, 1 / (i + 1)));
     return { scores };
   } finally {
-    await session.close();
+    // finally 中 session.close() 在已 closed session 上不会抛错（driver 内部 no-op）
+    try { await session.close(); } catch {}
   }
 }
 
@@ -227,13 +239,14 @@ export async function computeGlobalPageRank(driver: Driver, cfg: GmConfig): Prom
 
     return readTopK(session);
   } catch (err) {
-    console.warn(`[graph-memory-pro] pagerank failed: ${err}`);
+    // 不在 catch 路径中复用原 session（可能已 closed，session.run 会抛
+    // "You cannot run more transactions on a closed session" 二次错误，掩盖原始错误）。
+    log.warn("computeGlobalPageRank failed", { error: String(err) });
     _cachedRelTypeHash = null;
     _cachedTimestamp = 0;
-    try { await session.run(`CALL gds.graph.drop('${SHARED_GRAPH_NAME}')`); } catch {}
     return { scores: new Map(), topK: [] };
   } finally {
-    await session.close();
+    try { await session.close(); } catch {}
   }
 }
 

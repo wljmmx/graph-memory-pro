@@ -27,7 +27,7 @@
 ```
 tsc --noEmit   →  0 errors
 npm run build  →  Build success
-npm test       →  334/334 passed (14 files)
+npm test       →  340/340 passed (15 files)
 ```
 
 ---
@@ -244,9 +244,9 @@ export function getTraceId(): string | null;
 ## 七、测试结果汇总
 
 ```
-Test Files  14 passed (14)
-     Tests  334 passed (334)
-  Duration  6.98s
+Test Files  15 passed (15)
+     Tests  340 passed (340)
+  Duration  5.18s
 ```
 
 | 测试文件 | 用例数 |
@@ -257,16 +257,17 @@ Test Files  14 passed (14)
 | judge-feedback.test.ts | +15（v2.2.1） |
 | maintenance-phases.test.ts | — |
 | incremental-maintenance.test.ts | +10（v2.2.1 新增） |
+| pagerank.test.ts | +5（v2.2.1 新增，PPR closed session 容错） |
 | logger.test.ts | +12（v2.2.1 新增） |
 | store-softreplace-r4.test.ts | — |
 | query-cache.test.ts | — |
 | community.test.ts | — |
 | types-config.test.ts | — |
 | crud-routes.test.ts | +1（v2.2.1 版本号断言同步） |
-| engine-llm-embed.test.ts | — |
+| engine-llm-embed.test.ts | +1（v2.2.1 错误诊断增强） |
 | extract.test.ts | — |
 
-**新增总计**：38 用例（298 → 334，+12.8%）
+**新增总计**：44 用例（298 → 340，+14.8%）
 
 ---
 
@@ -302,6 +303,8 @@ Test Files  14 passed (14)
 | maintenance / store 拆分后循环依赖 | 低 | 子模块单向依赖 schema.ts，无循环 |
 | 结构化日志性能开销 | 低 | 带缓存 + 级别过滤，debug 默认不输出 |
 | Neo4j `:MaintenanceMeta` 单例节点并发写 | 低 | `MERGE` + `SET +=` 原子操作，无丢失 |
+| **PPR / Global PR session closed**（driver 被并发关闭、连接断开） | 中 | catch 路径不再复用原 session（避免二次 "closed session" 错误），fallback 到 uniform scores；finally close 包裹 try/catch；下次 ensureSharedProjection 自动 drop+recreate GDS 图 |
+| **embed 模型配置错误**（误用 LLM 模型如 qwen3.5:9b） | 中 | 抛错前打印 Ollama 实际响应 + 模型名，便于诊断；调用方 catch 后 FTS 仍可工作 |
 
 ---
 

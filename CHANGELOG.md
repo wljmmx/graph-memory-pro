@@ -8,7 +8,7 @@
 
 ### 总结
 
-v2.2.0 工程化补强的延续版本，落地 P4 能力补齐（I-2 裁判 Tier 2/3、增量维护）与原降级未执行项（拆分 maintenance.ts / store.ts、结构化日志）。测试 298 → 334 用例（+36），tsc 0 错误，全部向后兼容。
+v2.2.0 工程化补强的延续版本，落地 P4 能力补齐（I-2 裁判 Tier 2/3、增量维护）与原降级未执行项（拆分 maintenance.ts / store.ts、结构化日志）。测试 298 → 340 用例（+42），tsc 0 错误，全部向后兼容。
 
 ### Added — 新增能力
 
@@ -39,7 +39,16 @@ v2.2.0 工程化补强的延续版本，落地 P4 能力补齐（I-2 裁判 Tier
 - **judge Tier 2/3 测试**：15 用例（LLM 判定 / 冷启动期不调 LLM / 失败 fallback / 非 JSON fallback / 节点截断 / Tier 3 注册/抛错/未注册/未配置/向后兼容）
 - **增量维护测试**：10 用例（markDirty/getDirtyNodeIds/clearDirty 持久化、runIncrementalMaintenance 无脏节点/多阶段/配置跳过/并发锁）
 - **结构化日志测试**：12 用例（缓存实例/child/info/warn/error 映射/级别过滤/JSON 输出/traceId/外部 logger 注入/fallback）
-- 总测试数 298 → **334**（14 文件）
+- **PageRank session closed 容错测试**：5 用例（PPR closed session 优雅降级 / catch 路径不调 session.run / 空入参 early return / computeGlobalPageRank closed session / 无活跃节点）
+- **embed 错误诊断测试**：1 用例（错误消息包含模型名 + 响应预览，便于定位 Ollama 配置错误）
+- 总测试数 298 → **340**（15 文件）
+
+### Fixed — 诊断增强
+
+- **embed.ts 错误诊断增强**：[src/engine/embed.ts](src/engine/embed.ts) 抛错前打印 Ollama 实际返回内容（`responsePreview`）+ 模型名，便于诊断"模型不支持 embed""配置错误"等问题。原错误 "missing embedding in response" 升级为 `Ollama embedding API returned no embedding data (model=X, response=Y)`。
+- **pagerank.ts PPR closed session 容错**：[src/graph/pagerank.ts](src/graph/pagerank.ts) catch 路径不再复用原 session 调 `gds.graph.drop`（避免 "You cannot run more transactions on a closed session" 二次错误掩盖原始错误）。GDS 图会在下次 `ensureSharedProjection` 自动 drop+recreate。
+- **pagerank.ts finally 容错**：`session.close()` 包裹 try/catch，避免在已 closed session 上 close 时抛错。
+- **结构化日志迁移**：pagerank.ts 的 `console.warn` 迁移到 `createLogger("pagerank").warn`，含上下文字段（error/seedCount/candidateCount）。
 
 ### Configuration Migration — 配置迁移（v2.2.0 → v2.2.1）
 
