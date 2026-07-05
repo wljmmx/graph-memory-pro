@@ -183,6 +183,7 @@ export default definePluginEntry({
       apiKey: Type.Optional(Type.String()),
       baseURL: Type.Optional(Type.String()),
       model: Type.Optional(Type.String()),
+      keepAlive: Type.Optional(Type.String()),
     })),
     embedding: Type.Optional(Type.Object({
       apiKey: Type.Optional(Type.String()),

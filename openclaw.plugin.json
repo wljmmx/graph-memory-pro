@@ -110,6 +110,13 @@
           },
           "model": {
             "type": "string"
+          },
+          "apiKey": {
+            "type": "string"
+          },
+          "keepAlive": {
+            "type": "string",
+            "description": "Ollama keep_alive 参数（仅 Ollama 识别，OpenAI 会忽略）。默认不传，Ollama 5m 后卸载模型"
           }
         }
       },

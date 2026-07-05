@@ -101,6 +101,87 @@ describe("createCompleteFn", () => {
     expect(body.temperature).toBe(0.3);
   });
 
+  it("配置 keepAlive 时透传到请求体（Ollama 模型驻留）", async () => {
+    fetchSpy.mockResolvedValue(
+      mockResponse({ choices: [{ message: { content: "ok" } }] }),
+    );
+    const complete = createCompleteFn({
+      baseURL: "http://localhost:11434/v1",
+      model: "qwen3.5:9b",
+      keepAlive: "30m",
+    });
+    await complete("s", "u");
+    const [, init] = fetchSpy.mock.calls[0];
+    const body = JSON.parse(init.body as string);
+    expect(body.keep_alive).toBe("30m");
+  });
+
+  it("未配置 keepAlive 时不传 keep_alive 字段（OpenAI 兼容）", async () => {
+    fetchSpy.mockResolvedValue(
+      mockResponse({ choices: [{ message: { content: "ok" } }] }),
+    );
+    const complete = createCompleteFn({
+      baseURL: "https://api.openai.com/v1",
+      model: "gpt-4o-mini",
+    });
+    await complete("s", "u");
+    const [, init] = fetchSpy.mock.calls[0];
+    const body = JSON.parse(init.body as string);
+    expect(body.keep_alive).toBeUndefined();
+  });
+
+  it("content 为数组格式（多模态/推理模型）时正确拼接 text", async () => {
+    // Ollama OpenAI-compat 层/推理模型可能返回 content 为数组
+    fetchSpy.mockResolvedValue(
+      mockResponse({
+        choices: [{
+          message: {
+            content: [
+              { type: "text", text: "第一段" },
+              { type: "text", text: "第二段" },
+            ],
+          },
+        }],
+      }),
+    );
+    const complete = createCompleteFn({
+      baseURL: "http://localhost:11434/v1",
+      model: "qwen3.5:9b",
+    });
+    const result = await complete("s", "u");
+    expect(result).toBe("第一段第二段");
+  });
+
+  it("content 为空数组时抛 'LLM returned no content'", async () => {
+    vi.useFakeTimers();
+    fetchSpy.mockResolvedValue(
+      mockResponse({ choices: [{ message: { content: [] } }] }),
+    );
+    const complete = createCompleteFn({
+      baseURL: "https://api.openai.com/v1",
+      model: "m",
+    });
+    const promise = complete("s", "u");
+    const assertion = expect(promise).rejects.toThrow(/no content/);
+    await vi.advanceTimersByTimeAsync(20_000);
+    await assertion;
+  });
+
+  it("content 为 null 时抛 'LLM returned no content'", async () => {
+    vi.useFakeTimers();
+    fetchSpy.mockResolvedValue(
+      mockResponse({ choices: [{ message: { content: null } }] }),
+    );
+    const complete = createCompleteFn({
+      baseURL: "https://api.openai.com/v1",
+      model: "m",
+    });
+    const promise = complete("s", "u");
+    const assertion = expect(promise).rejects.toThrow(/no content/);
+    await vi.advanceTimersByTimeAsync(20_000);
+    await assertion;
+  });
+
   it("baseURL 清洗：去除反引号 / 首尾空格 / 尾部斜杠", async () => {
     fetchSpy.mockResolvedValue(
       mockResponse({ choices: [{ message: { content: "ok" } }] }),
@@ -297,14 +378,16 @@ describe("createEmbedFn", () => {
     ).toBeUndefined();
   });
 
-  it("请求体包含 keep_alive（默认 5m）与 prompt 字段", async () => {
+  it("请求体包含 keep_alive（默认 5m）与 input 字段（v2 schema string 数组）", async () => {
     fetchSpy.mockResolvedValue(mockResponse({ embeddings: [[0.1]] }));
     const embed = createEmbedFn({ baseURL: "http://localhost:11434" });
     await embed("my text");
     const [, init] = fetchSpy.mock.calls[0];
     const body = JSON.parse(init.body as string);
     expect(body.keep_alive).toBe("5m");
-    expect(body.prompt).toBe("my text");
+    // Ollama v2 schema: input 是 string 数组（非旧的 prompt 字符串）
+    expect(body.input).toEqual(["my text"]);
+    expect(body.prompt).toBeUndefined();
   });
 
   it("keepAlive 自定义值透传到请求体", async () => {

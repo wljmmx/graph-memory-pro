@@ -12,6 +12,8 @@ export interface LlmConfig {
   apiKey?: string;
   baseURL?: string;
   model?: string;
+  /** Ollama keep_alive 参数（仅 Ollama 识别，OpenAI 会忽略） */
+  keepAlive?: string;
 }
 
 export interface EmbeddingConfig {
