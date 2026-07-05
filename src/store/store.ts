@@ -8,6 +8,7 @@ import type { Driver } from "neo4j-driver";
 import neo4j from "neo4j-driver";
 import { createHash } from "crypto";
 import type { GmNode, GmEdge, GmMessage, NodeType, EdgeType, CommunitySummary } from "../types.ts";
+import { VALID_EDGE_TYPES } from "../types.ts";
 import { getSession } from "./db.ts";
 
 // ─── 共享工具 ───────────────────────────────────────────────
@@ -617,6 +618,10 @@ export async function upsertEdge(
   driver: Driver,
   edge: GmEdge,
 ): Promise<void> {
+  // v2.2.0: 防御 LLM 提取产生非预期边类型（Cypher 注入风险）
+  if (!VALID_EDGE_TYPES.has(edge.type)) {
+    throw new Error(`Invalid edge type: ${edge.type}`);
+  }
   const session = getSession(driver);
   try {
     await session.run(
@@ -672,6 +677,8 @@ export async function mergeNodes(
       const relTypeRaw = record.get('relType');
       if (!relTypeRaw) continue;
       const relType = String(relTypeRaw);
+      // v2.2.0: 防御非预期边类型
+      if (!VALID_EDGE_TYPES.has(relType)) continue;
       const instruction = record.get('instruction') ? String(record.get('instruction')) : null;
       const weight = record.get('weight');
       const w = typeof weight === 'number' ? weight : (weight && typeof weight.toNumber === 'function' ? weight.toNumber() : 0);
@@ -681,7 +688,10 @@ export async function mergeNodes(
          MERGE (k)-[nr:${relType}]->(t)
          SET nr.instruction = CASE
            WHEN nr.instruction IS NULL OR trim(nr.instruction) = '' THEN COALESCE($instruction, nr.instruction)
-           WHEN $instruction IS NOT NULL AND nr.instruction <> $instruction THEN nr.instruction + ' | ' + $instruction
+           // v2.2.0: 限制指令拼接长度，防止多次合并后无限增长
+           WHEN $instruction IS NOT NULL AND nr.instruction <> $instruction
+                AND size(nr.instruction) < 2000
+                THEN nr.instruction + ' | ' + $instruction
            ELSE nr.instruction
          END,
          nr.weight = COALESCE(nr.weight, 0) + $weight,
@@ -708,6 +718,8 @@ export async function mergeNodes(
       const relTypeRaw = record.get('relType');
       if (!relTypeRaw) continue;
       const relType = String(relTypeRaw);
+      // v2.2.0: 防御非预期边类型
+      if (!VALID_EDGE_TYPES.has(relType)) continue;
       const instruction = record.get('instruction') ? String(record.get('instruction')) : null;
       const weight = record.get('weight');
       const w = typeof weight === 'number' ? weight : (weight && typeof weight.toNumber === 'function' ? weight.toNumber() : 0);
@@ -717,7 +729,10 @@ export async function mergeNodes(
          MERGE (s)-[nr2:${relType}]->(k)
          SET nr2.instruction = CASE
            WHEN nr2.instruction IS NULL OR trim(nr2.instruction) = '' THEN COALESCE($instruction, nr2.instruction)
-           WHEN $instruction IS NOT NULL AND nr2.instruction <> $instruction THEN nr2.instruction + ' | ' + $instruction
+           // v2.2.0: 限制指令拼接长度
+           WHEN $instruction IS NOT NULL AND nr2.instruction <> $instruction
+                AND size(nr2.instruction) < 2000
+                THEN nr2.instruction + ' | ' + $instruction
            ELSE nr2.instruction
          END,
          nr2.weight = COALESCE(nr2.weight, 0) + $weight,
@@ -1110,10 +1125,9 @@ function recordToNode(rec: any): GmNode | null {
 function recordToEdge(rec: any): GmEdge | null {
   if (!rec || !rec.properties) return null;
   const p = rec.properties;
-  // 使用 startNodeElementId/endNodeElementId 获取节点 element ID
-  // 但我们需要的是业务 ID（n.id），需要通过 startNode/endNode 获取
-  const fromId = p.fromId ?? rec.startNodeElementId ?? rec.start?.toNumber?.() ?? "";
-  const toId = p.toId ?? rec.endNodeElementId ?? rec.end?.toNumber?.() ?? "";
+  // v2.2.0: 移除 elementId fallback（elementId 是 Neo4j 内部 ID，非业务 ID）
+  const fromId = p.fromId ?? "";
+  const toId = p.toId ?? "";
   return {
     id: p.id ?? `${fromId}-${toId}-${rec.type}`,
     type: rec.type,

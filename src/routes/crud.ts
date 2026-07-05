@@ -167,7 +167,12 @@ async function handleNodesByType(params: { type: string; limit?: string }): Prom
 async function handleMaintain(): Promise<{ status: number; body: any }> {
   if (!_driver || !_cfg) return { status: 503, body: { error: "Neo4j not connected" } };
   try {
+    // v2.2.0: 告知调用方哪些阶段因缺少 LLM/Embed 而跳过
+    const warnings: string[] = [];
+    if (!_llm) warnings.push("community-summaries skipped (LLM not configured)");
+    if (!_embed) warnings.push("embedding-migration skipped (Embed not configured)");
     const result = await runMaintenance(_driver, _cfg, _llm ?? undefined, _embed ?? undefined);
+    if (warnings.length > 0) (result as any).warnings = warnings;
     return { status: 200, body: result };
   } catch (err: any) {
     return { status: 500, body: { error: err.message } };

@@ -382,6 +382,7 @@ export class Recaller {
     //   - 高过时节点（stalenessScore > threshold）排到末尾
     //   - 同 staleness 等级按 score × importanceScore × (1 - stalenessScore) 降序
     //   - 旧版本（无 importanceScore）回退到 pagerank
+    // v2.2.0 fix: 两节点均为新节点时（importanceScore=0），增加 validatedCount + updatedAt 二级排序
     const stalenessThreshold = this.cfg?.staleness?.threshold ?? 0.7;
     nodes.sort((x, y) => {
       const sx = x.stalenessScore ?? 0;
@@ -395,8 +396,10 @@ export class Recaller {
       const iy = y.importanceScore ?? 0;
       const wx = ix * (1 - sx);
       const wy = iy * (1 - sy);
-      // 优先 importance 加权；若均无 importanceScore → 回退 pagerank
-      if (wx === 0 && wy === 0) return y.pagerank - x.pagerank;
+      // 优先 importance 加权；若均无 importanceScore → 回退 pagerank + validatedCount
+      if (wx === 0 && wy === 0) {
+        return (y.validatedCount - x.validatedCount) || (y.pagerank - x.pagerank) || (y.updatedAt - x.updatedAt);
+      }
       return wy - wx;
     });
 

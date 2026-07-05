@@ -265,6 +265,12 @@ export type EdgeType =
   | "CAUSED_BY"   // EVENT → EVENT：A 事件直接导致 B 事件
   | "LEADS_TO";   // TASK → EVENT：任务执行产生了某事件
 
+/** 运行时边类型白名单（防御 LLM 提取产生非预期类型） */
+export const VALID_EDGE_TYPES: ReadonlySet<string> = new Set([
+  "USED_SKILL", "SOLVED_BY", "REQUIRES", "PATCHES",
+  "CONFLICTS_WITH", "RELATES_TO", "CAUSED_BY", "LEADS_TO",
+]);
+
 export type NodeStatus = "active" | "deprecated" | "merged";
 
 /**

@@ -84,6 +84,11 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
         const error = err instanceof Error ? err : new Error(String(err));
         lastErr.push(error);
 
+        // v2.2.0: 对 4xx 错误（非 429 限流）不重试，与 llm.ts 保持一致
+        if (error.message.match(/Embedding API 4\d{2}/) && !error.message.includes("429")) {
+          throw error;
+        }
+
         if (attempt < delays.length) {
           await new Promise((r) => setTimeout(r, delays[attempt]));
         }
