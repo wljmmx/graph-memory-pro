@@ -1,6 +1,6 @@
 # Graph Memory Pro 演进路线图
 
-> 规划版本：2.1.10 ｜ 已发布版本：2.2.0
+> 规划版本：2.1.10 ｜ 已发布版本：2.2.1
 > 模块定位：**记忆底层引擎**——图内操作（提取/存储/检索/去重/维护/质量优化/自主进化）
 > 上层编排（上下文管理、prompt组装、Agent工作流、用户界面）由 **lcm-graph-extra** 负责
 > 基于 15 篇文献/项目横评，聚焦 T1 引擎核心 + T2 质量保障，不入编排层
@@ -15,6 +15,14 @@
 > - 单元测试补全（HTTP API / LLM-Embedding / 抽取器，230 → 298 用例）
 > - Dockerfile + docker-compose + GitHub Actions CI
 > - CHANGELOG.md（含配置迁移指南）
+>
+> **v2.2.1 工程化补强**（P4 能力补齐 + 降级项落地）：
+> - **P4-1**：I-2 裁判 Tier 2/3 接入点 — `JudgeStrategy` 抽象 + 3 个内置策略（Heuristic/LLM/Custom），含安全护栏（fallback/截断/超时）
+> - **P4-2**：增量维护（Incremental Maintenance）— 仅对 `markDirty` 脏节点执行节点级阶段，4 个 HTTP 端点
+> - **P1-4**：拆分 maintenance.ts — 1044 行 → 340 barrel + 6 子模块（staleness/health/importance/conflict/edge-weights/reverse-memory）
+> - **P1-5**：拆分 store.ts — 1128 行 → 69 barrel + 7 子模块（schema/nodes/edges/feedback/community/vector/messages）
+> - **P2-1**：结构化日志重构 — `createLogger(namespace)` 工厂 + 分级 + JSON + traceId，迁移 44 处 console 调用
+> - 单元测试 298 → 334 用例（+36），tsc 0 错误，全部向后兼容
 
 ---
 

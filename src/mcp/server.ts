@@ -74,7 +74,7 @@ export async function startMcpServer(
   // ── 创建 MCP server ──────────────────────────────────────────────
   const mcpServer = new McpServer({
     name: "graph-memory-pro",
-    version: "2.2.0",
+    version: "2.2.1",
   });
 
   // ── read-only tools ─────────────────────────────────────────────
@@ -92,8 +92,8 @@ export async function startMcpServer(
         try {
           await driver.verifyConnectivity();
           return {
-            content: [{ type: "text", text: `connected, version=2.2.0` }],
-            structuredContent: asStructured({ status: "connected", version: "2.2.0" }),
+            content: [{ type: "text", text: `connected, version=2.2.1` }],
+            structuredContent: asStructured({ status: "connected", version: "2.2.1" }),
           };
         } catch (err: any) {
           return {
@@ -478,7 +478,7 @@ export async function startMcpServer(
     // 健康检查端点（无需鉴权）
     if (req.method === "GET" && req.url === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", service: "graph-memory-pro-mcp", version: "2.2.0" }));
+      res.end(JSON.stringify({ status: "ok", service: "graph-memory-pro-mcp", version: "2.2.1" }));
       return;
     }
 

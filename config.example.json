@@ -1,5 +1,5 @@
 {
-  "$schema": "Graph Memory Pro v2.2.0 配置示例",
+  "$schema": "Graph Memory Pro v2.2.1 配置示例",
   "$comment": "复制为 config.json 后通过 --config 参数传给 npm run benchmark，或填入 openclaw.json plugins.entries.graph-memory-pro.config",
   "neo4j": {
     "uri": "bolt://localhost:7687",
@@ -45,7 +45,11 @@
     "enabled": true,
     "asyncMode": true,
     "judgeWarmupFeedbacks": 50,
-    "heuristicMatch": "both"
+    "heuristicMatch": "both",
+    "tier": 1,
+    "llmJudgeMaxNodes": 10,
+    "llmJudgeTimeoutMs": 8000,
+    "customStrategy": ""
   },
   "feedback": { "enabled": true, "retentionDays": 90 },
   "warmup": { "warmupFeedbacks": 100, "judgeWarmupFeedbacks": 50 },

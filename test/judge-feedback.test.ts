@@ -440,3 +440,252 @@ describe("Recaller.processFeedback 集成测试", () => {
     expect(lastCall[1].matchedBy).toBe("heuristic");
   });
 });
+
+// ═══════════════════════════════════════════════════════════════
+// v2.2.0 Tier 2/3 策略分发测试
+// ═══════════════════════════════════════════════════════════════
+
+describe("JudgeManager Tier 1/2/3 策略分发 (v2.2.0)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  // ── Tier 2: LLM 裁判 ────────────────────────────────────
+
+  describe("Tier 2 LLM 裁判", () => {
+    it("tier=2 + 注入 LLM → 热启动期使用 LLM 判定", async () => {
+      const fakeLlm = vi.fn().mockResolvedValue(
+        JSON.stringify({ used: ["n-001"], reasoning: "reply 引用了 n-001" }),
+      );
+      const jm = new JudgeManager(
+        { tier: 2, judgeWarmupFeedbacks: 1, asyncMode: false },
+        fakeLlm as any,
+      );
+      // 跨过冷启动期
+      jm.incrementFeedback();
+
+      const r = await jm.judge(
+        [mkNode("n-001", "conda-env"), mkNode("n-002", "docker")],
+        "我用了 conda-env 工具",
+      );
+
+      expect(fakeLlm).toHaveBeenCalledTimes(1);
+      expect(r.matchedBy).toBe("llm");
+      expect(r.effectiveTier).toBe(2);
+      expect(r.usedNodeIds).toEqual(["n-001"]);
+      expect(r.unusedNodeIds).toEqual(["n-002"]);
+    });
+
+    it("tier=2 + 冷启动期 → 仍用 Tier 1（不调用 LLM）", async () => {
+      const fakeLlm = vi.fn();
+      const jm = new JudgeManager(
+        { tier: 2, judgeWarmupFeedbacks: 100, asyncMode: false },
+        fakeLlm as any,
+      );
+      const r = await jm.judge([mkNode("n-001", "abc")], "abc");
+      expect(fakeLlm).not.toHaveBeenCalled();
+      expect(r.matchedBy).toBe("cold-start");
+      expect(r.coldStart).toBe(true);
+    });
+
+    it("tier=2 + LLM 抛错 → fallback 到 Tier 1 启发式", async () => {
+      const failingLlm = vi.fn().mockRejectedValue(new Error("network down"));
+      const jm = new JudgeManager(
+        { tier: 2, judgeWarmupFeedbacks: 1, asyncMode: false },
+        failingLlm as any,
+      );
+      jm.incrementFeedback();
+
+      const r = await jm.judge([mkNode("n-001", "conda-env")], "我用了 conda-env");
+
+      expect(failingLlm).toHaveBeenCalledTimes(1);
+      expect(r.effectiveTier).toBe(1);
+      expect(r.matchedBy).toBe("heuristic");
+      expect(r.usedNodeIds).toEqual(["n-001"]);
+    });
+
+    it("tier=2 + LLM 输出非 JSON → fallback 到 Tier 1", async () => {
+      const badJsonLlm = vi.fn().mockResolvedValue("这不是 JSON");
+      const jm = new JudgeManager(
+        { tier: 2, judgeWarmupFeedbacks: 1, asyncMode: false },
+        badJsonLlm as any,
+      );
+      jm.incrementFeedback();
+
+      const r = await jm.judge([mkNode("n-001", "conda-env")], "我用了 conda-env");
+
+      expect(r.effectiveTier).toBe(1);
+      expect(r.matchedBy).toBe("heuristic");
+    });
+
+    it("tier=2 + 节点数超过 maxNodes → 截断 LLM 判定 + 溢出走启发式", async () => {
+      const fakeLlm = vi.fn().mockResolvedValue(
+        JSON.stringify({ used: ["n-001"], reasoning: "" }),
+      );
+      const jm = new JudgeManager(
+        {
+          tier: 2,
+          judgeWarmupFeedbacks: 1,
+          llmJudgeMaxNodes: 2,
+          asyncMode: false,
+        },
+        fakeLlm as any,
+      );
+      jm.incrementFeedback();
+
+      // 4 个节点，仅前 2 个走 LLM，后 2 个走启发式
+      const nodes = [
+        mkNode("n-001", "alpha"),
+        mkNode("n-002", "beta"),
+        mkNode("n-003", "gamma"),
+        mkNode("n-004", "delta"),
+      ];
+      const r = await jm.judge(nodes, "我用到了 alpha 和 gamma");
+
+      expect(fakeLlm).toHaveBeenCalledTimes(1);
+      expect(r.effectiveTier).toBe(2);
+      // n-001 在 LLM 输出 used，n-002 在 LLM 输出 unused
+      // n-003 启发式 name 命中 used，n-004 启发式 unused
+      expect(r.usedNodeIds).toContain("n-001");
+      expect(r.usedNodeIds).toContain("n-003");
+      expect(r.unusedNodeIds).toContain("n-002");
+      expect(r.unusedNodeIds).toContain("n-004");
+    });
+
+    it("tier=2 但未注入 LLM → 降级到 Tier 1 + 警告", async () => {
+      const jm = new JudgeManager({ tier: 2, judgeWarmupFeedbacks: 1 });
+      jm.incrementFeedback();
+
+      const r = await jm.judge([mkNode("n-001", "conda-env")], "我用了 conda-env");
+
+      expect(r.effectiveTier).toBe(1);
+      expect(r.matchedBy).toBe("heuristic");
+      expect(r.usedNodeIds).toEqual(["n-001"]);
+    });
+
+    it("tier=2 + LLM 包裹 ```json 代码块 → 仍能解析", async () => {
+      const wrappedLlm = vi.fn().mockResolvedValue(
+        "```json\n" + JSON.stringify({ used: ["n-001"], reasoning: "" }) + "\n```",
+      );
+      const jm = new JudgeManager(
+        { tier: 2, judgeWarmupFeedbacks: 1, asyncMode: false },
+        wrappedLlm as any,
+      );
+      jm.incrementFeedback();
+
+      const r = await jm.judge([mkNode("n-001", "conda-env")], "用 conda-env");
+
+      expect(r.matchedBy).toBe("llm");
+      expect(r.effectiveTier).toBe(2);
+      expect(r.usedNodeIds).toEqual(["n-001"]);
+    });
+  });
+
+  // ── Tier 3: 自定义策略 ────────────────────────────────────
+
+  describe("Tier 3 自定义策略", () => {
+    it("registerStrategy + customStrategy → 调用自定义策略", async () => {
+      const customFn = vi.fn().mockResolvedValue({
+        usedNodeIds: ["n-custom"],
+        unusedNodeIds: ["n-other"],
+        matchedBy: "custom" as const,
+        coldStart: false,
+      });
+      const jm = new JudgeManager({
+        tier: 3,
+        customStrategy: "myStrategy",
+        judgeWarmupFeedbacks: 1,
+        asyncMode: false,
+      });
+      jm.registerStrategy("myStrategy", customFn);
+      jm.incrementFeedback();
+
+      const r = await jm.judge(
+        [mkNode("n-custom", "x"), mkNode("n-other", "y")],
+        "reply",
+      );
+
+      expect(customFn).toHaveBeenCalledTimes(1);
+      expect(r.matchedBy).toBe("custom");
+      expect(r.effectiveTier).toBe(3);
+      expect(r.usedNodeIds).toEqual(["n-custom"]);
+      expect(r.unusedNodeIds).toEqual(["n-other"]);
+    });
+
+    it("tier=3 但未注册自定义策略 → 抛错", async () => {
+      const jm = new JudgeManager({
+        tier: 3,
+        customStrategy: "nonExistent",
+        judgeWarmupFeedbacks: 1,
+        asyncMode: false,
+      });
+      jm.incrementFeedback();
+
+      await expect(
+        jm.judge([mkNode("n1", "abc")], "abc"),
+      ).rejects.toThrow(/not registered/);
+    });
+
+    it("tier=3 但未配置 customStrategy → 抛错", async () => {
+      const jm = new JudgeManager({
+        tier: 3,
+        judgeWarmupFeedbacks: 1,
+        asyncMode: false,
+      });
+      jm.incrementFeedback();
+
+      await expect(
+        jm.judge([mkNode("n1", "abc")], "abc"),
+      ).rejects.toThrow(/customStrategy not configured/);
+    });
+
+    it("自定义策略抛错 → 透传错误（不 fallback）", async () => {
+      const failingFn = vi.fn().mockRejectedValue(new Error("custom impl error"));
+      const jm = new JudgeManager({
+        tier: 3,
+        customStrategy: "failingStrategy",
+        judgeWarmupFeedbacks: 1,
+        asyncMode: false,
+      });
+      jm.registerStrategy("failingStrategy", failingFn);
+      jm.incrementFeedback();
+
+      await expect(
+        jm.judge([mkNode("n1", "abc")], "abc"),
+      ).rejects.toThrow(/custom strategy.*failed/);
+    });
+
+    it("listStrategies() 返回已注册策略列表", () => {
+      const jm = new JudgeManager({ tier: 1 });
+      expect(jm.listStrategies()).toContain("heuristic");
+
+      jm.registerStrategy("myStrategy", async () => ({
+        usedNodeIds: [],
+        unusedNodeIds: [],
+        matchedBy: "custom",
+        coldStart: false,
+      }));
+      expect(jm.listStrategies()).toContain("heuristic");
+      expect(jm.listStrategies()).toContain("myStrategy");
+    });
+
+    it("getConfig() 返回含 tier 字段", () => {
+      const jm = new JudgeManager({ tier: 2, llmJudgeMaxNodes: 5 });
+      const cfg = jm.getConfig();
+      expect(cfg.tier).toBe(2);
+      expect(cfg.llmJudgeMaxNodes).toBe(5);
+    });
+  });
+
+  // ── Tier 1 默认行为保持向后兼容 ────────────────────────────
+
+  describe("Tier 1 默认行为（向后兼容）", () => {
+    it("不传 tier → 默认 tier=1，行为与旧版一致", async () => {
+      const jm = new JudgeManager({ judgeWarmupFeedbacks: 1 });
+      jm.incrementFeedback();
+      const r = await jm.judge([mkNode("n-001", "conda-env")], "我用了 conda-env");
+      expect(r.matchedBy).toBe("heuristic");
+      expect(r.effectiveTier).toBe(1);
+    });
+  });
+});

@@ -16,6 +16,11 @@ import {
   getFeedbackCount,
 } from "../store/store.ts";
 import { runMaintenance, type MaintenanceResult } from "../graph/maintenance.ts";
+import {
+  runIncrementalMaintenance,
+  markDirty, getDirtyNodeIds, clearDirty,
+  type IncrementalMaintenanceResult,
+} from "../graph/incremental-maintenance.ts";
 import type { CompleteFn } from "../engine/llm.ts";
 import type { EmbedFn } from "../engine/embed.ts";
 import type { Recaller } from "../recaller/recall.ts";
@@ -41,7 +46,7 @@ export function initRoutes(
 }
 
 interface RouteHandler {
-  method: "GET" | "POST";
+  method: "GET" | "POST" | "DELETE";
   path: string;
   handler: (params: any) => Promise<{ status: number; body: any }>;
 }
@@ -57,6 +62,11 @@ export function getRoutes(): RouteHandler[] {
     { method: "GET", path: "/api/nodes-by-type/:type", handler: handleNodesByType },
     { method: "POST", path: "/api/maintain", handler: handleMaintain },
     { method: "POST", path: "/api/staleness/refresh", handler: handleRefreshStaleness }, // v2.1.2 S-14
+    // v2.2.0 P4: 增量维护
+    { method: "POST", path: "/api/maintain/incremental", handler: handleIncrementalMaintain },
+    { method: "POST", path: "/api/maintain/mark-dirty", handler: handleMarkDirty },
+    { method: "GET", path: "/api/maintain/dirty-nodes", handler: handleGetDirtyNodes },
+    { method: "DELETE", path: "/api/maintain/dirty-nodes", handler: handleClearDirty },
     // v2.2.0 P2-2: Prometheus 指标导出
     { method: "GET", path: "/api/metrics", handler: handleMetrics },
     // v2.2.0 P2-3: AutoTuner 状态查询
@@ -70,7 +80,7 @@ async function handleStatus(): Promise<{ status: number; body: any }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   try {
     await _driver.verifyConnectivity();
-    return { status: 200, body: { status: "connected", version: "2.2.0" } };
+    return { status: 200, body: { status: "connected", version: "2.2.1" } };
   } catch (err: any) {
     return { status: 503, body: { status: "disconnected", error: err.message } };
   }
@@ -185,6 +195,79 @@ async function handleMaintain(): Promise<{ status: number; body: any }> {
   }
 }
 
+// ── v2.2.0 P4-2: 增量维护 HTTP 入口 ───────────────────────────
+
+/**
+ * POST /api/maintain/incremental
+ *
+ * 触发增量维护，仅处理 markDirty 标记的脏节点。
+ * Body: { } （无参数）
+ */
+async function handleIncrementalMaintain(): Promise<{ status: number; body: any }> {
+  if (!_driver || !_cfg) return { status: 503, body: { error: "Neo4j not connected" } };
+  try {
+    const result = await runIncrementalMaintenance(
+      _driver, _cfg,
+      _llm ?? undefined, _embed ?? undefined,
+    );
+    return { status: 200, body: result };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+/**
+ * POST /api/maintain/mark-dirty
+ *
+ * 标记节点为脏（自上次维护后变更）。
+ * Body: { nodeIds: string[] }
+ */
+async function handleMarkDirty(params: any): Promise<{ status: number; body: any }> {
+  if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
+  const nodeIds: string[] = Array.isArray(params?.nodeIds) ? params.nodeIds : [];
+  if (nodeIds.length === 0) {
+    return { status: 400, body: { error: "nodeIds is required and must be non-empty array" } };
+  }
+  try {
+    await markDirty(_driver, nodeIds);
+    return { status: 200, body: { marked: nodeIds.length } };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+/**
+ * GET /api/maintain/dirty-nodes
+ *
+ * 返回当前所有脏节点 ID。
+ */
+async function handleGetDirtyNodes(): Promise<{ status: number; body: any }> {
+  if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
+  try {
+    const nodeIds = await getDirtyNodeIds(_driver);
+    return { status: 200, body: { count: nodeIds.length, nodeIds } };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+/**
+ * DELETE /api/maintain/dirty-nodes
+ *
+ * 清除脏节点标记。
+ * Body: { nodeIds?: string[] } （不传则清除全部）
+ */
+async function handleClearDirty(params: any): Promise<{ status: number; body: any }> {
+  if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
+  try {
+    const nodeIds: string[] | undefined = Array.isArray(params?.nodeIds) ? params.nodeIds : undefined;
+    await clearDirty(_driver, nodeIds);
+    return { status: 200, body: { cleared: nodeIds?.length ?? "all" } };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
 // ── v2.2.0 P2-2: Prometheus 指标导出 ───────────────────────────
 //
 // 输出 Prometheus text exposition format，便于 Prometheus / Grafana 直接抓取。
@@ -207,7 +290,7 @@ async function handleMetrics(): Promise<{ status: number; body: string }> {
   }
 
   const lines: string[] = [];
-  const labels = `plugin="graph-memory-pro",version="2.2.0"`;
+  const labels = `plugin="graph-memory-pro",version="2.2.1"`;
 
   // 基础计数
   let nodeCount = 0;

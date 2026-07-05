@@ -101,12 +101,20 @@ export interface GmConfig {
     similarityThreshold?: number;
   };
 
-  /** I-2 LLM 裁判反馈（Tier 1 启发式，默认开启） */
+  /** I-2 LLM 裁判反馈（v2.2.0：支持 Tier 1/2/3） */
   judge?: {
     enabled?: boolean;
     asyncMode?: boolean;
     judgeWarmupFeedbacks?: number;
     heuristicMatch?: "id" | "name" | "both";
+    /** 裁判层级（v2.2.0：1=启发式 / 2=LLM / 3=自定义） */
+    tier?: 1 | 2 | 3;
+    /** Tier 2 LLM 裁判单次最大节点数（默认 10） */
+    llmJudgeMaxNodes?: number;
+    /** Tier 2 LLM 裁判超时（ms，默认 8000） */
+    llmJudgeTimeoutMs?: number;
+    /** Tier 3 自定义策略名称（需先通过 JudgeManager.registerStrategy 注册） */
+    customStrategy?: string;
   };
 
   /** I-3 反馈持久化（默认开启） */

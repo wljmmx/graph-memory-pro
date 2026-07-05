@@ -19,6 +19,9 @@ import { logPhase, isTimingEnabled, printAllDistributions, resetAllDistributions
 import { QueryCache } from "./query-cache.ts";
 import { JudgeManager } from "./judge.ts";
 import { AssociationMatrix } from "./association-matrix.ts";
+import { createLogger } from "../logger.ts";
+
+const log = createLogger("recaller");
 
 let _recallCallCount = 0;
 const REPORT_INTERVAL = 50;
@@ -107,11 +110,11 @@ export class Recaller {
     logPhase("recall_total", totalMs, { nodes: merged.nodes.length, edges: merged.edges.length });
 
     if (this.timingCallCount % REPORT_INTERVAL === 0 && isTimingEnabled()) {
-      console.log(printAllDistributions());
+      log.info("timing distribution", { distribution: printAllDistributions() });
     }
 
     if (process.env.GM_DEBUG) {
-      console.log("[DEBUG] recall: " + precise.nodes.length + " precise + " + generalized.nodes.length + " generalized = " + merged.nodes.length + " total (" + totalMs.toFixed(1) + "ms)");
+      log.debug("recall completed", { precise: precise.nodes.length, generalized: generalized.nodes.length, total: merged.nodes.length, ms: totalMs.toFixed(1) });
     }
 
     return merged;
@@ -168,20 +171,20 @@ export class Recaller {
             try {
               await this.updateAssociationMatrix(query, fb.usedNodeIds, fb.unusedNodeIds);
             } catch (err) {
-              if (process.env.GM_DEBUG) console.log(`[L-1] M update failed: ${err}`);
+              if (process.env.GM_DEBUG) log.warn("M update failed", { error: String(err) });
             }
           }
 
           if (process.env.GM_DEBUG) {
             const coldStart = this.judgeManager!.isColdStart();
-            console.log(`[judge] ${fb.usedNodeIds.length}/${fb.recalledNodeIds.length} used, cold=${coldStart}`);
+            log.debug("judge result", { used: fb.usedNodeIds.length, recalled: fb.recalledNodeIds.length, coldStart });
           }
         },
       );
       // feedback 在同步模式下有值（已通过回调处理），异步模式下为 null（回调已在后台执行）
       void feedback;
     } catch (err) {
-      console.warn(`[graph-memory-pro] feedback persistence failed: ${err}`);
+      log.warn("feedback persistence failed", { error: String(err) });
     }
   }
 
@@ -213,9 +216,7 @@ export class Recaller {
     const result = this.associationMatrix.updateWithMarginalUtility(queryVec, reward);
 
     if (process.env.GM_DEBUG) {
-      console.log(
-        `[L-1] M update: reward=${reward.toFixed(3)}, applied=${result.applied}, gain=${result.neighborhoodGain.toFixed(3)}`,
-      );
+      log.info("M update", { reward: reward.toFixed(3), applied: result.applied, gain: result.neighborhoodGain.toFixed(3) });
     }
   }
 
@@ -251,7 +252,7 @@ export class Recaller {
           vecNodes = vecResults.map(v => v.node).slice(0, limit);
         }
       } catch (e) {
-        if (process.env.GM_DEBUG) console.log("[recall-precise] vector search failed: " + e);
+        if (process.env.GM_DEBUG) log.warn("recall-precise vector search failed", { error: String(e) });
       }
     }
 
@@ -285,7 +286,7 @@ export class Recaller {
       logPhase("ppr_compute", Date.now() - tPpr, { scores: pprResult.scores.size });
       pprScores = pprResult.scores;
     } catch (e) {
-      if (process.env.GM_DEBUG) console.log("[recall-precise] PPR failed: " + e);
+      if (process.env.GM_DEBUG) log.warn("recall-precise PPR failed", { error: String(e) });
       pprScores = new Map();
     }
 
@@ -335,7 +336,7 @@ export class Recaller {
         logPhase("ppr_compute", Date.now() - tPpr, { scores: pprResult.scores.size, context: "generalized" });
         pprScores = pprResult.scores;
       } catch (e) {
-        if (process.env.GM_DEBUG) console.log("[recall-generalized] PPR failed: " + e);
+        if (process.env.GM_DEBUG) log.warn("recall-generalized PPR failed", { error: String(e) });
         pprScores = new Map();
       }
 
@@ -349,7 +350,7 @@ export class Recaller {
       logPhase("recall_generalized", Date.now() - tGen, { finalNodes: finalNodes.length });
       return { nodes: finalNodes, edges: [], tokenEstimate: finalNodes.length * 30 };
     } catch (e) {
-      if (process.env.GM_DEBUG) console.log("[recall-generalized] failed: " + e);
+      if (process.env.GM_DEBUG) log.warn("recall-generalized failed", { error: String(e) });
       return { nodes: [], edges: [], tokenEstimate: 0 };
     }
   }

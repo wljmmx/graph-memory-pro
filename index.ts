@@ -1,7 +1,7 @@
 /**
  * graph-memory-pro — Neo4j Knowledge Graph Memory Plugin
  *
- * Version: 2.2.0
+ * Version: 2.2.1
  *
  * 架构定位（A 方案）:
  *   - 不占用 slots（memory/contextEngine）
@@ -245,6 +245,11 @@ export default definePluginEntry({
         Type.Literal("name"),
         Type.Literal("both"),
       ])),
+      // v2.2.0 Tier 1/2/3
+      tier: Type.Optional(Type.Union([Type.Literal(1), Type.Literal(2), Type.Literal(3)])),
+      llmJudgeMaxNodes: Type.Optional(Type.Number({ default: 10 })),
+      llmJudgeTimeoutMs: Type.Optional(Type.Number({ default: 8000 })),
+      customStrategy: Type.Optional(Type.String()),
     })),
     feedback: Type.Optional(Type.Object({
       enabled: Type.Optional(Type.Boolean({ default: true })),
@@ -341,6 +346,13 @@ export default definePluginEntry({
   }) as any),
   register(api: any) {
     const logger = api.logger ?? console;
+    // v2.2.0 P2-1：把 SDK logger 注入到结构化日志模块
+    try {
+      const { setExternalLogger } = require("./src/logger.ts");
+      setExternalLogger(api.logger ?? null);
+    } catch {
+      // logger 模块加载失败不影响主流程
+    }
 
     // ── Gateway 启动时初始化 ──────────────────────
     api.on("gateway_start", async (event: any) => {

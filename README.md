@@ -59,13 +59,32 @@ graph-memory-pro 是**记忆底层引擎**，只做"图内"操作：
   - explore-on-stagnation（5 轮无改进 → 探索新维度）
   - 8 参数动作空间 + LLM 诊断 + 启发式 fallback
 
+### v2.2.1 工程化补强（5 项落地）
+
+**P4-1：I-2 裁判 Tier 2/3 接入点** — 引入 `JudgeStrategy` 抽象接口 + 3 个内置策略：
+- Tier 1 `HeuristicJudgeStrategy`（默认，启发式 id/name 匹配，与 v2.2.0 行为一致）
+- Tier 2 `LlmJudgeStrategy`（构造 prompt 让 LLM 输出 JSON `{used, reasoning}`，节点超 `llmJudgeMaxNodes` 截断）
+- Tier 3 `CustomJudgeStrategy`（外部注入点，通过 `registerStrategy(name, fn)`）
+- 安全护栏：LLM 失败/超时/JSON 解析失败 → 自动 fallback Tier 1；冷启动期（< `judgeWarmupFeedbacks`）不调 LLM
+
+**P4-2：增量维护（Incremental Maintenance）** — 仅对 `markDirty` 标记的脏节点执行节点级阶段（Phase 1/5/7/8/9），全图阶段仍走 `runMaintenance`：
+- 脏节点持久化到 Neo4j（`:MaintenanceMeta { dirtyNodeIds }`）
+- 4 个 HTTP 端点：`POST /api/maintain/incremental` / `POST /api/maintain/mark-dirty` / `GET /api/maintain/dirty-nodes` / `DELETE /api/maintain/dirty-nodes`
+- 适用场景：大图谱降低维护成本，写入节点后 mark-dirty，定期触发增量维护
+
+**P1-4：拆分 maintenance.ts** — 1044 行 → 340 行 barrel + 6 个子模块（staleness/health/importance/conflict/edge-weights/reverse-memory，共 739 行），所有现有 import 路径不变。
+
+**P1-5：拆分 store.ts** — 1128 行 → 69 行 barrel + 7 个子模块（schema/nodes/edges/feedback/community/vector/messages，共 1191 行），所有现有 import 路径不变。
+
+**P2-1：结构化日志** — 统一 `createLogger(namespace)` 接口，分级 debug/info/warn/error，环境变量 `GM_LOG_LEVEL` 过滤、`GM_LOG_JSON=true` 输出 JSON 行（便于 Loki/ELK 采集），`setTraceId` 跨模块关联请求链路，`setExternalLogger` 注入 OpenClaw SDK logger。已迁移 maintenance + recall + judge 共 44 处 console 调用。
+
 ### 测试覆盖
-- 12 个测试文件，298 个用例（Neo4j mock 基础设施，CI 友好）
-- 覆盖全部 5 批次核心功能：指标计算 / AutoTuner / 关联矩阵 / 裁判闭环 / 维护阶段 / 软替换 / 缓存 / 社区 / 类型配置 / HTTP API 路由 / LLM-Embedding 引擎 / 三元组抽取
+- 14 个测试文件，334 个用例（Neo4j mock 基础设施，CI 友好）
+- 覆盖全部 5 批次核心功能 + v2.2.1 新增（Tier 2/3 裁判 / 增量维护 / 结构化日志）：指标计算 / AutoTuner / 关联矩阵 / 裁判闭环 / 维护阶段 / 软替换 / 缓存 / 社区 / 类型配置 / HTTP API 路由 / LLM-Embedding 引擎 / 三元组抽取 / 增量维护 / 结构化日志
 
 ## 版本
 
-**当前版本：2.2.0**
+**当前版本：2.2.1**
 
 ## 安装
 
@@ -97,7 +116,7 @@ npm install @openclaw/graph-memory-pro
           "staleness": { "enabled": true, "threshold": 0.7 },
           "state": { "enabled": true, "filterSupersededInRecall": true },
           "queryCache": { "enabled": true, "maxSize": 100, "ttlMs": 1800000 },
-          "judge": { "enabled": true, "asyncMode": true, "heuristicMatch": "both" },
+          "judge": { "enabled": true, "asyncMode": true, "heuristicMatch": "both", "tier": 1, "llmJudgeMaxNodes": 10, "llmJudgeTimeoutMs": 8000 },
           "associationMatrix": { "enabled": true, "dimensions": 768, "learningRate": 0.01 },
           "importance": { "enabled": true },
           "hierarchicalCommunity": { "enabled": true, "depth": 3 },
@@ -213,6 +232,10 @@ const { result } = await res.json();
 | GET | `/api/top` | Top 节点（按 PageRank） |
 | GET | `/api/nodes-by-type/:type` | 按类型获取节点 |
 | POST | `/api/maintain` | 触发维护 |
+| POST | `/api/maintain/incremental` | 增量维护（仅对脏节点执行节点级阶段）（v2.2.1） |
+| POST | `/api/maintain/mark-dirty` | 标记节点为脏（v2.2.1） |
+| GET | `/api/maintain/dirty-nodes` | 读取脏节点列表（v2.2.1） |
+| DELETE | `/api/maintain/dirty-nodes` | 清空脏节点标记（v2.2.1） |
 | POST | `/api/staleness/refresh` | S-14 手动刷新过时评分（v2.1.2） |
 | GET | `/api/metrics` | Prometheus 指标导出（v2.2.0） |
 | GET | `/api/auto-tuner/state` | AutoTuner 调优状态（v2.2.0） |
@@ -225,13 +248,13 @@ const { result } = await res.json();
 ```
 # HELP graph_memory_nodes_total Total nodes in the graph.
 # TYPE graph_memory_nodes_total gauge
-graph_memory_nodes_total{plugin="graph-memory-pro",version="2.2.0"} 5
+graph_memory_nodes_total{plugin="graph-memory-pro",version="2.2.1"} 5
 # HELP graph_memory_cache_hit_rate Query cache hit rate [0,1].
 # TYPE graph_memory_cache_hit_rate gauge
-graph_memory_cache_hit_rate{plugin="graph-memory-pro",version="2.2.0"} 0.123
+graph_memory_cache_hit_rate{plugin="graph-memory-pro",version="2.2.1"} 0.123
 # HELP graph_memory_association_matrix_updates_applied Total accepted M updates.
 # TYPE graph_memory_association_matrix_updates_applied gauge
-graph_memory_association_matrix_updates_applied{plugin="graph-memory-pro",version="2.2.0"} 42
+graph_memory_association_matrix_updates_applied{plugin="graph-memory-pro",version="2.2.1"} 42
 ```
 
 覆盖指标：`graph_memory_up` / `nodes_total` / `edges_total` / `feedback_total` / `cache_size` / `cache_hit_rate` / `judge_cold_start` / `association_matrix_t` / `association_matrix_updates_applied` / `association_matrix_updates_rejected`。
@@ -331,13 +354,21 @@ src/
 ├── graph/
 │   ├── community.ts      # 社区检测（含 S-4 层次化）
 │   ├── dedup.ts          # 向量去重
-│   ├── maintenance.ts    # 11 阶段维护管线
+│   ├── incremental-maintenance.ts  # 增量维护（v2.2.1，仅对脏节点执行节点级阶段）
+│   ├── maintenance.ts    # 11 阶段维护管线（barrel，340 行）
+│   ├── maintenance/       # 维护子模块（v2.2.1 拆分，6 个）
+│   │   ├── staleness.ts      # S-14 过时评分
+│   │   ├── health.ts         # G-5 图谱健康
+│   │   ├── importance.ts     # G-3 重要性评分
+│   │   ├── conflict.ts      # G-2 冲突消解
+│   │   ├── edge-weights.ts   # L-3 边权重调整
+│   │   └── reverse-memory.ts # L-4 反向记忆项
 │   ├── pagerank.ts       # PageRank
 │   └── reembed.ts        # 批量重嵌入（含 G-4 迁移）
 ├── recaller/
 │   ├── recall.ts         # 召回（含 L-1 M 变换 + I-1 缓存）
 │   ├── query-cache.ts    # I-1 LRU + cosine 缓存
-│   ├── judge.ts          # I-2 LLM 裁判
+│   ├── judge.ts          # I-2 LLM 裁判（Tier 1/2/3 策略分发，v2.2.1）
 │   └── association-matrix.ts  # L-1 关联矩阵 + R-3 边际效用
 ├── evolution/
 │   └── auto-tuner.ts     # R-1 EvolveMem 自主调优
@@ -347,22 +378,32 @@ src/
 │   ├── runner.ts         # S-10 评测运行器
 │   └── cli.ts            # S-10 Benchmark CLI 入口（v2.2.0）
 ├── routes/
-│   └── crud.ts           # HTTP 路由（含 /api/metrics, /api/auto-tuner/state 等 v2.2.0 端点）
+│   └── crud.ts           # HTTP 路由（含 /api/metrics, /api/auto-tuner/state, /api/maintain/* 等）
 ├── mcp/
 │   └── server.ts         # MCP Server（Streamable HTTP，13 个 tools）
 ├── store/
 │   ├── db.ts             # Neo4j 连接管理
-│   └── store.ts          # 数据操作层（含 R-4 可进化嵌入）
+│   ├── store.ts          # 数据操作层 barrel（barrel，69 行）
+│   ├── schema.ts         # Schema 初始化 + 共享工具（v2.2.1 拆分）
+│   ├── nodes.ts          # 节点 CRUD（v2.2.1 拆分）
+│   ├── edges.ts          # 边 CRUD + mergeNodes（v2.2.1 拆分）
+│   ├── feedback.ts       # I-3 反馈持久化（v2.2.1 拆分）
+│   ├── community.ts      # 社区管理（v2.2.1 拆分）
+│   ├── vector.ts         # 向量索引（v2.2.1 拆分）
+│   └── messages.ts       # 消息存储（v2.2.1 拆分）
+├── logger.ts             # 结构化日志（v2.2.1：createLogger + 分级 + JSON + traceId）
 ├── timing.ts             # 延迟分布统计
-└── types.ts              # 类型定义（GmConfig 32 项 + GmNode 完整字段 + McpConfig）
+└── types.ts              # 类型定义（GmConfig + GmNode + McpConfig + JudgeConfig）
 test/
 ├── helpers/
 │   └── neo4j-mock.ts     # Neo4j mock 测试基础设施
 ├── benchmark-metrics.test.ts
 ├── auto-tuner.test.ts
 ├── association-matrix.test.ts
-├── judge-feedback.test.ts
+├── judge-feedback.test.ts       # 裁判闭环 + Tier 2/3 策略（v2.2.1 扩展）
 ├── maintenance-phases.test.ts
+├── incremental-maintenance.test.ts  # 增量维护（v2.2.1 新增）
+├── logger.test.ts              # 结构化日志（v2.2.1 新增）
 ├── store-softreplace-r4.test.ts
 ├── query-cache.test.ts
 ├── community.test.ts
@@ -375,6 +416,8 @@ test/
 ## 路线图
 
 详见 [ROADMAP.md](ROADMAP.md) — v2.1.10 路线图（22 项方案，5 批次，已全部落地，发布为 v2.2.0）。
+
+v2.2.1 工程化补强（P4 + 降级项落地）详见 [CHANGELOG.md](CHANGELOG.md#221--2026-07-05)。
 
 ## 许可证
 

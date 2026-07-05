@@ -4,6 +4,60 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.2.1] — 2026-07-05
+
+### 总结
+
+v2.2.0 工程化补强的延续版本，落地 P4 能力补齐（I-2 裁判 Tier 2/3、增量维护）与原降级未执行项（拆分 maintenance.ts / store.ts、结构化日志）。测试 298 → 334 用例（+36），tsc 0 错误，全部向后兼容。
+
+### Added — 新增能力
+
+- **I-2 裁判 Tier 2 LLM 裁判**（P4-1）：[src/recaller/judge.ts](src/recaller/judge.ts) 重构引入 `JudgeStrategy` 抽象接口 + 3 个内置策略：
+  - Tier 1 `HeuristicJudgeStrategy`（默认，启发式 id/name 匹配）
+  - Tier 2 `LlmJudgeStrategy`（构造 prompt 让 LLM 输出 JSON `{used, reasoning}`）
+  - Tier 3 `CustomJudgeStrategy`（外部注入点，通过 `registerStrategy(name, fn)`）
+  - 安全护栏：LLM 失败/超时/解析失败 → fallback Tier 1；节点数超 `llmJudgeMaxNodes` 截断
+  - 新增配置：`judge.tier`（1/2/3）、`judge.llmJudgeMaxNodes`、`judge.llmJudgeTimeoutMs`、`judge.customStrategy`
+- **增量维护（Incremental Maintenance）**（P4-2）：[src/graph/incremental-maintenance.ts](src/graph/incremental-maintenance.ts) — 仅对 `markDirty` 标记的脏节点执行节点级阶段（Phase 1/5/7/8/9），全图阶段仍走 `runMaintenance`
+  - 脏节点持久化到 Neo4j（`:MaintenanceMeta { dirtyNodeIds }`）
+  - 新增 HTTP 端点：`POST /api/maintain/incremental`、`POST /api/maintain/mark-dirty`、`GET /api/maintain/dirty-nodes`、`DELETE /api/maintain/dirty-nodes`
+- **结构化日志**（P2-1）：[src/logger.ts](src/logger.ts) — 统一 `createLogger(namespace)` 接口
+  - 分级 debug/info/warn/error，环境变量 `GM_LOG_LEVEL` 过滤
+  - `GM_LOG_JSON=true` 输出 JSON 行（便于 Loki/ELK 采集）
+  - `setTraceId` 跨模块关联请求链路
+  - `setExternalLogger` 注入 OpenClaw SDK logger
+  - 已迁移 maintenance.ts + 6 子模块（29 处）、recall.ts（10 处）、judge.ts（5 处）共 44 处 console 调用
+
+### Changed — 重构（高风险项落地）
+
+- **拆分 maintenance.ts**（P1-4）：1044 行 → 340 行 barrel + 6 个子模块（staleness/health/importance/conflict/edge-weights/reverse-memory，共 739 行）。所有现有 import 路径不变。
+- **拆分 store.ts**（P1-5）：1128 行 → 69 行 barrel + 7 个子模块（schema/nodes/edges/feedback/community/vector/messages，共 1191 行）。所有现有 import 路径不变。
+- **`matchedBy` 类型扩展**：`store.ts` 的 `GmFeedback.matchedBy` 联合类型新增 `"custom"`，匹配 Tier 3 裁判输出。
+
+### Added — 测试
+
+- **judge Tier 2/3 测试**：15 用例（LLM 判定 / 冷启动期不调 LLM / 失败 fallback / 非 JSON fallback / 节点截断 / Tier 3 注册/抛错/未注册/未配置/向后兼容）
+- **增量维护测试**：10 用例（markDirty/getDirtyNodeIds/clearDirty 持久化、runIncrementalMaintenance 无脏节点/多阶段/配置跳过/并发锁）
+- **结构化日志测试**：12 用例（缓存实例/child/info/warn/error 映射/级别过滤/JSON 输出/traceId/外部 logger 注入/fallback）
+- 总测试数 298 → **334**（14 文件）
+
+### Configuration Migration — 配置迁移（v2.2.0 → v2.2.1）
+
+| 配置项 | 变化 | 默认值 | 说明 |
+|---|---|---|---|
+| `judge.tier` | 新增 | `1` | 1=启发式 / 2=LLM / 3=自定义 |
+| `judge.llmJudgeMaxNodes` | 新增 | `10` | Tier 2 单次最大节点数 |
+| `judge.llmJudgeTimeoutMs` | 新增 | `8000` | Tier 2 LLM 超时 |
+| `judge.customStrategy` | 新增 | — | Tier 3 自定义策略名称 |
+| 环境变量 `GM_LOG_LEVEL` | 新增 | `info` | 日志级别过滤 |
+| 环境变量 `GM_LOG_JSON` | 新增 | `false` | JSON 输出开关 |
+
+**迁移步骤**：
+1. 现有 v2.2.0 配置无需任何改动即可继续工作（`judge.tier` 默认 `1`，行为与 v2.2.0 一致）。
+2. 如需启用 Tier 2 LLM 裁判，配置 `judge.tier=2` 并确保 LLM 已注入。
+3. 如需启用结构化 JSON 日志，设置环境变量 `GM_LOG_JSON=true`。
+4. 如需在大图谱上降低维护成本，写入节点后调用 `POST /api/maintain/mark-dirty`，定期触发 `POST /api/maintain/incremental`。
+
 ## [2.2.0] — 2026-07-05
 
 ### 总结
