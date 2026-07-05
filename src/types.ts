@@ -254,6 +254,24 @@ export interface GmConfig {
     /** 冷启动阈值（累计反馈 < 此值时不触发，默认 100） */
     warmupFeedbacks?: number;
   };
+
+  // ── v2.2.0 MCP Server 对外暴露 ────────────
+
+  /** MCP Server 配置（默认关闭，启用后通过 Streamable HTTP 对外暴露工具） */
+  mcp?: {
+    /** 是否启用 MCP server（默认 false） */
+    enabled?: boolean;
+    /** 监听端口（默认 7800） */
+    port?: number;
+    /** 监听地址（默认 127.0.0.1，仅本机；设为 0.0.0.0 对外开放） */
+    host?: string;
+    /** 路径（默认 /mcp） */
+    path?: string;
+    /** 鉴权 Bearer Token（设置后客户端需在 Authorization 头中携带） */
+    authToken?: string;
+    /** 启用的工具集（默认全部启用） */
+    enabledTools?: string[];
+  };
 }
 
 export type NodeType = "TASK" | "SKILL" | "EVENT";

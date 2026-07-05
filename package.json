@@ -20,6 +20,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "neo4j-driver": "^6.0.1",
     "typebox": "^1.1.39"
   },

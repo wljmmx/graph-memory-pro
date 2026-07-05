@@ -343,6 +343,14 @@ export default definePluginEntry({
       llmDiagnosis: Type.Optional(Type.Boolean({ default: true })),
       warmupFeedbacks: Type.Optional(Type.Number({ default: 100 })),
     })),
+    mcp: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: false })),
+      port: Type.Optional(Type.Number({ default: 7800 })),
+      host: Type.Optional(Type.String({ default: "127.0.0.1" })),
+      path: Type.Optional(Type.String({ default: "/mcp" })),
+      authToken: Type.Optional(Type.String()),
+      enabledTools: Type.Optional(Type.Array(Type.String())),
+    })),
   }) as any),
   register(api: any) {
     const logger = api.logger ?? console;
@@ -579,6 +587,44 @@ export default definePluginEntry({
       async stop() {
         if (_maintenanceInitTimer) { clearTimeout(_maintenanceInitTimer); _maintenanceInitTimer = null; }
         if (_maintenanceTimer) { clearInterval(_maintenanceTimer); _maintenanceTimer = null; }
+      },
+    });
+
+    // ─────────────────────────────────────────────────────────────────
+    // v2.2.0 MCP Server — 通过 Streamable HTTP 对外暴露图谱能力
+    //
+    // 供 lcm-graph-extra dashboard 或任意 MCP client（Claude Desktop /
+    // Cursor 等）调用。复用已初始化的 driver/cfg/recaller。
+    // 启用条件：cfg.mcp.enabled === true
+    // ─────────────────────────────────────────────────────────────────
+    let _mcpHandle: any = null;
+    api.registerService({
+      name: "graph-memory-mcp",
+      description: "MCP server exposing graph memory tools via Streamable HTTP for dashboard / external clients",
+      async start() {
+        if (_cfg?.mcp?.enabled !== true) return;
+        if (!_driver) {
+          logger?.warn?.("[graph-memory-pro] mcp: driver not ready, skip");
+          return;
+        }
+        try {
+          const { startMcpServer } = await import("./src/mcp/server.ts");
+          _mcpHandle = await startMcpServer(
+            _driver, _cfg, _llm ?? undefined, _embed ?? undefined, _recaller ?? undefined,
+          );
+          const addr = _mcpHandle.httpServer.address();
+          const addrStr = typeof addr === "object" && addr ? `${addr.address}:${addr.port}` : String(addr);
+          logger?.info?.(`[graph-memory-pro] mcp server listening on http://${addrStr}${_cfg.mcp?.path ?? "/mcp"}`);
+        } catch (err: any) {
+          logger?.warn?.(`[graph-memory-pro] mcp server start failed: ${err.message}`);
+          _mcpHandle = null;
+        }
+      },
+      async stop() {
+        if (_mcpHandle) {
+          try { await _mcpHandle.stop(); } catch {}
+          _mcpHandle = null;
+        }
       },
     });
 
