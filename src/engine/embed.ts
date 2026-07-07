@@ -51,6 +51,9 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
   const expectedDim = config.dimensions;
 
   return async function embed(text: string): Promise<number[]> {
+    if (text == null || text === '') {
+      throw new Error('Embedding API: input text cannot be null, undefined, or empty');
+    }
     const lastErr: Error[] = [];
     const delays = [...RETRY_DELAYS];
 
@@ -73,7 +76,11 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
 
         if (!response.ok) {
           const body = await response.text().catch(() => "");
-          throw new Error(`Embedding API ${response.status}: ${body.slice(0, 200)}`);
+          let hint = '';
+          if (response.status === 400 && body.includes('invalid input type')) {
+            hint = '. 提示：请检查 embedding.model 配置是否为支持 embedding 的模型（如 nomic-embed-text、bge-large-zh），聊天模型（如 qwen3.6）不支持 embedding';
+          }
+          throw new Error(`Embedding API ${response.status}: ${body.slice(0, 200)}${hint}`);
         }
 
         const data = await response.json() as any;
