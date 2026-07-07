@@ -218,44 +218,62 @@ export async function vectorSearchWithScore(
   vec: number[],
   topK: number,
 ): Promise<Array<{ node: GmNode; score: number }>> {
-  const session = getSession(driver);
-  try {
-    const result = await session.run(
-      `CALL db.index.vector.queryNodes('gm_node_embedding_task', toInteger($topK), $vec)
-        YIELD node, score
-        WITH node, score WHERE node.status = 'active'
-        RETURN node, score
-       UNION ALL
-       CALL db.index.vector.queryNodes('gm_node_embedding_skill', toInteger($topK), $vec)
-        YIELD node, score
-        WITH node, score WHERE node.status = 'active'
-        RETURN node, score
-       UNION ALL
-       CALL db.index.vector.queryNodes('gm_node_embedding_event', toInteger($topK), $vec)
-        YIELD node, score
-        WITH node, score WHERE node.status = 'active'
-        RETURN node, score
-       ORDER BY score DESC`,
-      { vec, topK },
-    );
-    return result.records.map((r) => ({
-      node: recordToNode(r.get("node")),
-      score: r.get("score"),
-    })).filter((r): r is { node: GmNode; score: number } => r.node !== null);
-  } finally {
-    await session.close();
+  // v2.3.1 性能优化: 3 个向量索引并行查询（旧实现 UNION ALL 顺序执行，耗时 ≈ 3T）。
+  // 并行后耗时 ≈ max(T)，预期 vec_search 阶段省 ~66% 时间。
+  // 每个 session 独立（Neo4j session 非线程安全），结果合并后去重 + 重排。
+  const indexNames = [
+    "gm_node_embedding_task",
+    "gm_node_embedding_skill",
+    "gm_node_embedding_event",
+  ] as const;
+
+  const perIndexResults = await Promise.all(
+    indexNames.map(async (indexName) => {
+      const session = getSession(driver);
+      try {
+        const result = await session.run(
+          `CALL db.index.vector.queryNodes($indexName, toInteger($topK), $vec)
+           YIELD node, score
+           WITH node, score WHERE node.status = 'active'
+           RETURN node, score
+           ORDER BY score DESC`,
+          { indexName, vec, topK },
+        );
+        return result.records.map((r) => ({
+          node: recordToNode(r.get("node")),
+          score: r.get("score"),
+        })).filter((r): r is { node: GmNode; score: number } => r.node !== null);
+      } finally {
+        await session.close();
+      }
+    }),
+  );
+
+  // 合并 3 个索引结果，按 nodeId 去重（保留最高 score），再按 score 降序
+  const merged = new Map<string, { node: GmNode; score: number }>();
+  for (const batch of perIndexResults) {
+    for (const item of batch) {
+      const existing = merged.get(item.node.id);
+      if (!existing || item.score > existing.score) {
+        merged.set(item.node.id, item);
+      }
+    }
   }
+  return Array.from(merged.values()).sort((a, b) => b.score - a.score);
 }
 
 export async function graphWalk(
   driver: Driver,
   seedIds: string[],
   depth: number,
+  maxNodes = 200,
 ): Promise<{ nodes: GmNode[]; edges: GmEdge[] }> {
   const session = getSession(driver);
   try {
     // ✅ 优化：限制关系类型为有意义的业务关系，排除 NEXT_SESSION/CONTAINS 等高频低价值边
     // v2.1.2: 新增 CAUSED_BY / LEADS_TO 因果边类型
+    // v2.3.1 性能优化: 加 LIMIT 限制返回节点数，防止图规模大时返回过多节点
+    //       导致后续 PPR 排序开销爆炸。默认 200（recallMaxNodes 通常 ≤ 50，留 4× 余量）。
     const relTypes = "USED_SKILL|SOLVED_BY|REQUIRES|PATCHES|CONFLICTS_WITH|CAUSED_BY|LEADS_TO";
     const result = await session.run(
       `MATCH path = (start:Task|Skill|Event)-[r:${relTypes}*1..${depth}]-(end:Task|Skill|Event)
@@ -263,9 +281,9 @@ export async function graphWalk(
          AND start.status = 'active'
        UNWIND nodes(path) AS n
        UNWIND relationships(path) AS rel
-       WITH COLLECT(DISTINCT n) AS nodeList, COLLECT(DISTINCT rel) AS relList
+       WITH COLLECT(DISTINCT n)[..$maxNodes] AS nodeList, COLLECT(DISTINCT rel)[..$maxNodes] AS relList
        RETURN nodeList, relList`,
-      { seedIds },
+      { seedIds, maxNodes },
     );
     if (!result.records.length) return { nodes: [], edges: [] };
     const row = result.records[0];

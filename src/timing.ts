@@ -15,6 +15,7 @@ export type TimingPhase =
   | "ensure_projection"
   | "community_vec_search"
   | "community_reps"
+  | "community_vec_reps"
   | "ppr_total"
   | "merge_results"
   | "extract_llm"

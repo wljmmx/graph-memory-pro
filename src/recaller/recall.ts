@@ -8,8 +8,8 @@ import type { GmConfig, RecallResult, GmNode, GmEdge } from "../types.ts";
 import type { EmbedFn } from "../engine/embed.ts";
 import {
   searchNodes, vectorSearchWithScore,
-  graphWalk, communityRepresentatives,
-  communityVectorSearch,
+  graphWalk,
+  communityVectorSearchWithReps,
   saveVector, getVectorHash, computeEmbeddingHash,
   upsertFeedback,
 } from "../store/store.ts";
@@ -264,14 +264,17 @@ export class Recaller {
   ): Promise<RecallResult> {
     const tPrecise = Date.now();
 
+    // v2.3.1 性能优化: FTS 搜索 与 向量搜索 并行执行（无数据依赖）。
+    // 旧实现串行：fts_search → vec_search，多耗费一次网络往返。
     const tFts = Date.now();
-    const ftsNodes = await searchNodes(this.driver, query, limit);
-    logPhase("fts_search", Date.now() - tFts, { nodes: ftsNodes.length });
+    const ftsPromise = searchNodes(this.driver, query, limit).then((nodes) => {
+      logPhase("fts_search", Date.now() - tFts, { nodes: nodes.length });
+      return nodes;
+    });
 
-    let vecNodes: GmNode[] = [];
-    // v2.3.1 性能优化: 优先复用入口预计算的 queryEmbedding，避免重复 embed（~1000ms）。
-    // 仅在未提供预计算向量时才回退到内部 embed 调用（保持向后兼容，如外部直接调用）。
-    if (precomputedVec?.length || this.embed) {
+    // 向量搜索路径（优先复用预计算向量）
+    const vecSearchPromise = (async (): Promise<GmNode[]> => {
+      if (!precomputedVec?.length && !this.embed) return [];
       try {
         let vec: number[];
         if (precomputedVec?.length) {
@@ -285,27 +288,29 @@ export class Recaller {
           });
         }
 
-        if (vec.length) {
-          // v2.1.2 第三批 L-1：query_vec → M @ vec 变换
-          // 冷启动期 transform 直接返回原 vec（M = I）
-          let searchVec: number[] = vec;
-          if (this.associationMatrix?.isEnabled()) {
-            const fbCount = this.judgeManager?.getFeedbackCount() ?? 0;
-            const transformed = this.associationMatrix.transform(vec, fbCount);
-            searchVec = Array.from(transformed);
-            // BatchNorm 统计更新（仅训练期）
-            this.associationMatrix.updateBatchNormStats(vec);
-          }
+        if (!vec.length) return [];
 
-          const tVecSearch = Date.now();
-          const vecResults = await vectorSearchWithScore(this.driver, searchVec, limit);
-          logPhase("vec_search", Date.now() - tVecSearch, { nodes: vecResults.length });
-          vecNodes = vecResults.map(v => v.node).slice(0, limit);
+        // v2.1.2 第三批 L-1：query_vec → M @ vec 变换
+        let searchVec: number[] = vec;
+        if (this.associationMatrix?.isEnabled()) {
+          const fbCount = this.judgeManager?.getFeedbackCount() ?? 0;
+          const transformed = this.associationMatrix.transform(vec, fbCount);
+          searchVec = Array.from(transformed);
+          this.associationMatrix.updateBatchNormStats(vec);
         }
+
+        const tVecSearch = Date.now();
+        const vecResults = await vectorSearchWithScore(this.driver, searchVec, limit);
+        logPhase("vec_search", Date.now() - tVecSearch, { nodes: vecResults.length });
+        return vecResults.map(v => v.node).slice(0, limit);
       } catch (e) {
         if (process.env.GM_DEBUG) log.warn("recall-precise vector search failed", { error: String(e) });
+        return [];
       }
-    }
+    })();
+
+    // 并行执行 FTS + 向量搜索
+    const [ftsNodes, vecNodes] = await Promise.all([ftsPromise, vecSearchPromise]);
 
     const seen = new Set<string>();
     const nodes: GmNode[] = [];
@@ -382,15 +387,18 @@ export class Recaller {
       }
       if (!vec.length) return { nodes: [], edges: [], tokenEstimate: 0 };
 
+      // v2.3.1 性能优化: 合并 communityVectorSearch + communityRepresentatives 为单条 Cypher
+      // 旧实现两步串行（两次网络往返），新实现单条 Cypher 一次完成，减少 ~5-20ms
       const tCommVec = Date.now();
-      const communityResults = await communityVectorSearch(this.driver, vec);
-      logPhase("community_vec_search", Date.now() - tCommVec, { communities: communityResults.length });
-      const communityIds = communityResults.slice(0, 3).map(c => c.id);
-      if (!communityIds.length) return { nodes: [], edges: [], tokenEstimate: 0 };
-
-      const tReps = Date.now();
-      const repNodes = await communityRepresentatives(this.driver, communityIds);
-      logPhase("community_reps", Date.now() - tReps, { reps: repNodes.length });
+      const commReps = await communityVectorSearchWithReps(this.driver, vec, 3);
+      const communityCount = new Set(
+        commReps.map(r => r.node.communityId).filter((id): id is string => !!id)
+      ).size;
+      logPhase("community_vec_reps", Date.now() - tCommVec, {
+        communities: communityCount,
+        reps: commReps.length,
+      });
+      const repNodes = commReps.map(r => r.node);
       if (!repNodes.length) return { nodes: [], edges: [], tokenEstimate: 0 };
 
       const repIds = repNodes.map(n => n.id);

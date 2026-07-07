@@ -23,6 +23,11 @@ export interface QueryCacheConfig {
   maxSize: number;          // LRU 容量，默认 100
   ttlMs: number;           // 过期时间，默认 30min
   similarityThreshold: number; // cosine 相似度阈值，默认 0.95
+  // v2.3.1 性能优化: 相似匹配扫描的最大条目数（默认 20）。
+  // 旧实现遍历全部缓存条目（maxSize=100），每条做一次 cosine（O(dims)），
+  // 100 × 1024 = 102400 次浮点运算。限制为最近 20 条后，运算量降到 1/5。
+  // 因 Map 保持插入顺序（LRU 末尾为最新），从末尾倒序扫描即"最近 N 条"。
+  similarityScanLimit: number;
 }
 
 export const DEFAULT_QUERY_CACHE_CONFIG: QueryCacheConfig = {
@@ -30,6 +35,7 @@ export const DEFAULT_QUERY_CACHE_CONFIG: QueryCacheConfig = {
   maxSize: 100,
   ttlMs: 30 * 60 * 1000,
   similarityThreshold: 0.95,
+  similarityScanLimit: 20,
 };
 
 /**
@@ -86,13 +92,20 @@ export class QueryCache {
   /**
    * 相似匹配查询（需要外部提供 queryEmbedding）
    * 返回的 result 会带 similarity 衰减权重（× 0.7）
+   *
+   * v2.3.1 性能优化: 限制扫描条目数为 similarityScanLimit（默认 20），从最近使用条目倒序扫描。
+   * 旧实现 O(n) 全量扫描（maxSize=100），限制后扫描量降为 1/5。
    */
   getSimilar(queryEmbedding: number[]): { result: RecallResult; similarity: number } | null {
     if (!this.cfg.enabled || queryEmbedding.length === 0) return null;
     const threshold = this.cfg.similarityThreshold;
     let bestMatch: { result: RecallResult; similarity: number } | null = null;
 
-    for (const entry of this.cache.values()) {
+    // v2.3.1: 倒序扫描最近 N 条（Map 末尾为 LRU 最新）
+    const entries = Array.from(this.cache.values()).reverse();
+    const scanLimit = Math.min(this.cfg.similarityScanLimit, entries.length);
+    for (let i = 0; i < scanLimit; i++) {
+      const entry = entries[i];
       if (!entry.queryEmbedding) continue;
       if (Date.now() - entry.timestamp > this.cfg.ttlMs) continue;
 

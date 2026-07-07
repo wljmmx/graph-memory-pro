@@ -55,6 +55,7 @@ export {
   pruneCommunitySummaries,
   communityRepresentatives,
   communityVectorSearch,
+  communityVectorSearchWithReps,
   nodesByCommunityIds,
 } from "./community.ts";
 
