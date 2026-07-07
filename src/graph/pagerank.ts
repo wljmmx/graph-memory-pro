@@ -125,7 +125,7 @@ export async function personalizedPageRank(
       return { scores };
     }
 
-    return runPPR(session, SHARED_GRAPH_NAME, seedIds, candidateIds, cfg);
+    return await runPPR(session, SHARED_GRAPH_NAME, seedIds, candidateIds, cfg);
   } catch (gdsErr) {
     // GDS error 或 session 已失效（如 driver 被并发关闭）：
     // invalidate cache and fallback to uniform scores
@@ -217,7 +217,7 @@ export async function computeGlobalPageRank(driver: Driver, cfg: GmConfig): Prom
     if (existingTypes.length === 0) {
       const uniformScore = 1 / nodeCount;
       await session.run("MATCH (n:Task|Skill|Event {status: 'active'}) SET n.pagerank = $score", { score: uniformScore });
-      return readTopK(session);
+      return await readTopK(session);
     }
 
     // Reuse shared projection instead of creating a new one each time
@@ -225,7 +225,7 @@ export async function computeGlobalPageRank(driver: Driver, cfg: GmConfig): Prom
     if (!hasProjection) {
       const uniformScore = 1 / nodeCount;
       await session.run("MATCH (n:Task|Skill|Event {status: 'active'}) SET n.pagerank = $score", { score: uniformScore });
-      return readTopK(session);
+      return await readTopK(session);
     }
 
     // Global PR write mode - reuse shared projection
@@ -237,7 +237,7 @@ export async function computeGlobalPageRank(driver: Driver, cfg: GmConfig): Prom
       })
     `, { damping: cfg.pagerankDamping, iterations: cfg.pagerankIterations });
 
-    return readTopK(session);
+    return await readTopK(session);
   } catch (err) {
     // 不在 catch 路径中复用原 session（可能已 closed，session.run 会抛
     // "You cannot run more transactions on a closed session" 二次错误，掩盖原始错误）。
