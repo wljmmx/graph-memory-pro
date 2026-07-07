@@ -731,13 +731,14 @@ describe("createEmbedFn", () => {
     ).toBeUndefined();
   });
 
-  it("请求体包含 keep_alive（默认 5m）与 input 字段（v2 schema string 数组）", async () => {
+  it("请求体包含 keep_alive（v2.3.0 默认 1h）与 input 字段（v2 schema string 数组）", async () => {
     fetchSpy.mockResolvedValue(mockResponse({ embeddings: [[0.1]] }));
     const embed = createEmbedFn({ baseURL: "http://localhost:11434" });
     await embed("my text");
     const [, init] = fetchSpy.mock.calls[0];
     const body = JSON.parse(init.body as string);
-    expect(body.keep_alive).toBe("5m");
+    // v2.3.0: keepAlive 默认改为 "1h"（原 5m），避免模型周期性卸载
+    expect(body.keep_alive).toBe("1h");
     // Ollama v2 schema: input 是 string 数组（非旧的 prompt 字符串）
     expect(body.input).toEqual(["my text"]);
     expect(body.prompt).toBeUndefined();
