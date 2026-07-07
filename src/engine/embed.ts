@@ -43,9 +43,11 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
   }
 
   const model = config.model || "Qwen3.5-Embedding-0.6B-GGUF";
-  // Ollama keep_alive 参数：默认 "5m"，可配置 "1h"/"30m"/-1（永久驻留）
-  // 不传时 Ollama 默认 5m 后卸载模型，导致下次调用冷启动延迟
-  const keepAlive = config.keepAlive || "5m";
+  // Ollama keep_alive 参数：默认 "1h"（与 lcm-graph-extra createLocalEmbedFn 一致），
+  // 可配置 "5m"/"30m"/"2h"/-1（永久驻留）。
+  // 不传或传 "5m" 时，模型在 5 分钟无请求后自动卸载，下次请求需重新加载，
+  // 导致首次召回延迟显著（GGUF 模型加载可能数秒到数十秒）。
+  const keepAlive = config.keepAlive || "1h";
   // v2.3.0: 预期向量维度（可选）。配置后引擎层校验返回向量维度一致性，
   // 防止模型更换后维度与向量索引不一致（如 nomic-embed-text 768 → 1024）
   const expectedDim = config.dimensions;

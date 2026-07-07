@@ -980,6 +980,60 @@ export { getDriver } from "./src/store/db.js";
 export { runMaintenance } from "./src/graph/maintenance.js";
 export { Extractor, extractTriplets } from "./src/extractor/extract.ts";
 
+// ─── v2.1.2 G-5 图谱健康（供 lcm-graph-extra dashboard 调用）─────────
+// dashboard-snapshot.ts 的 resolveGraphHealth 通过 withGmProFallback('getGraphHealth', ...)
+// 调用本函数。返回 dashboard 期望的 { status, nodeCount, relationshipCount, ... } 格式。
+// 内部委托给 healthCheck(driver)，并根据 anomalies 数量推断 status。
+export async function getGraphHealth(): Promise<{
+  status: 'healthy' | 'degraded' | 'unhealthy' | 'unknown';
+  nodeCount: number;
+  relationshipCount: number;
+  staleNodeCount: number;
+  lastMaintenanceAt?: number;
+  avgQueryLatencyMs?: number;
+  errorRate?: number;
+  details?: Record<string, unknown>;
+}> {
+  // 动态 import 避免循环依赖（getDriver 从 store/db re-export，但不在此模块作用域）
+  const { getDriver } = await import('./src/store/db.js');
+  const driver = getDriver();
+  if (!driver) {
+    return {
+      status: 'unknown',
+      nodeCount: 0,
+      relationshipCount: 0,
+      staleNodeCount: 0,
+      details: { reason: 'driver not initialized' },
+    };
+  }
+  const { healthCheck } = await import('./src/graph/maintenance.ts');
+  const report = await healthCheck(driver);
+  // 根据 anomalies 数量推断 status：
+  // - 0 个异常 → healthy
+  // - 1-2 个异常 → degraded
+  // - >=3 个异常 → unhealthy
+  const anomalyCount = report.anomalies.length;
+  const status: 'healthy' | 'degraded' | 'unhealthy' =
+    anomalyCount === 0 ? 'healthy' : (anomalyCount >= 3 ? 'unhealthy' : 'degraded');
+  return {
+    status,
+    nodeCount: report.nodes.total,
+    relationshipCount: report.edges.total,
+    staleNodeCount: report.highStaleNodes,
+    details: {
+      anomalies: report.anomalies,
+      isolatedNodes: report.isolatedNodes,
+      communities: report.communities,
+      avgPageRank: report.avgPageRank,
+      nodes: report.nodes,
+      edges: report.edges,
+      topNodes: report.topNodes,
+      timestamp: report.timestamp,
+    },
+  };
+}
+export type { GraphHealthReport } from './src/graph/maintenance/health.ts';
+
 // ─── Additional re-exports for lcm-graph-extra (Layer 1 fix) ────
 export { personalizedPageRank, computeGlobalPageRank } from "./src/graph/pagerank.js";
 export { detectCommunities, summarizeCommunities, getCommunityPeers } from "./src/graph/community.js";

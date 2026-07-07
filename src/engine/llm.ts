@@ -42,8 +42,16 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
     .replace(/\/+$/, "");
   const model = config.model || "gpt-4o-mini";
   // Ollama keep_alive 参数（仅 Ollama 识别，OpenAI 会忽略）
-  // 不传时 Ollama 默认 5m 后卸载模型，导致周期性调用冷启动延迟
-  const keepAlive = config.keepAlive;
+  // 默认 "1h"（与 embed 引擎一致），不传时 Ollama 默认 5m 后卸载模型，
+  // 导致周期性调用冷启动延迟（LLM 模型加载通常数秒到数十秒）。
+  const keepAlive = config.keepAlive || "1h";
+
+  // P2-B2: 检测是否为 Ollama 本地服务。
+  // Ollama 的 OpenAI 兼容层 (/v1/*) 是实验性支持，keep_alive 可能被忽略。
+  // 如果检测到 Ollama（127.0.0.1:11434 或 localhost:11434），优先用原生 /api/chat 端点，
+  // 该端点完整支持 keep_alive，避免模型反复卸载加载。
+  const isOllamaNative = /127\.0\.0\.1:11434|localhost:11434|0\.0\.0\.0:11434/.test(baseURL)
+    && !/\/v1\b/.test(baseURL);
 
   return async function complete(system: string, user: string): Promise<string> {
     const lastErr: Error[] = [];
@@ -51,37 +59,69 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
 
     for (let attempt = 0; attempt <= delays.length; attempt++) {
       try {
-        const response = await fetch(`${baseURL}/chat/completions`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify({
-            model,
-            messages: [
-              { role: "system", content: system },
-              { role: "user", content: user },
-            ],
-            max_tokens: 1024,
-            temperature: 0.3,
-            // keep_alive 仅 Ollama 识别，OpenAI 兼容服务会忽略未知字段
-            ...(keepAlive != null ? { keep_alive: keepAlive } : {}),
-          }),
-          signal: AbortSignal.timeout(30_000),
-        });
+        let response: Response;
+        let apiFormat: 'openai' | 'ollama';
+
+        if (isOllamaNative) {
+          // Ollama 原生 /api/chat 端点：keep_alive 完整支持
+          apiFormat = 'ollama';
+          response = await fetch(`${baseURL}/api/chat`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model,
+              messages: [
+                { role: "system", content: system },
+                { role: "user", content: user },
+              ],
+              stream: false,
+              options: {
+                num_predict: 1024,
+                temperature: 0.3,
+              },
+              keep_alive: keepAlive,
+            }),
+            signal: AbortSignal.timeout(30_000),
+          });
+        } else {
+          // OpenAI 兼容端点 /v1/chat/completions（含 Ollama /v1 路径和云端 API）
+          apiFormat = 'openai';
+          response = await fetch(`${baseURL}/chat/completions`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify({
+              model,
+              messages: [
+                { role: "system", content: system },
+                { role: "user", content: user },
+              ],
+              max_tokens: 1024,
+              temperature: 0.3,
+              // keep_alive 仅 Ollama 识别，OpenAI 兼容服务会忽略未知字段
+              ...(keepAlive != null ? { keep_alive: keepAlive } : {}),
+            }),
+            signal: AbortSignal.timeout(30_000),
+          });
+        }
 
         if (!response.ok) {
           const body = await response.text().catch(() => "");
           throw new Error(`LLM API ${response.status}: ${body.slice(0, 200)}`);
         }
 
-        const data = await response.json() as {
-          choices: Array<{ message: { content: unknown } }>;
-          usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
-        };
+        const data = await response.json() as any;
 
-        const rawContent = data.choices?.[0]?.message?.content;
+        // 响应格式适配：Ollama /api/chat 返回 { message: { content } }，
+        // OpenAI /v1/chat/completions 返回 { choices: [{ message: { content } }] }
+        const rawContent = apiFormat === 'ollama'
+          ? data?.message?.content
+          : data?.choices?.[0]?.message?.content;
+        const usage = apiFormat === 'ollama'
+          ? { prompt_tokens: data?.prompt_eval_count, completion_tokens: data?.eval_count, total_tokens: (data?.prompt_eval_count ?? 0) + (data?.eval_count ?? 0) }
+          : data?.usage;
         const content = normalizeContent(rawContent);
         if (!content) {
           throw new Error("LLM returned no content");
@@ -93,8 +133,8 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
           recordUsage(
             "config-llm",  // provider 标识（配置的 LLM，非 runtime）
             "unknown",     // purpose 由上层调用方通过包装注入，此处默认 unknown
-            data.usage?.prompt_tokens ?? 0,
-            data.usage?.completion_tokens ?? 0,
+            usage?.prompt_tokens ?? 0,
+            usage?.completion_tokens ?? 0,
           );
         } catch { /* usage 记录失败不影响主流程 */ }
 
