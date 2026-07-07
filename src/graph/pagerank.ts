@@ -47,17 +47,25 @@ function buildRelProjection(existingTypes: string[]): string {
  * Ensure the shared projection exists and is fresh.
  * - Within TTL and GDS-side exists -> reuse
  * - TTL expired or struct changed -> drop + recreate
+ *
+ * v2.3.1 性能优化: 接受预计算的 existingTypes 参数，避免内部重复调用 getExistingRelTypes。
+ * 旧实现：personalizedPageRank L113 调一次 + ensureSharedProjection 内部再调 1-2 次，
+ * 每次都跑同一条 MATCH ... RETURN DISTINCT type(r)，浪费 1-2 次数据库往返（~10-20ms）。
+ * 新实现：调用方一次性查询 types，传入复用，消除重复查询。
  */
-async function ensureSharedProjection(session: Session): Promise<boolean> {
+async function ensureSharedProjection(
+  session: Session,
+  precomputedTypes?: string[],
+): Promise<boolean> {
   const now = Date.now();
   const tEnsure = Date.now();
 
+  // v2.3.1: 复用调用方预计算的 types，避免重复查询
+  const currentTypes = precomputedTypes ?? await getExistingRelTypes(session);
+  const currentHash = relTypeHash(currentTypes);
+
   // Fast path: within TTL and hash unchanged, check GDS-side existence
   if (_cachedRelTypeHash && (now - _cachedTimestamp) < PROJECTION_TTL_MS) {
-    // Verify relation types haven't changed by comparing hash
-    const currentTypes = await getExistingRelTypes(session);
-    const currentHash = relTypeHash(currentTypes);
-
     if (currentHash === _cachedRelTypeHash) {
       const checkResult = await session.run(`
         CALL gds.graph.exists($name)
@@ -72,10 +80,6 @@ async function ensureSharedProjection(session: Session): Promise<boolean> {
     }
     // hash changed or graph missing → fall through to recreate
   }
-
-  // Check if relation types changed
-  const currentTypes = await getExistingRelTypes(session);
-  const currentHash = relTypeHash(currentTypes);
 
   if (currentTypes.length === 0) {
     logPhase("ensure_projection", Date.now() - tEnsure, { status: "no_types" });
@@ -98,6 +102,31 @@ export interface PPRResult {
   scores: Map<string, number>;
 }
 
+/**
+ * v2.3.1 性能优化: 预热共享 GDS 投影
+ *
+ * 在 recall() 入口调用一次，避免 recallPrecise 和 recallGeneralized
+ * 并行执行时各自独立触发 ensureSharedProjection（重复探测 ~80-150ms）。
+ *
+ * 调用后全局 _cachedRelTypeHash + _cachedTimestamp 被设置，
+ * 后续 personalizedPageRank 内部的 ensureSharedProjection 直接命中 fast path。
+ *
+ * @returns true 表示投影就绪可用
+ */
+export async function preheatProjection(driver: Driver): Promise<boolean> {
+  const session = getSession(driver);
+  try {
+    const existingTypes = await getExistingRelTypes(session);
+    if (existingTypes.length === 0) return false;
+    return await ensureSharedProjection(session, existingTypes);
+  } catch {
+    // 预热失败不影响主流程，personalizedPageRank 内部会重试
+    return false;
+  } finally {
+    try { await session.close(); } catch {}
+  }
+}
+
 export async function personalizedPageRank(
   driver: Driver,
   seedIds: string[],
@@ -110,22 +139,43 @@ export async function personalizedPageRank(
 
   const session = getSession(driver);
   try {
-    const existingTypes = await getExistingRelTypes(session);
-    if (existingTypes.length === 0) {
+    // v2.3.1 P1-2 性能优化: type 探测 与 seed 查找 并行（无数据依赖）
+    // 旧实现串行：getExistingRelTypes → ensureSharedProjection → runPPR(seed lookup) → ppr.stream
+    // 新实现：type 探测 与 seed 查找 并行执行，省一次串行往返
+    const seedSession = getSession(driver);
+    const typesPromise = getExistingRelTypes(session);
+    const seedLookupPromise = (async () => {
+      try {
+        const tSeed = Date.now();
+        const seedResult = await seedSession.run(`
+          MATCH (n:Task|Skill|Event) WHERE n.id IN $seedIds AND n.status = 'active'
+          RETURN id(n) AS neoId
+        `, { seedIds });
+        logPhase("ppr_seed_lookup", Date.now() - tSeed, { seeds: seedResult.records.length });
+        return seedResult.records.map(r => r.get("neoId"));
+      } finally {
+        try { await seedSession.close(); } catch {}
+      }
+    })();
+
+    const [existingTypes, sourceNodeIds] = await Promise.all([typesPromise, seedLookupPromise]);
+
+    if (existingTypes.length === 0 || sourceNodeIds.length === 0) {
       const scores = new Map<string, number>();
       candidateIds.forEach((id, i) => scores.set(id, 1 / (i + 1)));
       return { scores };
     }
 
-    // Ensure shared projection exists
-    const hasProjection = await ensureSharedProjection(session);
+    // Ensure shared projection exists（复用已查询的 types，不再重复查询）
+    const hasProjection = await ensureSharedProjection(session, existingTypes);
     if (!hasProjection) {
       const scores = new Map<string, number>();
       candidateIds.forEach((id, i) => scores.set(id, 1 / (i + 1)));
       return { scores };
     }
 
-    return await runPPR(session, SHARED_GRAPH_NAME, seedIds, candidateIds, cfg);
+    // seed 已在并行阶段查到，直接执行 GDS pageRank.stream
+    return await runPPRWithSeeds(session, SHARED_GRAPH_NAME, sourceNodeIds, candidateIds, cfg);
   } catch (gdsErr) {
     // GDS error 或 session 已失效（如 driver 被并发关闭）：
     // invalidate cache and fallback to uniform scores
@@ -148,26 +198,17 @@ export async function personalizedPageRank(
   }
 }
 
-async function runPPR(
+/**
+ * v2.3.1 P1-2: 执行 GDS pageRank.stream（seed 查找已在外部并行完成）
+ */
+async function runPPRWithSeeds(
   session: Session,
   graphName: string,
-  seedIds: string[],
+  sourceNodeIds: any[],
   candidateIds: string[],
   cfg: GmConfig,
 ): Promise<PPRResult> {
   const tPprFn = Date.now();
-
-  const tSeed = Date.now();
-  const seedResult = await session.run(`
-    MATCH (n:Task|Skill|Event) WHERE n.id IN $seedIds AND n.status = 'active'
-    RETURN id(n) AS neoId
-  `, { seedIds });
-  logPhase("ppr_seed_lookup", Date.now() - tSeed, { seeds: seedResult.records.length });
-  const sourceNodeIds = seedResult.records.map(r => r.get("neoId"));
-
-  if (sourceNodeIds.length === 0) {
-    return { scores: new Map() };
-  }
 
   const tCompute = Date.now();
   const pprResult = await session.run(`
@@ -199,6 +240,34 @@ async function runPPR(
   logPhase("ppr_total", Date.now() - tPprFn, { scores: scores.size });
   return { scores };
 }
+
+/**
+ * 保留旧 runPPR 函数签名以兼容外部调用（内部转调 runPPRWithSeeds）
+ * v2.3.1: 内部个性化 PageRank 已直接使用 runPPRWithSeeds，此函数仅保留向后兼容
+ */
+async function runPPR(
+  session: Session,
+  graphName: string,
+  seedIds: string[],
+  candidateIds: string[],
+  cfg: GmConfig,
+): Promise<PPRResult> {
+  const tSeed = Date.now();
+  const seedResult = await session.run(`
+    MATCH (n:Task|Skill|Event) WHERE n.id IN $seedIds AND n.status = 'active'
+    RETURN id(n) AS neoId
+  `, { seedIds });
+  logPhase("ppr_seed_lookup", Date.now() - tSeed, { seeds: seedResult.records.length });
+  const sourceNodeIds = seedResult.records.map(r => r.get("neoId"));
+
+  if (sourceNodeIds.length === 0) {
+    return { scores: new Map() };
+  }
+
+  return await runPPRWithSeeds(session, graphName, sourceNodeIds, candidateIds, cfg);
+}
+// 标记 runPPR 为保留函数（防止 lint 误报未使用）
+void runPPR;
 
 export interface GlobalPageRankResult {
   scores: Map<string, number>;

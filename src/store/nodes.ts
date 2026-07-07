@@ -25,64 +25,49 @@ export async function upsertNode(
   try {
     const label = typeToLabel(node.type);
 
-    // v2.1.2 第三批 R-4: 可进化嵌入
-    // 检测 content 实质变化（MD5 hash 对比），变化时：
-    //   1. 将当前 embedding 归档到 embeddingHistory 数组（保留最近 archiveKeepCount 条）
-    //   2. 清空当前 embedding，让下一次 reembed 周期重算
-    //   3. 更新 embeddingHash 为新 content 的 hash
+    // v2.3.1 P0-4 性能优化: 三步合并为单条 Cypher
+    // 旧实现（3 次串行 session.run）：
+    //   1. MATCH 读旧节点 embedding/hash/history
+    //   2. SET 归档 embeddingHistory（条件性）
+    //   3. MERGE + SET 主写
+    // 新实现（1 次 session.run）：
+    //   单条 Cypher 用 OPTIONAL MATCH 读旧节点 + CASE WHEN 决定归档 + MERGE 一次完成
+    //
+    // R-4 可进化嵌入逻辑保留：
+    //   - content 变化（hash 不同）且旧 embedding 存在 → 归档到 embeddingHistory，清空 embedding
+    //   - content 未变化或新节点 → 正常写入 hash
     const newContentHash = computeEmbeddingHash(node.name, node.description, node.content);
-
-    let evolvableApplied = false;
-    if (node.id) {
-      // 读取旧节点的 embedding/embeddingHash/embeddingHistory
-      const existing = await session.run(
-        `MATCH (n:${label} {id: $id})
-         RETURN n.embedding AS embedding,
-                n.embeddingHash AS embeddingHash,
-                n.embeddingModel AS embeddingModel,
-                n.embeddingHistory AS embeddingHistory`,
-        { id: node.id },
-      );
-      const rec = existing.records[0];
-      if (rec) {
-        const oldHash = rec.get("embeddingHash");
-        const oldEmbedding = rec.get("embedding");
-        const oldModel = rec.get("embeddingModel");
-        const oldHistory = rec.get("embeddingHistory") ?? [];
-
-        // hash 不同且旧 embedding 存在 → content 实质变化
-        if (oldHash && oldHash !== newContentHash && oldEmbedding && Array.isArray(oldEmbedding) && oldEmbedding.length > 0) {
-          // 归档旧嵌入
-          const archived = Array.isArray(oldHistory) ? [...oldHistory] : [];
-          archived.unshift({
-            embedding: oldEmbedding,
-            embeddingModel: oldModel ?? null,
-            embeddingHash: oldHash,
-            archivedAt: Date.now(),
-          });
-          // 保留最近 N 条（默认 3）
-          const keepCount = 3;
-          const trimmed = archived.slice(0, keepCount);
-
-          await session.run(
-            `MATCH (n:${label} {id: $id})
-             SET n.embeddingHistory = $history,
-                 n.embedding = null,
-                 n.embeddingHash = $newHash`,
-            { id: node.id, history: trimmed, newHash: newContentHash },
-          );
-          evolvableApplied = true;
-        }
-      }
-    }
-
-    // v2.1.2: 持久化 S-1/S-3/S-13/S-14/G-4 新增字段（全部可选，向后兼容）
-    // R-4: 若 evolvable 已应用（content 变化），不覆盖 embeddingHash（保留 null）
-    //      若未应用，写入新 hash（若节点新创建，则记录初始 hash）
-    const finalEmbeddingHash = evolvableApplied ? null : newContentHash;
+    const archivedAt = Date.now();
 
     await session.run(
-      `MERGE (n:${label} {id: $id})
+      `OPTIONAL MATCH (old:${label} {id: $id})
+       WITH old,
+            CASE
+              WHEN old IS NOT NULL
+                AND old.embeddingHash IS NOT NULL
+                AND old.embeddingHash <> $newContentHash
+                AND old.embedding IS NOT NULL
+                AND size(old.embedding) > 0
+              THEN ([
+                {
+                  embedding: old.embedding,
+                  embeddingModel: old.embeddingModel,
+                  embeddingHash: old.embeddingHash,
+                  archivedAt: $archivedAt
+                }
+              ] + COALESCE(old.embeddingHistory, []))[..3]
+              ELSE COALESCE(old.embeddingHistory, [])
+            END AS newHistory,
+            CASE
+              WHEN old IS NOT NULL
+                AND old.embeddingHash IS NOT NULL
+                AND old.embeddingHash <> $newContentHash
+                AND old.embedding IS NOT NULL
+                AND size(old.embedding) > 0
+              THEN true
+              ELSE false
+            END AS evolvableApplied
+       MERGE (n:${label} {id: $id})
        SET n.name = $name,
            n.description = $description,
            n.content = $content,
@@ -98,11 +83,21 @@ export async function upsertNode(
            n.state = COALESCE($state, 'current'),
            n.stalenessScore = COALESCE($stalenessScore, 0.0),
            n.importanceScore = COALESCE($importanceScore, 0.0),
-           n.embeddingHash = COALESCE($embeddingHash, n.embeddingHash)
-       SET n.validTo = $validTo,
+           n.embeddingHash = CASE
+             WHEN evolvableApplied THEN null
+             ELSE COALESCE($newContentHash, n.embeddingHash)
+           END,
+           n.embedding = CASE
+             WHEN evolvableApplied THEN null
+             ELSE n.embedding
+           END,
+           n.embeddingHistory = CASE
+             WHEN evolvableApplied THEN newHistory
+             ELSE COALESCE(n.embeddingHistory, [])
+           END,
+           n.validTo = $validTo,
            n.supersededBy = $supersededBy,
-           n.embeddingModel = $embeddingModel
-       `,
+           n.embeddingModel = $embeddingModel`,
       {
         id: node.id,
         name: node.name,
@@ -114,7 +109,6 @@ export async function upsertNode(
         validatedCount: node.validatedCount,
         createdAt: neo4j.int(node.createdAt),
         updatedAt: neo4j.int(node.updatedAt),
-        // v2.1.2 新增字段（向后兼容：undefined 时使用默认值）
         validFrom: node.validFrom ? neo4j.int(node.validFrom) : null,
         validTo: node.validTo ? neo4j.int(node.validTo) : null,
         recordedAt: node.recordedAt ? neo4j.int(node.recordedAt) : null,
@@ -124,9 +118,85 @@ export async function upsertNode(
         importanceScore: node.importanceScore ?? null,
         supersededBy: node.supersededBy ?? null,
         embeddingModel: node.embeddingModel ?? null,
-        embeddingHash: finalEmbeddingHash,
+        newContentHash,
+        archivedAt,
       },
     );
+  } finally {
+    await session.close();
+  }
+}
+
+/**
+ * v2.3.1 P0-3 性能优化: 批量 upsert 节点
+ *
+ * 用 UNWIND + MERGE 将多个节点合并为单次 session.run，
+ * 替代循环中 N 次 upsertNode 调用（每次 2-3 次 session.run）。
+ *
+ * 注意：
+ *   - 不处理 R-4 可进化嵌入归档（批量场景下 content 变化检测由 reEmbedNodes 周期处理）
+ *   - 仅写入基本字段，embeddingHash 用 computeEmbeddingHash 计算
+ *   - 适用于 extractInBackground 后台提取的批量写入场景
+ *
+ * @returns 成功写入的节点数
+ */
+export async function batchUpsertNodes(
+  driver: Driver,
+  nodes: GmNode[],
+): Promise<number> {
+  if (!nodes.length) return 0;
+  const session = getSession(driver);
+  try {
+    const rows = nodes.map((n) => {
+      const label = typeToLabel(n.type);
+      return {
+        id: n.id,
+        label,
+        name: n.name,
+        description: n.description,
+        content: n.content,
+        type: n.type,
+        status: n.status,
+        pagerank: n.pagerank,
+        validatedCount: n.validatedCount,
+        createdAt: neo4j.int(n.createdAt),
+        updatedAt: neo4j.int(n.updatedAt),
+        embeddingModel: n.embeddingModel ?? null,
+        embeddingHash: computeEmbeddingHash(n.name, n.description, n.content),
+      };
+    });
+
+    // 按 label 分组（UNWIND 无法动态切换 label）
+    const byLabel = new Map<string, typeof rows>();
+    for (const r of rows) {
+      if (!byLabel.has(r.label)) byLabel.set(r.label, []);
+      byLabel.get(r.label)!.push(r);
+    }
+
+    let totalWritten = 0;
+    // 同一 session 内顺序执行不同 label 的批量 MERGE（通常 2-3 个 label）
+    for (const [label, batch] of byLabel) {
+      const result = await session.run(
+        `UNWIND $rows AS row
+         MERGE (n:${label} {id: row.id})
+         SET n.name = row.name,
+             n.description = row.description,
+             n.content = row.content,
+             n.type = row.type,
+             n.status = row.status,
+             n.pagerank = row.pagerank,
+             n.validatedCount = row.validatedCount,
+             n.createdAt = row.createdAt,
+             n.updatedAt = row.updatedAt,
+             n.embeddingModel = row.embeddingModel,
+             n.embeddingHash = row.embeddingHash
+         RETURN count(n) AS c`,
+        { rows: batch },
+      );
+      const c = result.records[0]?.get("c");
+      totalWritten += (typeof c === "number" ? c : c?.toNumber?.() ?? 0);
+    }
+    return totalWritten;
   } finally {
     await session.close();
   }
@@ -154,39 +224,46 @@ export async function searchNodes(
   query: string,
   limit: number,
 ): Promise<GmNode[]> {
-  const session = getSession(driver);
-  try {
-    // ✅ 优化：使用 FULLTEXT 索引查询替代 CONTAINS
-    // 分别查询三个 FULLTEXT 索引，合并去重后排序
-    const fulltextResults = await session.run(`
-      CALL db.index.fulltext.queryNodes('task_search', $query, { limit: toInteger($limit) })
-      YIELD node AS n, score
-      WHERE n.status = 'active'
-      RETURN n, score
-      UNION ALL
-      CALL db.index.fulltext.queryNodes('skill_search', $query, { limit: toInteger($limit) })
-      YIELD node AS n, score
-      WHERE n.status = 'active'
-      RETURN n, score
-      UNION ALL
-      CALL db.index.fulltext.queryNodes('event_search', $query, { limit: toInteger($limit) })
-      YIELD node AS n, score
-      WHERE n.status = 'active'
-      RETURN n, score
-      UNION ALL
-      CALL db.index.fulltext.queryNodes('conversation_search', $query, { limit: toInteger($limit) })
-      YIELD node AS n, score
-      RETURN n, score
-    `, { query, limit });
+  // v2.3.1 P1-1 性能优化: 4 个 fulltext 索引并行查询（旧实现 UNION ALL 服务端串行）
+  // 旧实现：UNION ALL 在 Neo4j 服务端顺序执行 4 个 fulltext 查询，耗时 ≈ 4T
+  // 新实现：应用层 Promise.all 并行 4 个独立 session.run，耗时 ≈ max(T)
+  // 失败时 fallback 到 CONTAINS 查询（与旧实现一致）
+  const fulltextIndexes = [
+    "task_search",
+    "skill_search",
+    "event_search",
+    "conversation_search",
+  ] as const;
 
-    // 去重并按 validatedCount 排序
+  try {
+    const perIndexResults = await Promise.all(
+      fulltextIndexes.map(async (indexName) => {
+        const session = getSession(driver);
+        try {
+          const result = await session.run(
+            `CALL db.index.fulltext.queryNodes($indexName, $query, { limit: toInteger($limit) })
+             YIELD node AS n, score
+             WHERE n.status = 'active' OR n.status IS NULL
+             RETURN n, score`,
+            { indexName, query, limit },
+          );
+          return result.records;
+        } finally {
+          await session.close();
+        }
+      }),
+    );
+
+    // 合并 4 个索引结果，按 nodeId 去重
     const seen = new Map<string, any>();
-    for (const r of fulltextResults.records) {
-      const node = r.get("n");
-      if (!node || !node.properties) continue;
-      const id = node.properties.id;
-      if (!seen.has(id)) {
-        seen.set(id, recordToNode(node));
+    for (const records of perIndexResults) {
+      for (const r of records) {
+        const node = r.get("n");
+        if (!node || !node.properties) continue;
+        const id = node.properties.id;
+        if (!seen.has(id)) {
+          seen.set(id, recordToNode(node));
+        }
       }
     }
 
@@ -195,21 +272,24 @@ export async function searchNodes(
     return nodes.slice(0, limit);
   } catch {
     // ✅ Fallback: 如果 FULLTEXT 索引不可用，回退到 CONTAINS
-    const result = await session.run(
-      `MATCH (n:Task|Skill|Event|ConversationMessage) WHERE (n.status = 'active' OR n.status IS NULL)
-       AND (
-          n.name CONTAINS $query
-          OR n.description CONTAINS $query
-          OR n.content CONTAINS $query
-       )
-       RETURN n
-       ORDER BY n.validatedCount DESC, n.updatedAt DESC
-       LIMIT toInteger($limit)`,
-      { query, limit },
-    );
-    return result.records.map((r) => recordToNode(r.get("n"))).filter((n): n is GmNode => n !== null);
-  } finally {
-    await session.close();
+    const session = getSession(driver);
+    try {
+      const result = await session.run(
+        `MATCH (n:Task|Skill|Event|ConversationMessage) WHERE (n.status = 'active' OR n.status IS NULL)
+         AND (
+            n.name CONTAINS $query
+            OR n.description CONTAINS $query
+            OR n.content CONTAINS $query
+         )
+         RETURN n
+         ORDER BY n.validatedCount DESC, n.updatedAt DESC
+         LIMIT toInteger($limit)`,
+        { query, limit },
+      );
+      return result.records.map((r) => recordToNode(r.get("n"))).filter((n): n is GmNode => n !== null);
+    } finally {
+      await session.close();
+    }
   }
 }
 

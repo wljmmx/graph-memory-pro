@@ -47,6 +47,68 @@ export async function upsertEdge(
   }
 }
 
+/**
+ * v2.3.1 P0-3 性能优化: 批量 upsert 边
+ *
+ * 用 UNWIND + MERGE 将多条边合并为单次 session.run（按关系类型分组）。
+ * 替代循环中 N 次 upsertEdge 调用（每次 1 次 session.run）。
+ *
+ * 注意：关系类型不能参数化，需按 edge.type 分组执行。
+ * 调用方需确保 fromId/toId 对应的节点已写入（先 batchUpsertNodes 再 batchUpsertEdges）。
+ *
+ * @returns 成功写入的边数
+ */
+export async function batchUpsertEdges(
+  driver: Driver,
+  edges: GmEdge[],
+): Promise<number> {
+  if (!edges.length) return 0;
+  const session = getSession(driver);
+  try {
+    // 按关系类型分组（Cypher 关系类型不能参数化）
+    const byType = new Map<string, GmEdge[]>();
+    for (const e of edges) {
+      if (!byType.has(e.type)) byType.set(e.type, []);
+      byType.get(e.type)!.push(e);
+    }
+
+    let totalWritten = 0;
+    for (const [relType, batch] of byType) {
+      const rows = batch.map((e) => ({
+        fromId: e.fromId,
+        toId: e.toId,
+        id: e.id,
+        instruction: e.instruction,
+        condition: e.condition ?? null,
+        weight: e.weight,
+        createdAt: neo4j.int(e.createdAt),
+        updatedAt: neo4j.int(e.updatedAt),
+      }));
+      const result = await session.run(
+        `UNWIND $rows AS row
+         MATCH (from:Task|Skill|Event {id: row.fromId})
+         MATCH (to:Task|Skill|Event {id: row.toId})
+         MERGE (from)-[r:${relType}]->(to)
+         SET r.id = row.id,
+             r.fromId = row.fromId,
+             r.toId = row.toId,
+             r.instruction = row.instruction,
+             r.condition = row.condition,
+             r.weight = row.weight,
+             r.createdAt = row.createdAt,
+             r.updatedAt = row.updatedAt
+         RETURN count(r) AS c`,
+        { rows },
+      );
+      const c = result.records[0]?.get("c");
+      totalWritten += (typeof c === "number" ? c : c?.toNumber?.() ?? 0);
+    }
+    return totalWritten;
+  } finally {
+    await session.close();
+  }
+}
+
 export async function getEdgeCount(driver: Driver): Promise<number> {
   const session = getSession(driver);
   try {

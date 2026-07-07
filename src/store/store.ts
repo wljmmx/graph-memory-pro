@@ -21,6 +21,7 @@ export { computeEmbeddingHash, ensureSchema } from "./schema.ts";
 // ─── 节点 CRUD ──────────────────────────────────────────────
 export {
   upsertNode,
+  batchUpsertNodes,
   findById,
   searchNodes,
   vectorSearchWithScore,
@@ -33,6 +34,7 @@ export {
 // ─── 边 CRUD 与节点合并 ─────────────────────────────────────
 export {
   upsertEdge,
+  batchUpsertEdges,
   getEdgeCount,
   getEdgesForNodes,
   mergeNodes,

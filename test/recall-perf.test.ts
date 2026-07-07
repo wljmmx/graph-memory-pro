@@ -53,6 +53,7 @@ vi.mock("../src/store/store.ts", async (importOriginal) => {
 // 拦截 PPR（避免真实图算法）
 vi.mock("../src/graph/pagerank.ts", () => ({
   personalizedPageRank: vi.fn().mockResolvedValue({ scores: new Map() }),
+  preheatProjection: vi.fn().mockResolvedValue(true),
 }));
 
 // 在 mock 生效后导入

@@ -13,7 +13,7 @@ import {
   saveVector, getVectorHash, computeEmbeddingHash,
   upsertFeedback,
 } from "../store/store.ts";
-import { personalizedPageRank } from "../graph/pagerank.ts";
+import { personalizedPageRank, preheatProjection } from "../graph/pagerank.ts";
 import { logPhase, isTimingEnabled, printAllDistributions, resetAllDistributions } from "../timing.ts";
 import { QueryCache } from "./query-cache.ts";
 import { JudgeManager } from "./judge.ts";
@@ -84,19 +84,32 @@ export class Recaller {
     // v2.3.1 性能优化: 入口处单次计算 queryEmbedding，复用给 recallPrecise / recallGeneralized / QueryCache。
     // 旧实现：embed 在 recallPrecise + recallGeneralized + QueryCache 相似匹配 共 3 处被调用，
     // 每次 ~1000ms，总计浪费 ~2000ms（实测 vec_embed 1000+ms × 3 = 3000ms）。
-    let queryEmbedding: number[] | undefined;
-    if (this.embed) {
+    //
+    // v2.3.1 P0-2: embed 与 preheatProjection 并行（两者无数据依赖）。
+    // preheatProjection 预热共享 GDS 投影，避免后续 recallPrecise/recallGeneralized
+    // 并行执行时各自独立触发 ensureSharedProjection（重复探测 ~80-150ms）。
+    const embedPromise = (async (): Promise<number[] | undefined> => {
+      if (!this.embed) return undefined;
       try {
         const tEmbed = Date.now();
-        queryEmbedding = await this.embedOnce(query);
+        const vec = await this.embedOnce(query);
         logPhase("vec_embed", Date.now() - tEmbed, {
-          dims: queryEmbedding.length,
+          dims: vec.length,
           context: "recall_entry",
         });
+        return vec;
       } catch {
         // embed 失败不影响主流程（FTS 仍可返回结果）
+        return undefined;
       }
-    }
+    })();
+
+    // 预热 GDS 投影（与 embed 并行，但需等待完成后再进入两条路径，
+    // 否则两条路径各自调用 personalizedPageRank 时仍会重复触发 ensureSharedProjection）
+    const preheatPromise = preheatProjection(this.driver).catch(() => false);
+
+    // 等待 embed + preheat 都完成（两者并行执行，总耗时 ≈ max(embed, preheat)）
+    const [queryEmbedding] = await Promise.all([embedPromise, preheatPromise]);
 
     // v2.3.1 性能优化: 两条召回路径并行执行（共享同一 queryEmbedding）。
     // 旧实现：串行 await recallPrecise → recallGeneralized，多耗费一个路径的时间。

@@ -240,26 +240,31 @@ describe("handleGetNode", () => {
 describe("handleSearch", () => {
   it("正常搜索 → 200，返回 nodes 和 edges", async () => {
     const driver = mockDriver() as any;
+    // v2.3.1 P1-1: searchNodes 改为 4 个 fulltext 索引并行查询
+    // 4 次 session.run（task/skill/event/conversation 索引各一次）+ 1 次 getEdgesForNodes
+    const nodeRecord = makeRecord({
+      n: makeNodeObj({
+        id: "n1",
+        name: "alpha",
+        type: "TASK",
+        status: "active",
+        validatedCount: 5,
+        updatedAt: 1000,
+      }),
+      score: 0.9,
+    });
+    const edgeRecord = makeRecord({
+      r: {
+        properties: { id: "e1", fromId: "n1", toId: "n2", instruction: "rel", weight: 1 },
+        type: "RELATES_TO",
+      },
+    });
     setupCustomRun(driver, [
-      // searchNodes fulltext 返回 1 个节点
-      [makeRecord({
-        n: makeNodeObj({
-          id: "n1",
-          name: "alpha",
-          type: "TASK",
-          status: "active",
-          validatedCount: 5,
-          updatedAt: 1000,
-        }),
-        score: 0.9,
-      })],
-      // getEdgesForNodes 返回 1 条边
-      [makeRecord({
-        r: {
-          properties: { id: "e1", fromId: "n1", toId: "n2", instruction: "rel", weight: 1 },
-          type: "RELATES_TO",
-        },
-      })],
+      [nodeRecord],  // task_search 索引返回 1 个节点
+      [],            // skill_search 索引返回空
+      [],            // event_search 索引返回空
+      [],            // conversation_search 索引返回空
+      [edgeRecord],  // getEdgesForNodes 返回 1 条边
     ]);
     initRoutes(driver, baseConfig);
 

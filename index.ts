@@ -27,7 +27,7 @@ import type { EmbedFn } from "./src/engine/embed.ts";
 import { createCompleteFn, createRuntimeCompleteFn } from "./src/engine/llm.ts";
 import { createEmbedFn } from "./src/engine/embed.ts";
 import { initDriver, closeDriver, verifyWithRetry } from "./src/store/db.ts";
-import { ensureSchema, getNodeCount, getEdgeCount, searchNodes, upsertNode, upsertEdge, findById } from "./src/store/store.ts";
+import { ensureSchema, getNodeCount, getEdgeCount, searchNodes, upsertNode, batchUpsertNodes, batchUpsertEdges, findById } from "./src/store/store.ts";
 import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
 import { runMaintenance } from "./src/graph/maintenance.ts";
@@ -105,49 +105,60 @@ async function extractInBackground(
       const result = await extractor.extract(llm, pair.user, pair.assistant);
       if (result.nodes.length > 0) {
         extracted++;
+        const now = Date.now();
+
+        // v2.3.1 P0-3 性能优化: 批量 upsert 节点（UNWIND + MERGE）
+        // 旧实现：循环中 N 次 upsertNode，每次 2-3 次 session.run
+        // 新实现：单次 batchUpsertNodes，按 label 分组批量 MERGE
         const nodeIdMap = new Map<string, string>();
+        const nodesToWrite: any[] = [];
         for (const enode of result.nodes) {
-          try {
-            const now = Date.now();
-            const id = `auto-${now}-${Math.random().toString(36).slice(2, 8)}`;
-            nodeIdMap.set(enode.name, id);
-            await upsertNode(driver, {
-              id,
-              type: enode.type,
-              name: enode.name,
-              description: enode.description,
-              content: enode.content,
-              status: "active",
-              communityId: undefined,
-              pagerank: 0,
-              validatedCount: 0,
-              createdAt: now,
-              updatedAt: now,
-              embeddingModel: _cfg?.embedding?.model,
-            });
-          } catch (e) {
-            if (process.env.GM_DEBUG) logger?.debug?.(`  [graph-memory-pro] upsertNode failed: ${e}`);
-          }
+          const id = `auto-${now}-${Math.random().toString(36).slice(2, 8)}`;
+          nodeIdMap.set(enode.name, id);
+          nodesToWrite.push({
+            id,
+            type: enode.type,
+            name: enode.name,
+            description: enode.description,
+            content: enode.content,
+            status: "active",
+            communityId: undefined,
+            pagerank: 0,
+            validatedCount: 0,
+            createdAt: now,
+            updatedAt: now,
+            embeddingModel: _cfg?.embedding?.model,
+          });
         }
+        try {
+          await batchUpsertNodes(driver, nodesToWrite);
+        } catch (e) {
+          if (process.env.GM_DEBUG) logger?.debug?.(`  [graph-memory-pro] batchUpsertNodes failed: ${e}`);
+        }
+
+        // v2.3.1 P0-3: 批量 upsert 边（UNWIND + MERGE，按关系类型分组）
+        const edgesToWrite: any[] = [];
         for (const eedge of result.edges) {
+          const fromId = nodeIdMap.get(eedge.fromName);
+          const toId = nodeIdMap.get(eedge.toName);
+          if (!fromId || !toId) continue;
+          edgesToWrite.push({
+            id: `edge-${now}-${Math.random().toString(36).slice(2, 8)}`,
+            type: eedge.type,
+            fromId,
+            toId,
+            instruction: eedge.instruction,
+            condition: eedge.condition,
+            weight: 1,
+            createdAt: now,
+            updatedAt: now,
+          });
+        }
+        if (edgesToWrite.length > 0) {
           try {
-            const fromId = nodeIdMap.get(eedge.fromName);
-            const toId = nodeIdMap.get(eedge.toName);
-            if (!fromId || !toId) continue;
-            const now = Date.now();
-            await upsertEdge(driver, {
-              id: `edge-${now}-${Math.random().toString(36).slice(2, 8)}`,
-              type: eedge.type,
-              fromId,
-              toId,
-              instruction: eedge.instruction,
-              condition: eedge.condition,
-              weight: 1,
-              createdAt: now,
-              updatedAt: now,
-            });
+            await batchUpsertEdges(driver, edgesToWrite);
           } catch (e) {
-            if (process.env.GM_DEBUG) logger?.debug?.(`  [graph-memory-pro] upsertEdge failed: ${e}`);
+            if (process.env.GM_DEBUG) logger?.debug?.(`  [graph-memory-pro] batchUpsertEdges failed: ${e}`);
           }
         }
       }
