@@ -116,7 +116,7 @@ describe("createCompleteFn", () => {
     expect(body.keep_alive).toBe("30m");
   });
 
-  it("未配置 keepAlive 时不传 keep_alive 字段（OpenAI 兼容）", async () => {
+  it("未配置 keepAlive 时默认 1h（OpenAI 兼容端点，v2.3.0 改为始终发送）", async () => {
     fetchSpy.mockResolvedValue(
       mockResponse({ choices: [{ message: { content: "ok" } }] }),
     );
@@ -127,7 +127,8 @@ describe("createCompleteFn", () => {
     await complete("s", "u");
     const [, init] = fetchSpy.mock.calls[0];
     const body = JSON.parse(init.body as string);
-    expect(body.keep_alive).toBeUndefined();
+    // v2.3.0: keepAlive 默认 "1h"，避免 Ollama 模型周期性卸载导致冷启动延迟
+    expect(body.keep_alive).toBe("1h");
   });
 
   it("content 为数组格式（多模态/推理模型）时正确拼接 text", async () => {

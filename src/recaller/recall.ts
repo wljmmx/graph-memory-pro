@@ -81,16 +81,34 @@ export class Recaller {
       return cached;
     }
 
-    const precise = await this.recallPrecise(query, limit);
-    const generalized = await this.recallGeneralized(query, limit);
-    const merged = this.mergeResults(precise, generalized);
-
-    // v2.1.2 I-1: 缓存写入（若启用 embed 则尝试相似匹配）
+    // v2.3.1 性能优化: 入口处单次计算 queryEmbedding，复用给 recallPrecise / recallGeneralized / QueryCache。
+    // 旧实现：embed 在 recallPrecise + recallGeneralized + QueryCache 相似匹配 共 3 处被调用，
+    // 每次 ~1000ms，总计浪费 ~2000ms（实测 vec_embed 1000+ms × 3 = 3000ms）。
     let queryEmbedding: number[] | undefined;
     if (this.embed) {
       try {
-        queryEmbedding = await this.embed(query);
-        // 相似匹配：找到相似查询时降权返回
+        const tEmbed = Date.now();
+        queryEmbedding = await this.embedOnce(query);
+        logPhase("vec_embed", Date.now() - tEmbed, {
+          dims: queryEmbedding.length,
+          context: "recall_entry",
+        });
+      } catch {
+        // embed 失败不影响主流程（FTS 仍可返回结果）
+      }
+    }
+
+    // v2.3.1 性能优化: 两条召回路径并行执行（共享同一 queryEmbedding）。
+    // 旧实现：串行 await recallPrecise → recallGeneralized，多耗费一个路径的时间。
+    const [precise, generalized] = await Promise.all([
+      this.recallPrecise(query, limit, queryEmbedding),
+      this.recallGeneralized(query, limit, queryEmbedding),
+    ]);
+    const merged = this.mergeResults(precise, generalized);
+
+    // v2.1.2 I-1: 缓存写入（复用已计算的 queryEmbedding 做相似匹配，不再重复 embed）
+    if (queryEmbedding) {
+      try {
         const similar = this.queryCache.getSimilar(queryEmbedding);
         if (similar) {
           logPhase("recall_cache_similar_hit", 0, {
@@ -100,7 +118,7 @@ export class Recaller {
           // 相似命中仅作为统计，下次相同 query 时直接命中精确缓存
         }
       } catch {
-        // embed 失败不影响主流程
+        // 相似匹配失败不影响主流程
       }
     }
     this.queryCache.put(query, merged, queryEmbedding);
@@ -117,6 +135,26 @@ export class Recaller {
     }
 
     return merged;
+  }
+
+  /**
+   * v2.3.1 性能优化: embed 短时去重
+   *
+   * 并发相同 query 的 embed 调用复用同一 in-flight promise，避免并发重复请求 Ollama。
+   * 注意：仅去重并发请求，不缓存结果（结果缓存由 QueryCache 负责）。
+   * Map 在 promise 完成后立即清除该 key，防止内存泄漏。
+   */
+  private inFlightEmbeds = new Map<string, Promise<number[]>>();
+
+  private async embedOnce(query: string): Promise<number[]> {
+    if (!this.embed) throw new Error("embed not configured");
+    const inflight = this.inFlightEmbeds.get(query);
+    if (inflight) return inflight;
+    const p = this.embed(query).finally(() => {
+      this.inFlightEmbeds.delete(query);
+    });
+    this.inFlightEmbeds.set(query, p);
+    return p;
   }
 
   /**
@@ -219,7 +257,11 @@ export class Recaller {
     }
   }
 
-  private async recallPrecise(query: string, limit: number): Promise<RecallResult> {
+  private async recallPrecise(
+    query: string,
+    limit: number,
+    precomputedVec?: number[],
+  ): Promise<RecallResult> {
     const tPrecise = Date.now();
 
     const tFts = Date.now();
@@ -227,11 +269,21 @@ export class Recaller {
     logPhase("fts_search", Date.now() - tFts, { nodes: ftsNodes.length });
 
     let vecNodes: GmNode[] = [];
-    if (this.embed) {
+    // v2.3.1 性能优化: 优先复用入口预计算的 queryEmbedding，避免重复 embed（~1000ms）。
+    // 仅在未提供预计算向量时才回退到内部 embed 调用（保持向后兼容，如外部直接调用）。
+    if (precomputedVec?.length || this.embed) {
       try {
-        const tEmbed = Date.now();
-        const vec = await this.embed(query);
-        logPhase("vec_embed", Date.now() - tEmbed, { dims: vec.length });
+        let vec: number[];
+        if (precomputedVec?.length) {
+          vec = precomputedVec;
+        } else {
+          const tEmbed = Date.now();
+          vec = await this.embed!(query);
+          logPhase("vec_embed", Date.now() - tEmbed, {
+            dims: vec.length,
+            context: "recall_precise_fallback",
+          });
+        }
 
         if (vec.length) {
           // v2.1.2 第三批 L-1：query_vec → M @ vec 变换
@@ -305,15 +357,29 @@ export class Recaller {
     return { nodes: finalNodes, edges, tokenEstimate: finalNodes.length * 50 + edges.length * 20 };
   }
 
-  private async recallGeneralized(query: string, limit: number): Promise<RecallResult> {
-    if (!this.embed) return { nodes: [], edges: [], tokenEstimate: 0 };
+  private async recallGeneralized(
+    query: string,
+    limit: number,
+    precomputedVec?: number[],
+  ): Promise<RecallResult> {
+    if (!this.embed && !precomputedVec?.length) {
+      return { nodes: [], edges: [], tokenEstimate: 0 };
+    }
 
     const tGen = Date.now();
 
     try {
-      const tEmbed = Date.now();
-      const vec = await this.embed(query);
-      logPhase("vec_embed", Date.now() - tEmbed, { context: "generalized" });
+      // v2.3.1 性能优化: 优先复用入口预计算的 queryEmbedding，避免重复 embed（~1000ms）
+      let vec: number[];
+      if (precomputedVec?.length) {
+        vec = precomputedVec;
+      } else {
+        const tEmbed = Date.now();
+        vec = await this.embed!(query);
+        logPhase("vec_embed", Date.now() - tEmbed, {
+          context: "recall_generalized_fallback",
+        });
+      }
       if (!vec.length) return { nodes: [], edges: [], tokenEstimate: 0 };
 
       const tCommVec = Date.now();
