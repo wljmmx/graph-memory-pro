@@ -48,9 +48,17 @@ jobs:
       - name: Extract version
         id: version
         run: |
-          TAG="${GITHUB_REF##*/}"
-          if [ -z "$TAG" ] || [ "$TAG" = "${GITHUB_REF}" ]; then
-            TAG="${{ inputs.tag }}"
+          # 优先使用 workflow_dispatch 的 inputs.tag
+          # push tag 事件时 inputs.tag 为空，从 GITHUB_REF 提取（refs/tags/v2.3.0 → v2.3.0）
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="${GITHUB_REF##*/}"
+          fi
+          # 校验：TAG 必须形如 v*.*.* 或 *.*.*，防止 workflow_dispatch 误触发时
+          # GITHUB_REF=refs/heads/main 导致 TAG="main" 通过版本检查
+          if ! echo "$TAG" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "ERROR: invalid tag '$TAG' (expected v*.*.*). For workflow_dispatch, provide inputs.tag."
+            exit 1
           fi
           # strip leading 'v'
           VERSION="${TAG#v}"
