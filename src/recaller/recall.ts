@@ -15,6 +15,7 @@ import {
 } from "../store/store.ts";
 import { personalizedPageRank, preheatProjection } from "../graph/pagerank.ts";
 import { logPhase, isTimingEnabled, printAllDistributions, resetAllDistributions } from "../timing.ts";
+import { getCircuitBreaker } from "../engine/circuit-breaker.ts";
 import { QueryCache } from "./query-cache.ts";
 import { JudgeManager } from "./judge.ts";
 import { AssociationMatrix } from "./association-matrix.ts";
@@ -90,15 +91,24 @@ export class Recaller {
     // 并行执行时各自独立触发 ensureSharedProjection（重复探测 ~80-150ms）。
     const embedPromise = (async (): Promise<number[] | undefined> => {
       if (!this.embed) return undefined;
+      // v2.3.2 阶段三: embed 熔断器 — OPEN 时跳过 embed 重试链路（~9s），直接降级 FTS
+      const breaker = getCircuitBreaker("embed");
+      if (!breaker.allow()) {
+        if (process.env.GM_DEBUG) log?.debug?.("[recall] embed circuit OPEN, skip embed → FTS fallback");
+        return undefined;
+      }
       try {
         const tEmbed = Date.now();
         const vec = await this.embedOnce(query);
+        breaker.recordSuccess();
         logPhase("vec_embed", Date.now() - tEmbed, {
           dims: vec.length,
           context: "recall_entry",
         });
         return vec;
       } catch {
+        // embed 失败记录到熔断器，连续失败达阈值后 OPEN
+        breaker.recordFailure();
         // embed 失败不影响主流程（FTS 仍可返回结果）
         return undefined;
       }

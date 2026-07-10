@@ -34,6 +34,7 @@ import { runMaintenance } from "./src/graph/maintenance.ts";
 import { reEmbedNodes } from "./src/graph/reembed.ts";
 import { initRoutes, getRoutes } from "./src/routes/crud.ts";
 import { setTimingEnabled } from "./src/timing.ts";
+import { getCircuitBreaker } from "./src/engine/circuit-breaker.ts";
 
 // ─── 全局状态 ──────────────────────────────────────────
 
@@ -99,6 +100,13 @@ async function extractInBackground(
 ): Promise<void> {
   if (!extractor || !driver || !llm || pendingMessages.length === 0) return;
 
+  // v2.3.2 阶段三: LLM 熔断器 — OPEN 时跳过整个 extract tick，减少 Ollama 压力
+  const llmBreaker = getCircuitBreaker("llm");
+  if (!llmBreaker.allow()) {
+    if (process.env.GM_DEBUG) logger?.debug?.("[graph-memory-pro] llm circuit OPEN, skip extract tick");
+    return;
+  }
+
   let extracted = 0;
   const maxPairs = 3;
   const pairs = pendingMessages.slice(0, maxPairs);
@@ -106,6 +114,7 @@ async function extractInBackground(
   for (const pair of pairs) {
     try {
       const result = await extractor.extract(llm, pair.user, pair.assistant);
+      llmBreaker.recordSuccess();
       if (result.nodes.length > 0) {
         extracted++;
         const now = Date.now();
@@ -171,6 +180,8 @@ async function extractInBackground(
         }
       }
     } catch (err) {
+      // v2.3.2 阶段三: extract 失败记录到 LLM 熔断器
+      llmBreaker.recordFailure();
       if (process.env.GM_DEBUG) logger?.debug?.(`  [graph-memory-pro] extract pair failed: ${err}`);
     }
   }
@@ -610,6 +621,121 @@ export default definePluginEntry({
         },
       });
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // v2.3.2 阶段三: 配置热更新 — /api/reload 端点
+    //
+    // 从 SDK 重新读取配置，diff 后部分重建资源（driver/llm/embed/timer），
+    // 其余配置原地合并（Object.assign）让 Recaller/JudgeManager 等持引用的组件自动生效。
+    // 鉴权：通过 body.authToken 校验（与 mcp.authToken 一致），未配置 authToken 时允许本地访问。
+    // ─────────────────────────────────────────────────────────────────
+    api.registerHttpRoute({
+      method: "POST",
+      path: "/api/reload",
+      handler: async (req: any) => {
+        try {
+          if (!_cfg) return { status: 503, body: { error: "plugin not initialized" } };
+
+          // 鉴权：若配置了 authToken，请求需携带匹配的 token
+          const authToken = _cfg?.mcp?.authToken;
+          if (authToken) {
+            const provided = req?.body?.authToken ?? req?.headers?.["x-auth-token"];
+            if (provided !== authToken) {
+              return { status: 401, body: { error: "unauthorized" } };
+            }
+          }
+
+          // 从 SDK 重新获取配置
+          const newCfgRaw = api.config ?? {};
+          if (!newCfgRaw?.neo4j?.uri) {
+            return { status: 400, body: { error: "new config missing neo4j.uri" } };
+          }
+          const newCfg = {
+            ...newCfgRaw,
+            compactTurnCount: newCfgRaw.compactTurnCount ?? 6,
+            recallMaxNodes: newCfgRaw.recallMaxNodes ?? 6,
+            recallMaxDepth: newCfgRaw.recallMaxDepth ?? 2,
+            freshTailCount: newCfgRaw.freshTailCount ?? 10,
+            dedupThreshold: newCfgRaw.dedupThreshold ?? 0.90,
+            pagerankDamping: newCfgRaw.pagerankDamping ?? 0.85,
+            pagerankIterations: newCfgRaw.pagerankIterations ?? 20,
+          } as GmConfig;
+
+          const applied: Record<string, boolean> = {};
+
+          // diff: neo4j 段变化 → 重建 driver
+          const neo4jChanged = JSON.stringify(newCfg.neo4j) !== JSON.stringify(_cfg.neo4j);
+          if (neo4jChanged) {
+            const driver = await getOrCreateDriver(newCfg, logger);
+            if (driver) {
+              _driver = driver;
+              const embedDimension = resolveEmbedDimension(newCfg);
+              try { await ensureSchema(driver, embedDimension); } catch (err) {
+                logger?.warn?.(`[graph-memory-pro] reload schema init: ${err}`);
+              }
+              applied.neo4j = true;
+            }
+          }
+
+          // diff: llm 段变化 → 重建 LLM
+          const llmChanged = JSON.stringify(newCfg.llm) !== JSON.stringify(_cfg.llm);
+          if (llmChanged) {
+            const runtimeLlm = api.runtime?.llm;
+            if (runtimeLlm && typeof runtimeLlm.complete === "function") {
+              _llm = createRuntimeCompleteFn(runtimeLlm, newCfg.llm, logger);
+            } else {
+              _llm = createCompleteFn(newCfg.llm);
+            }
+            applied.llm = true;
+          }
+
+          // diff: embedding 段变化 → 重建 embed
+          const embedChanged = JSON.stringify(newCfg.embedding) !== JSON.stringify(_cfg.embedding);
+          if (embedChanged) {
+            _embed = newCfg.embedding ? createEmbedFn(newCfg.embedding) : null;
+            applied.embedding = true;
+          }
+
+          // diff: background 间隔变化 → 重建 timer
+          const bgChanged =
+            (newCfg.background?.extractorIntervalMs ?? 60_000) !== (_cfg.background?.extractorIntervalMs ?? 60_000) ||
+            (newCfg.background?.maintenanceIntervalMs ?? 6 * 3600_000) !== (_cfg.background?.maintenanceIntervalMs ?? 6 * 3600_000);
+
+          // 原地合并配置（Recaller/JudgeManager 持引用，自动生效）
+          Object.assign(_cfg, newCfg);
+          applied.inPlace = true;
+
+          // 更新 Recaller 的 embed/judge 注入
+          if (_recaller) {
+            if (_embed) _recaller.setEmbedFn(_embed);
+            if (llmChanged && _cfg.judge?.enabled !== false) {
+              const { JudgeManager } = await import("./src/recaller/judge.ts");
+              const jm = new JudgeManager(_cfg.judge, _llm ?? undefined);
+              _recaller.setJudgeManager(jm);
+            }
+          }
+
+          // 更新 routes 内部状态
+          initRoutes(_driver!, _cfg, _llm ?? undefined, _embed ?? undefined, _recaller ?? undefined);
+
+          // background 间隔变化 → 提示需重启 timer（timer 重建较重，标记但不自动执行）
+          if (bgChanged) {
+            applied.timers = false;
+            logger?.info?.("[graph-memory-pro] background interval changed, restart plugin to apply timer changes");
+          }
+
+          // 失效熔断器（配置变化可能修复了下游问题，重置熔断器让其重试）
+          const { resetAllCircuitBreakers } = await import("./src/engine/circuit-breaker.ts");
+          resetAllCircuitBreakers();
+
+          logger?.info?.(`[graph-memory-pro] config reloaded: ${JSON.stringify(applied)}`);
+          return { status: 200, body: { applied, version: "2.3.2" } };
+        } catch (err: any) {
+          logger?.error?.(`[graph-memory-pro] reload failed: ${err}`);
+          return { status: 500, body: { error: err.message } };
+        }
+      },
+    });
 
     // ─────────────────────────────────────────────────────────────────
     // v2.2.0: MCP Server（对外暴露 13 个 tools，供 dashboard 调用）

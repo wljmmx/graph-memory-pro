@@ -31,6 +31,12 @@ v2.3.2 聚焦**稳定性修复**。在 v2.3.1 性能优化（并行化/批量化
 - **P2-3 GDS 自动失效**：[src/graph/pagerank.ts](src/graph/pagerank.ts) 投影 hash 纳入边数（`relTypeHash(types, edgeCount)`），修复旧实现仅基于 type 集合导致新增/删除同类型边不触发重建的缺陷。新增 `invalidateProjectionCache()` 导出函数，在 [src/store/edges.ts](src/store/edges.ts) 的 `upsertEdge` / `batchUpsertEdges` 成功后调用，主动失效让下次 PPR 重建投影反映新拓扑。
 - **P2-4 向量索引合并**：[src/store/schema.ts](src/store/schema.ts) 新增合并索引 `gm_node_embedding`（多 label Task|Skill|Event），[src/store/nodes.ts](src/store/nodes.ts) `vectorSearchWithScore` 优先用合并索引单 session 查询，省 2 个 session + 去重逻辑。兼容回退：合并索引不存在时回退到 3 索引并行（旧环境）。保留旧索引创建语句确保向后兼容。
 
+### Performance — 阶段三可观测与韧性（P3-1 ~ P3-3）
+
+- **P3-1 连接池监控**：[src/store/db.ts](src/store/db.ts) `getSession` 包装 close 做应用层 Session 计数，新增 `getPoolMetrics()` 返回活跃会话数/总创建数/driver 内部活跃连接数（反射读取，防御性）。[/api/health](src/routes/crud.ts) 追加 `connectionPool` 字段，[/api/metrics](src/routes/crud.ts) 新增 4 个 Prometheus 指标（`graph_memory_neo4j_pool_active_sessions` 等）。
+- **P3-2 降级熔断器**：新增 [src/engine/circuit-breaker.ts](src/engine/circuit-breaker.ts) 经典三态熔断器（CLOSED→OPEN→HALF_OPEN）。[src/recaller/recall.ts](src/recaller/recall.ts) embed 路径接入熔断器，OPEN 时跳过 ~9s 重试直接降级 FTS。[index.ts](index.ts) extractInBackground 接入 LLM 熔断器，OPEN 时跳过整个 tick。[/api/health](src/routes/crud.ts) 追加 `circuitBreakers` 状态，[/api/metrics](src/routes/crud.ts) 新增 `graph_memory_circuit_breaker_state` / `_failures_total` 指标。
+- **P3-3 配置热更新**：新增 [/api/reload](index.ts) POST 端点，从 SDK 重新读取配置后 diff-based 部分重建：neo4j 段变化重建 driver + ensureSchema，llm 段变化重建 CompleteFn，embedding 段变化重建 EmbedFn，其余配置 `Object.assign` 原地合并让 Recaller/JudgeManager 持引用自动生效。reload 后自动重置所有熔断器。支持 authToken 鉴权（与 mcp.authToken 共用）。
+
 ### Configuration Migration — 配置迁移（v2.3.1 → v2.3.2）
 
 无破坏性变更，现有 v2.3.1 配置无需任何改动。`upsertNode` 新增第 3 个可选参数 `cfg`，未传入时行为与 v2.3.1 完全一致（archiveKeepCount 默认 3）。

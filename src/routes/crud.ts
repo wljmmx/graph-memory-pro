@@ -93,6 +93,16 @@ async function handleHealth(): Promise<{ status: number; body: any }> {
   try {
     const { healthCheck } = await import("../graph/maintenance.ts");
     const report = await healthCheck(_driver);
+    // v2.3.2 阶段三: 追加连接池指标 + 熔断器状态
+    const { getPoolMetrics } = await import("../store/db.ts");
+    report.connectionPool = getPoolMetrics();
+    const { getAllCircuitBreakers } = await import("../engine/circuit-breaker.ts");
+    const breakers = getAllCircuitBreakers();
+    const breakerStatus: Record<string, any> = {};
+    for (const [name, breaker] of breakers) {
+      breakerStatus[name] = breaker.getStatus();
+    }
+    report.circuitBreakers = breakerStatus;
     return { status: 200, body: report };
   } catch (err: any) {
     return { status: 500, body: { error: err.message } };
@@ -411,6 +421,45 @@ async function handleMetrics(): Promise<{ status: number; body: string }> {
     lines.push("# TYPE graph_memory_llm_completion_tokens_total gauge");
     lines.push(`graph_memory_llm_completion_tokens_total{${labels}} ${usage.total.completionTokens}`);
   } catch { /* usage 查询失败不影响 metrics 输出 */ }
+
+  // v2.3.2 阶段三: 连接池指标
+  try {
+    const { getPoolMetrics } = await import("../store/db.ts");
+    const pool = getPoolMetrics();
+    lines.push("# HELP graph_memory_neo4j_pool_active_sessions Active Neo4j sessions (application layer).");
+    lines.push("# TYPE graph_memory_neo4j_pool_active_sessions gauge");
+    lines.push(`graph_memory_neo4j_pool_active_sessions{${labels}} ${pool.appActiveSessions}`);
+
+    lines.push("# HELP graph_memory_neo4j_pool_total_sessions Total Neo4j sessions created (counter).");
+    lines.push("# TYPE graph_memory_neo4j_pool_total_sessions counter");
+    lines.push(`graph_memory_neo4j_pool_total_sessions{${labels}} ${pool.appTotalSessionsCreated}`);
+
+    lines.push("# HELP graph_memory_neo4j_pool_max_size Max connection pool size.");
+    lines.push("# TYPE graph_memory_neo4j_pool_max_size gauge");
+    lines.push(`graph_memory_neo4j_pool_max_size{${labels}} ${pool.maxPoolSize}`);
+
+    lines.push("# HELP graph_memory_neo4j_pool_driver_active Active connections reported by driver (reflection).");
+    lines.push("# TYPE graph_memory_neo4j_pool_driver_active gauge");
+    lines.push(`graph_memory_neo4j_pool_driver_active{${labels}} ${pool.driverActiveConnections ?? -1}`);
+  } catch { /* pool 指标获取失败不影响 metrics 输出 */ }
+
+  // v2.3.2 阶段三: 熔断器指标
+  try {
+    const { getAllCircuitBreakers } = await import("../engine/circuit-breaker.ts");
+    const breakers = getAllCircuitBreakers();
+    lines.push("# HELP graph_memory_circuit_breaker_state Circuit breaker state (0=closed, 1=open, 2=half_open).");
+    lines.push("# TYPE graph_memory_circuit_breaker_state gauge");
+    for (const [name, breaker] of breakers) {
+      const stateNum = breaker.getState() === "closed" ? 0 : (breaker.getState() === "open" ? 1 : 2);
+      lines.push(`graph_memory_circuit_breaker_state{${labels},target="${name}"} ${stateNum}`);
+    }
+    lines.push("# HELP graph_memory_circuit_breaker_failures_total Circuit breaker failure count.");
+    lines.push("# TYPE graph_memory_circuit_breaker_failures_total counter");
+    for (const [name, breaker] of breakers) {
+      const status = breaker.getStatus();
+      lines.push(`graph_memory_circuit_breaker_failures_total{${labels},target="${name}"} ${status.failureCount}`);
+    }
+  } catch { /* breaker 指标获取失败不影响 metrics 输出 */ }
 
   return { status: 200, body: lines.join("\n") + "\n" };
 }
