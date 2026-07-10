@@ -7,7 +7,13 @@
  * OPEN 状态快速失败跳过重试链路（embed ~9s / llm ~17s），降级到 FTS/默认值。
  *
  * 线程模型：单进程 Node.js 事件循环，无锁竞争，模块级单例即可。
+ *
+ * v2.3.3 CB-2: 状态变更记录 info 级别日志（CLOSED→OPEN / HALF_OPEN→CLOSED 等）
  */
+
+import { createLogger } from "../logger.ts";
+
+const _cbLogger = createLogger("circuit-breaker");
 
 export type CircuitState = "closed" | "open" | "half_open";
 
@@ -146,8 +152,16 @@ export class CircuitBreaker {
 
   private transition(newState: CircuitState): void {
     if (this.state === newState) return;
+    const oldState = this.state;
     this.state = newState;
     this.lastStateChangeAt = Date.now();
+    // v2.3.3 CB-2: 状态变更记录日志（运维关键事件）
+    _cbLogger.info(`circuit breaker state changed`, {
+      name: this.opts.name,
+      from: oldState,
+      to: newState,
+      failureCount: this.failureCount,
+    });
   }
 }
 

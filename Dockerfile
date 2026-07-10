@@ -20,8 +20,10 @@ RUN apk add --no-cache openjdk17-jdk bash curl \
 WORKDIR /app
 
 # 先复制 package 元数据以利用 Docker 层缓存
+# v2.3.3 DOCKER-1: 不再回退到 npm install（会忽略 lock 文件导致版本漂移）
+# lock 文件与 package.json 不同步时应在 CI 中修复，而非构建时绕过
 COPY package.json package-lock.json* ./
-RUN npm ci --omit=optional || npm install
+RUN npm ci --omit=optional
 
 # 复制源码
 COPY . .

@@ -611,11 +611,21 @@ export default definePluginEntry({
     // 之前 initRoutes() 只初始化模块状态，路由从未注册到 Gateway。
     // ─────────────────────────────────────────────────────────────────
     const routes = getRoutes();
+    // v2.3.3 SEC-1: 统一鉴权 — 写操作 + 敏感读操作（health/metrics/usage/doctor）需 authToken
+    // 未配置 mcp.authToken 时允许本地访问（向后兼容）
+    const SENSITIVE_READ_PATHS = new Set(["/api/health", "/api/metrics", "/api/usage", "/api/doctor"]);
     for (const route of routes) {
+      const needsAuth = route.method !== "GET" || SENSITIVE_READ_PATHS.has(route.path);
       api.registerHttpRoute({
         method: route.method,
         path: route.path,
         handler: async (req: any) => {
+          if (needsAuth && _cfg?.mcp?.authToken) {
+            const provided = req?.headers?.["x-auth-token"] ?? req?.body?.authToken;
+            if (provided !== _cfg.mcp.authToken) {
+              return { status: 401, body: { error: "unauthorized" } };
+            }
+          }
           const result = await route.handler(req?.params ?? req?.query ?? {});
           return { status: result.status, body: result.body };
         },
@@ -745,7 +755,20 @@ export default definePluginEntry({
               _embed ?? undefined,
               _recaller ?? undefined,
             );
-            logger?.info?.(`[graph-memory-pro] MCP server started (port=${_cfg.mcp?.port ?? 7800})`);
+            // v2.3.3 MCP-1: 启动后健康探测，确认 server 真正就绪（非仅 listen 成功）
+            const port = _cfg.mcp?.port ?? 7800;
+            const host = _cfg.mcp?.host ?? "127.0.0.1";
+            try {
+              const resp = await fetch(`http://${host}:${port}/health`, { signal: AbortSignal.timeout(3000) });
+              if (resp.ok) {
+                logger?.info?.(`[graph-memory-pro] MCP server started + health OK (port=${port})`);
+              } else {
+                logger?.warn?.(`[graph-memory-pro] MCP server started but /health returned ${resp.status}`);
+              }
+            } catch (probeErr) {
+              // 健康探测失败不回滚（server 可能已正常工作，仅 /health 路径不可达）
+              logger?.warn?.(`[graph-memory-pro] MCP server started but health probe failed: ${probeErr}`);
+            }
           } catch (err) {
             logger?.error?.(`[graph-memory-pro] MCP server start failed: ${err}`);
           }

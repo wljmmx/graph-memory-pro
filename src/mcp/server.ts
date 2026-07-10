@@ -44,6 +44,30 @@ function asStructured<T>(obj: T): Record<string, unknown> {
 }
 
 /**
+ * v2.3.3 MCP-2: 为 tool execute 添加超时包装
+ *
+ * 防止 recall/maintain 等长操作因 LLM/embed 挂起而无限阻塞 MCP 客户端。
+ * 超时后返回错误 content，而非让客户端等待直到自身超时。
+ */
+const MCP_TOOL_TIMEOUT_MS = 60_000; // 60s — 覆盖 recall(~5s) + maintain(~30s) 正常耗时
+
+async function withTimeout<T>(
+  fn: () => Promise<T>,
+  timeoutMs: number = MCP_TOOL_TIMEOUT_MS,
+  toolName: string = "unknown",
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`MCP tool '${toolName}' timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([fn(), timeoutPromise]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
  * 启动 MCP server
  *
  * @param driver Neo4j driver
@@ -295,7 +319,7 @@ export async function startMcpServer(
       },
       async () => {
         try {
-          const result = await runMaintenance(driver, cfg, llm, embed);
+          const result = await withTimeout(() => runMaintenance(driver, cfg, llm, embed), 120_000, "gm_maintain");
           return {
             content: [{ type: "text", text: `Maintenance done: ${result.dedup.merged} merged, ${result.community.count} communities, ${result.durationMs}ms` }],
             structuredContent: asStructured(result),
@@ -323,7 +347,7 @@ export async function startMcpServer(
           return { content: [{ type: "text", text: "Embed function not configured" }] };
         }
         try {
-          const result = await reEmbedNodes(driver, embed, batchSize ?? 50, cfg.embedding?.model);
+          const result = await withTimeout(() => reEmbedNodes(driver, embed, batchSize ?? 50, cfg.embedding?.model), 120_000, "gm_reembed");
           return {
             content: [{ type: "text", text: `Re-embedded ${result.reEmbedded}/${result.totalScanned} nodes, ${result.failed} failed, ${result.durationMs}ms` }],
             structuredContent: asStructured(result),
@@ -364,8 +388,12 @@ export async function startMcpServer(
           let unusedCount = 0;
           if (recaller) {
             try {
-              await recaller.processFeedback(
-                query, validNodes, assistantReply, sessionId ?? "mcp",
+              await withTimeout(
+                () => recaller.processFeedback(
+                  query, validNodes, assistantReply, sessionId ?? "mcp",
+                ),
+                60_000,
+                "gm_feedback",
               );
             } catch { /* M 矩阵更新失败不阻塞 */ }
           } else {
@@ -422,11 +450,15 @@ export async function startMcpServer(
         }
         try {
           const { runBenchmark } = await import("../benchmark/runner.ts");
-          const result = await runBenchmark(recaller, driver, cfg, {
-            datasets: datasets as any,
-            maxCases: maxCases ?? cfg.benchmark?.maxCases ?? 50,
-            buildGraph: buildGraph ?? cfg.benchmark?.buildGraph ?? true,
-          });
+          const result = await withTimeout(
+            () => runBenchmark(recaller, driver, cfg, {
+              datasets: datasets as any,
+              maxCases: maxCases ?? cfg.benchmark?.maxCases ?? 50,
+              buildGraph: buildGraph ?? cfg.benchmark?.buildGraph ?? true,
+            }),
+            300_000,
+            "gm_benchmark",
+          );
           return {
             content: [{ type: "text", text: `Benchmark done: P1=${(result.aggregate.avgP1 * 100).toFixed(2)}%, MRR=${result.aggregate.avgMrr.toFixed(4)}` }],
             structuredContent: asStructured(result),
@@ -456,7 +488,11 @@ export async function startMcpServer(
           const r = Math.min(rounds ?? 1, cfg.autoTuner?.maxRounds ?? 10);
           const results = [];
           for (let i = 0; i < r; i++) {
-            const res = await tuner.runTuneCycle(recaller!, driver, cfg);
+            const res = await withTimeout(
+              () => tuner.runTuneCycle(recaller!, driver, cfg),
+              120_000,
+              "gm_tune",
+            );
             results.push(res);
             if (res.applied === false && res.reason?.includes("cold start")) break;
           }

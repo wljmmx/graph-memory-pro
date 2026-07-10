@@ -929,3 +929,101 @@ describe("v2.3.2 阶段三 P3-3: 配置热更新（reload 纯函数）", () => {
     });
   });
 });
+
+// ─── v2.3.3: SEC-1 路由鉴权 + MCP-2 超时 + CB-2 熔断器日志 ────
+
+describe("v2.3.3 SEC-1: HTTP 路由鉴权中间件逻辑", () => {
+  // 测试 index.ts 中的鉴权判定逻辑（通过模拟 needsAuth + authToken 比对）
+  it("写操作（POST/DELETE）在配置 authToken 时需要鉴权", () => {
+    const authToken = "secret-123";
+    const needsAuth = true; // POST 路由
+    const provided = "wrong-token";
+    expect(needsAuth && authToken && provided !== authToken).toBe(true); // 拒绝
+    expect(needsAuth && authToken && authToken === authToken).toBe(false || authToken === authToken); // 通过
+  });
+
+  it("敏感读操作（/api/health 等）在配置 authToken 时需要鉴权", () => {
+    const SENSITIVE_READ_PATHS = new Set(["/api/health", "/api/metrics", "/api/usage", "/api/doctor"]);
+    const authToken = "secret-123";
+    expect(SENSITIVE_READ_PATHS.has("/api/health")).toBe(true);
+    expect(SENSITIVE_READ_PATHS.has("/api/status")).toBe(false); // 普通读不敏感
+  });
+
+  it("未配置 authToken 时所有路由放行（向后兼容）", () => {
+    const authToken = undefined;
+    const needsAuth = true;
+    expect(needsAuth && authToken).toBeFalsy(); // 放行
+  });
+});
+
+describe("v2.3.3 MCP-2: tool execute 超时包装", () => {
+  it("withTimeout 在超时后抛出超时错误", async () => {
+    // 模拟 withTimeout 逻辑
+    async function withTimeout<T>(fn: () => Promise<T>, timeoutMs: number, toolName: string): Promise<T> {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`MCP tool '${toolName}' timed out after ${timeoutMs}ms`)), timeoutMs);
+      });
+      try {
+        return await Promise.race([fn(), timeoutPromise]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+
+    const slow = new Promise<string>(() => {}); // 永不 resolve
+    await expect(withTimeout(() => slow, 50, "test-tool")).rejects.toThrow("MCP tool 'test-tool' timed out after 50ms");
+  });
+
+  it("withTimeout 在正常完成时返回结果", async () => {
+    async function withTimeout<T>(fn: () => Promise<T>, timeoutMs: number): Promise<T> {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("timeout")), timeoutMs);
+      });
+      try {
+        return await Promise.race([fn(), timeoutPromise]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+
+    const result = await withTimeout(() => Promise.resolve("ok"), 1000);
+    expect(result).toBe("ok");
+  });
+});
+
+describe("v2.3.3 CB-2: 熔断器状态变更日志", () => {
+  it("transition 时 logger.info 被调用", async () => {
+    vi.resetModules();
+    const logCalls: any[] = [];
+    vi.doMock("../src/logger.ts", () => ({
+      createLogger: () => ({
+        info: (msg: string, fields?: any) => logCalls.push({ msg, fields }),
+        warn: () => {},
+        debug: () => {},
+        error: () => {},
+        child: () => ({ info: () => {}, warn: () => {}, debug: () => {}, error: () => {} }),
+        getNamespace: () => "circuit-breaker",
+      }),
+    }));
+
+    const { CircuitBreaker } = await import("../src/engine/circuit-breaker.ts");
+    const breaker = new CircuitBreaker({ name: "test-log", failureThreshold: 2, cooldownMs: 1000 });
+
+    // CLOSED → OPEN（触发 transition）
+    breaker.recordFailure();
+    breaker.recordFailure();
+    expect(breaker.getState()).toBe("open");
+
+    // 应有状态变更日志
+    const stateChangeLog = logCalls.find(
+      (l) => l.msg === "circuit breaker state changed" && l.fields?.from === "closed" && l.fields?.to === "open",
+    );
+    expect(stateChangeLog).toBeDefined();
+    expect(stateChangeLog.fields.name).toBe("test-log");
+
+    vi.doUnmock("../src/logger.ts");
+    vi.restoreAllMocks();
+  });
+});

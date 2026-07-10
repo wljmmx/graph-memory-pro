@@ -360,6 +360,7 @@ export function createRuntimeCompleteFn(
     // v2.3.2 阶段二: 信号量限流（runtime LLM 通常本地单流）
     const release = await runtimeSemaphore.acquire();
     try {
+      // v2.3.3 ERR-1: runtime LLM 也需要超时控制，防 SDK complete 挂起导致信号量槽位永久占用
       const result = await runtimeLlm.complete({
         messages: [
           { role: "system", content: system },
@@ -368,6 +369,7 @@ export function createRuntimeCompleteFn(
         maxTokens: 1024,
         temperature: 0.3,
         purpose: "graph-memory-pro:llm",
+        signal: AbortSignal.timeout(30_000),
       });
       const text = normalizeContent(result?.text);
       if (!text) {
@@ -406,6 +408,7 @@ export function createRuntimeCompleteFn(
         maxTokens: 8,
         temperature: 0,
         purpose: "graph-memory-pro:provider-detect",
+        signal: AbortSignal.timeout(10_000),  // v2.3.3 ERR-1: probe 超时 10s
       });
       const provider = (result?.provider ?? "").toString();
       const model = (result?.model ?? "").toString();
