@@ -26,6 +26,8 @@ export interface CircuitBreakerOptions {
   halfOpenMaxRequests: number;
   /** 标识名（用于日志/metrics） */
   name: string;
+  /** v2.3.4 CB-1: 失败计数衰减时间窗口（ms），窗口外的旧失败自动过期。0 表示不衰减（默认 0） */
+  failureWindowMs?: number;
 }
 
 export interface CircuitBreakerStatus {
@@ -59,6 +61,8 @@ export class CircuitBreaker {
   private lastFailureAt: number | null = null;
   private lastStateChangeAt = Date.now();
   private halfOpenInFlight = 0;
+  // v2.3.4 CB-1: 带时间戳的失败记录，用于时间窗口衰减
+  private failureTimestamps: number[] = [];
   private readonly opts: CircuitBreakerOptions;
 
   constructor(opts: Partial<CircuitBreakerOptions> & { name: string }) {
@@ -67,17 +71,36 @@ export class CircuitBreaker {
       failureThreshold: opts.failureThreshold ?? 5,
       cooldownMs: opts.cooldownMs ?? 60_000,
       halfOpenMaxRequests: opts.halfOpenMaxRequests ?? 1,
+      failureWindowMs: opts.failureWindowMs ?? 0,
     };
   }
 
   /**
+   * v2.3.4 CB-1: 清理超出时间窗口的旧失败记录
+   * 仅在配置了 failureWindowMs > 0 时生效。
+   */
+  private pruneExpiredFailures(): void {
+    if (!this.opts.failureWindowMs || this.opts.failureWindowMs <= 0) return;
+    if (this.state !== "closed") return; // 仅 CLOSED 状态衰减
+    const cutoff = Date.now() - this.opts.failureWindowMs;
+    const before = this.failureTimestamps.length;
+    this.failureTimestamps = this.failureTimestamps.filter(ts => ts > cutoff);
+    if (this.failureTimestamps.length < before) {
+      this.failureCount = this.failureTimestamps.length;
+    }
+  }
+
+  /**
    * 判断是否放行请求。
-   * - CLOSED: 始终放行
+   * - CLOSED: 始终放行（先清理过期失败）
    * - OPEN: cooldown 到期转 HALF_OPEN 放行探测，否则拒绝
    * - HALF_OPEN: 限制并发探测数，超限拒绝
    */
   allow(): boolean {
-    if (this.state === "closed") return true;
+    if (this.state === "closed") {
+      this.pruneExpiredFailures(); // v2.3.4 CB-1: 每次放行前清理过期失败
+      return true;
+    }
 
     if (this.state === "open") {
       // 检查 cooldown 是否到期
@@ -105,17 +128,21 @@ export class CircuitBreaker {
       // 探测成功 → 恢复 CLOSED
       this.halfOpenInFlight = 0;
       this.failureCount = 0;
+      this.failureTimestamps = []; // v2.3.4 CB-1
       this.transition("closed");
     } else if (this.state === "closed") {
       // CLOSED 状态成功重置失败计数
       this.failureCount = 0;
+      this.failureTimestamps = []; // v2.3.4 CB-1
     }
   }
 
   /** 请求失败 — 累加失败计数，达阈值转 OPEN */
   recordFailure(): void {
+    const now = Date.now();
     this.failureCount++;
-    this.lastFailureAt = Date.now();
+    this.lastFailureAt = now;
+    this.failureTimestamps.push(now); // v2.3.4 CB-1: 记录时间戳
 
     if (this.state === "half_open") {
       // 探测失败 → 重新 OPEN
@@ -148,6 +175,7 @@ export class CircuitBreaker {
     this.failureCount = 0;
     this.halfOpenInFlight = 0;
     this.lastFailureAt = null;
+    this.failureTimestamps = []; // v2.3.4 CB-1
   }
 
   private transition(newState: CircuitState): void {

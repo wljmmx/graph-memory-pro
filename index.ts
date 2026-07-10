@@ -21,20 +21,20 @@
 import { definePluginEntry, buildJsonPluginConfigSchema } from "openclaw/plugin-sdk/plugin-entry";
 import { Type } from "typebox";
 import type { Driver } from "neo4j-driver";
-import type { GmConfig } from "./src/types.ts";
+import type { GmConfig, GmNode } from "./src/types.ts";
 import type { CompleteFn } from "./src/engine/llm.ts";
 import type { EmbedFn } from "./src/engine/embed.ts";
 import { createCompleteFn, createRuntimeCompleteFn } from "./src/engine/llm.ts";
 import { createEmbedFn } from "./src/engine/embed.ts";
 import { initDriver, closeDriver, verifyWithRetry } from "./src/store/db.ts";
-import { ensureSchema, getNodeCount, getEdgeCount, searchNodes, upsertNode, upsertEdge, batchUpsertNodes, batchUpsertEdges, findById } from "./src/store/store.ts";
+import { ensureSchema, getNodeCount, getEdgeCount, searchNodes, upsertNode, findById } from "./src/store/store.ts";
 import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
 import { runMaintenance } from "./src/graph/maintenance.ts";
 import { reEmbedNodes } from "./src/graph/reembed.ts";
 import { initRoutes, getRoutes } from "./src/routes/crud.ts";
 import { setTimingEnabled } from "./src/timing.ts";
-import { getCircuitBreaker } from "./src/engine/circuit-breaker.ts";
+import { extractInBackground } from "./src/services/extract-service.ts";  // v2.3.4 ARCH-1: 从 index.ts 拆出
 
 // ─── 全局状态 ──────────────────────────────────────────
 
@@ -87,108 +87,7 @@ async function getOrCreateDriver(cfg: GmConfig, logger: any): Promise<Driver | n
   }
 }
 
-/**
- * 后台三元组提取：从最近会话消息中提取实体/关系写入 Neo4j。
- * 移出 before_prompt_build 钩子以避免阻塞 prompt 构建。
- */
-async function extractInBackground(
-  extractor: Extractor | null,
-  driver: Driver | null,
-  llm: CompleteFn | null,
-  logger: any,
-  pendingMessages: Array<{ user: string; assistant: string }>,
-): Promise<void> {
-  if (!extractor || !driver || !llm || pendingMessages.length === 0) return;
-
-  // v2.3.2 阶段三: LLM 熔断器 — OPEN 时跳过整个 extract tick，减少 Ollama 压力
-  const llmBreaker = getCircuitBreaker("llm");
-  if (!llmBreaker.allow()) {
-    if (process.env.GM_DEBUG) logger?.debug?.("[graph-memory-pro] llm circuit OPEN, skip extract tick");
-    return;
-  }
-
-  let extracted = 0;
-  const maxPairs = 3;
-  const pairs = pendingMessages.slice(0, maxPairs);
-
-  for (const pair of pairs) {
-    try {
-      const result = await extractor.extract(llm, pair.user, pair.assistant);
-      llmBreaker.recordSuccess();
-      if (result.nodes.length > 0) {
-        extracted++;
-        const now = Date.now();
-
-        // v2.3.1 P0-3 性能优化: 批量 upsert 节点（UNWIND + MERGE）
-        // 旧实现：循环中 N 次 upsertNode，每次 2-3 次 session.run
-        // 新实现：单次 batchUpsertNodes，按 label 分组批量 MERGE
-        const nodeIdMap = new Map<string, string>();
-        const nodesToWrite: any[] = [];
-        for (const enode of result.nodes) {
-          const id = `auto-${now}-${Math.random().toString(36).slice(2, 8)}`;
-          nodeIdMap.set(enode.name, id);
-          nodesToWrite.push({
-            id,
-            type: enode.type,
-            name: enode.name,
-            description: enode.description,
-            content: enode.content,
-            status: "active",
-            communityId: undefined,
-            pagerank: 0,
-            validatedCount: 0,
-            createdAt: now,
-            updatedAt: now,
-            embeddingModel: _cfg?.embedding?.model,
-          });
-        }
-        try {
-          await batchUpsertNodes(driver, nodesToWrite);
-        } catch (e) {
-          // v2.3.2 S2 稳定性修复: 批量失败时回退到逐条 upsert，保证部分成功（防数据丢失）
-          // v2.3.2 S4: 传入 _cfg 以读取 archiveKeepCount 配置
-          if (process.env.GM_DEBUG) logger?.debug?.(`  [graph-memory-pro] batchUpsertNodes failed, fallback to single upsert: ${e}`);
-          await Promise.allSettled(nodesToWrite.map(n => upsertNode(driver, n, _cfg ?? undefined)));
-        }
-
-        // v2.3.1 P0-3: 批量 upsert 边（UNWIND + MERGE，按关系类型分组）
-        const edgesToWrite: any[] = [];
-        for (const eedge of result.edges) {
-          const fromId = nodeIdMap.get(eedge.fromName);
-          const toId = nodeIdMap.get(eedge.toName);
-          if (!fromId || !toId) continue;
-          edgesToWrite.push({
-            id: `edge-${now}-${Math.random().toString(36).slice(2, 8)}`,
-            type: eedge.type,
-            fromId,
-            toId,
-            instruction: eedge.instruction,
-            condition: eedge.condition,
-            weight: 1,
-            createdAt: now,
-            updatedAt: now,
-          });
-        }
-        if (edgesToWrite.length > 0) {
-          try {
-            await batchUpsertEdges(driver, edgesToWrite);
-          } catch (e) {
-            // v2.3.2 S2: 批量边写入失败也回退到逐条 upsertEdge
-            if (process.env.GM_DEBUG) logger?.debug?.(`  [graph-memory-pro] batchUpsertEdges failed, fallback to single upsert: ${e}`);
-            await Promise.allSettled(edgesToWrite.map(e => upsertEdge(driver, e)));
-          }
-        }
-      }
-    } catch (err) {
-      // v2.3.2 阶段三: extract 失败记录到 LLM 熔断器
-      llmBreaker.recordFailure();
-      if (process.env.GM_DEBUG) logger?.debug?.(`  [graph-memory-pro] extract pair failed: ${err}`);
-    }
-  }
-  if (extracted > 0) {
-    logger?.info?.(`[graph-memory-pro] background extractor: ${extracted} turns processed`);
-  }
-}
+// v2.3.4 ARCH-1: extractInBackground 已拆分到 src/services/extract-service.ts
 
 // ─── Plugin Entry ──────────────────────────────────────
 
@@ -551,7 +450,7 @@ export default definePluginEntry({
             }
 
             if (pairs.length === 0) return;
-            await extractInBackground(_extractor, _driver, _llm, logger, pairs);
+            await extractInBackground(_extractor, _driver, _llm, _cfg, logger, pairs);
 
             // 清空队列文件（保留空文件）
             const { writeFile, mkdir } = await import('node:fs/promises');
@@ -688,6 +587,16 @@ export default definePluginEntry({
               _llm = createCompleteFn(newCfg.llm);
             }
             applied.llm = true;
+          } else {
+            // v2.3.4 SDK-1: 即使 llm 配置未变，也检查 runtime LLM 是否首次可用
+            // （初始化时 api.runtime 可能未就绪，reload 时重试探测）
+            if (!_llm || _llm === createCompleteFn(newCfg.llm)) {
+              const runtimeLlm = api.runtime?.llm;
+              if (runtimeLlm && typeof runtimeLlm.complete === "function") {
+                _llm = createRuntimeCompleteFn(runtimeLlm, newCfg.llm, logger);
+                applied.llmRuntimeDetected = true;
+              }
+            }
           }
 
           // diff: embedding 段变化 → 重建 embed
@@ -787,8 +696,13 @@ export default definePluginEntry({
     //
     // 让 memory_search 工具能搜索到 Neo4j 图谱节点，无需另建 gm_search。
     // ─────────────────────────────────────────────────────────────────
+    // v2.3.4 SDK-2: supplement 返回值显式类型标注，避免依赖 SDK 隐式约定
     api.registerMemoryCorpusSupplement({
-      async search(query: string, opts?: { limit?: number }) {
+      async search(query: string, opts?: { limit?: number }): Promise<Array<{
+        id: string;
+        content: string;
+        metadata: Record<string, unknown>;
+      }>> {
         if (!_driver) return [];
         try {
           const limit = Math.min(opts?.limit ?? 5, 20);
@@ -807,7 +721,7 @@ export default definePluginEntry({
           return [];
         }
       },
-      async read(id: string) {
+      async read(id: string): Promise<GmNode | null> {
         if (!_driver) return null;
         try {
           return await findById(_driver, id);

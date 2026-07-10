@@ -1027,3 +1027,54 @@ describe("v2.3.3 CB-2: 熔断器状态变更日志", () => {
     vi.restoreAllMocks();
   });
 });
+
+// ─── v2.3.4: CB-1 熔断器时间窗口 + ARCH-1 拆分验证 ─────────────
+
+describe("v2.3.4 CB-1: 熔断器时间窗口衰减", () => {
+  it("未配置 failureWindowMs 时累计失败不衰减（向后兼容）", async () => {
+    const { CircuitBreaker } = await import("../src/engine/circuit-breaker.ts");
+    const breaker = new CircuitBreaker({ name: "test-no-window", failureThreshold: 5, cooldownMs: 1000 });
+    // failureWindowMs 默认 0 → 不衰减
+    breaker.recordFailure();
+    breaker.recordFailure();
+    breaker.recordFailure();
+    expect(breaker.getStatus().failureCount).toBe(3);
+    // 即使等待也不会衰减
+    await new Promise((r) => setTimeout(r, 50));
+    expect(breaker.allow()).toBe(true); // CLOSED 放行
+    expect(breaker.getStatus().failureCount).toBe(3); // 计数不变
+  });
+
+  it("配置 failureWindowMs 后旧失败在窗口外自动过期", async () => {
+    const { CircuitBreaker } = await import("../src/engine/circuit-breaker.ts");
+    const breaker = new CircuitBreaker({
+      name: "test-window",
+      failureThreshold: 5,
+      cooldownMs: 1000,
+      failureWindowMs: 100, // 100ms 窗口
+    });
+
+    breaker.recordFailure();
+    breaker.recordFailure();
+    expect(breaker.getStatus().failureCount).toBe(2);
+
+    // 等待窗口过期
+    await new Promise((r) => setTimeout(r, 150));
+
+    // allow() 触发清理 → 过期失败被移除
+    expect(breaker.allow()).toBe(true);
+    expect(breaker.getStatus().failureCount).toBe(0);
+  });
+});
+
+describe("v2.3.4 ARCH-1: extract-service 拆分验证", () => {
+  it("extractInBackground 从 services/extract-service.ts 导出", async () => {
+    const mod = await import("../src/services/extract-service.ts");
+    expect(typeof mod.extractInBackground).toBe("function");
+  });
+
+  it("空输入时快速返回（无 driver/llm）", async () => {
+    const { extractInBackground } = await import("../src/services/extract-service.ts");
+    await expect(extractInBackground(null, null, null, null, console, [])).resolves.toBeUndefined();
+  });
+});
