@@ -79,8 +79,8 @@ graph-memory-pro 是**记忆底层引擎**，只做"图内"操作：
 **P2-1：结构化日志** — 统一 `createLogger(namespace)` 接口，分级 debug/info/warn/error，环境变量 `GM_LOG_LEVEL` 过滤、`GM_LOG_JSON=true` 输出 JSON 行（便于 Loki/ELK 采集），`setTraceId` 跨模块关联请求链路，`setExternalLogger` 注入 OpenClaw SDK logger。已迁移 maintenance + recall + judge 共 44 处 console 调用。
 
 ### 测试覆盖
-- 15 个测试文件，370 个用例（Neo4j mock 基础设施，CI 友好）
-- 覆盖全部 5 批次核心功能 + v2.2.1 新增（Tier 2/3 裁判 / 增量维护 / 结构化日志 / PPR closed session 容错 / 主会话本地模型优先策略）：指标计算 / AutoTuner / 关联矩阵 / 裁判闭环 / 维护阶段 / 软替换 / 缓存 / 社区 / 类型配置 / HTTP API 路由 / LLM-Embedding 引擎 / 三元组抽取 / 增量维护 / 结构化日志 / PageRank 容错 / runtime LLM provider 探测
+- 17 个测试文件，425 个用例（Neo4j mock 基础设施，CI 友好）
+- 覆盖全部 5 批次核心功能 + v2.3.2 新增（稳定性修复 S1–S6 / 性能优化 P2-1~P2-4 / 可观测韧性 P3-1~P3-3）：指标计算 / AutoTuner / 关联矩阵 / 裁判闭环 / 维护阶段 / 软替换 / 缓存 / 社区 / 类型配置 / HTTP API 路由 / LLM-Embedding 引擎 / 三元组抽取 / 增量维护 / 结构化日志 / PageRank 容错 / runtime LLM provider 探测 / 并发稳定性 / embed LRU 缓存 / LLM 信号量 / GDS 自动失效 / 连接池监控 / 配置热更新
 
 ## 版本
 
@@ -240,6 +240,7 @@ const { result } = await res.json();
 | GET | `/api/metrics` | Prometheus 指标导出（v2.2.0） |
 | GET | `/api/auto-tuner/state` | AutoTuner 调优状态（v2.2.0） |
 | GET | `/api/association-matrix/state` | 关联矩阵 M 状态（v2.2.0） |
+| POST | `/api/reload` | 配置热更新（diff-based 部分重建 driver/llm/embed）（v2.3.2） |
 
 ### Prometheus 指标
 
@@ -257,7 +258,7 @@ graph_memory_cache_hit_rate{plugin="graph-memory-pro",version="2.2.1"} 0.123
 graph_memory_association_matrix_updates_applied{plugin="graph-memory-pro",version="2.2.1"} 42
 ```
 
-覆盖指标：`graph_memory_up` / `nodes_total` / `edges_total` / `feedback_total` / `cache_size` / `cache_hit_rate` / `judge_cold_start` / `association_matrix_t` / `association_matrix_updates_applied` / `association_matrix_updates_rejected`。
+覆盖指标：`graph_memory_up` / `nodes_total` / `edges_total` / `feedback_total` / `cache_size` / `cache_hit_rate` / `judge_cold_start` / `association_matrix_t` / `association_matrix_updates_applied` / `association_matrix_updates_rejected` / `neo4j_pool_active_sessions` / `neo4j_pool_total_sessions` / `neo4j_pool_max_size` / `neo4j_pool_driver_active` / `circuit_breaker_state` / `circuit_breaker_failures_total`（v2.3.2 新增连接池 + 熔断器指标）。
 
 ## 知识图谱结构
 
@@ -378,7 +379,8 @@ src/
 │   ├── runner.ts         # S-10 评测运行器
 │   └── cli.ts            # S-10 Benchmark CLI 入口（v2.2.0）
 ├── routes/
-│   └── crud.ts           # HTTP 路由（含 /api/metrics, /api/auto-tuner/state, /api/maintain/* 等）
+│   ├── crud.ts           # HTTP 路由（含 /api/metrics, /api/auto-tuner/state, /api/maintain/* 等）
+│   └── reload.ts         # 配置热更新纯函数（diffConfigSegments/checkReloadAuth/normalizeReloadConfig）（v2.3.2）
 ├── mcp/
 │   └── server.ts         # MCP Server（Streamable HTTP，13 个 tools）
 ├── store/
@@ -411,6 +413,8 @@ test/
 ├── types-config.test.ts
 ├── crud-routes.test.ts          # HTTP API 路由测试（v2.2.0）
 ├── engine-llm-embed.test.ts     # LLM/Embedding 引擎测试（v2.2.0）
+├── recall-perf.test.ts           # 召回性能测试（v2.3.1 新增）
+├── concurrency-stability.test.ts # 并发稳定性 + P2/P3 补充测试（v2.3.2 新增）
 └── extract.test.ts              # 三元组抽取测试（v2.2.0）
 ```
 

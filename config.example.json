@@ -7,19 +7,22 @@
     "password": "your-password"
   },
   "llm": {
-    "$comment": "OpenAI-compatible API。使用 Ollama 时设 baseURL 为 http://localhost:11434/v1（必须含 /v1），apiKey 留空；使用 OpenAI 时设 baseURL 为 https://api.openai.com/v1。注：当插件运行在 OpenClaw 容器内且 api.runtime.llm 可用时，会先探测主会话 provider：本地模型（ollama/lmstudio 等）优先用主会话；云端模型才回退到此处的 llm 配置",
+    "$comment": "OpenAI-compatible API。使用 Ollama 时设 baseURL 为 http://localhost:11434/v1（必须含 /v1），apiKey 留空；使用 OpenAI 时设 baseURL 为 https://api.openai.com/v1。注：当插件运行在 OpenClaw 容器内且 api.runtime.llm 可用时，会先探测主会话 provider：本地模型（ollama/lmstudio 等）优先用主会话；云端模型才回退到此处的 llm 配置。maxConcurrency 限制并发请求数（Ollama 默认 1 防级联超时，云端可调高）",
     "apiKey": "sk-xxx",
     "baseURL": "https://api.openai.com/v1",
     "model": "gpt-4o-mini",
-    "keepAlive": "5m"
+    "keepAlive": "5m",
+    "maxConcurrency": 1
   },
   "embedding": {
-    "$comment": "Ollama 原生 /api/embed。baseURL 不含 /v1（embed.ts 会自动剥离 /v1）。模型须是 embedding 模型（如 nomic-embed-text），不能用 LLM 模型（如 qwen3.5:9b）",
+    "$comment": "Ollama 原生 /api/embed。baseURL 不含 /v1（embed.ts 会自动剥离 /v1）。模型须是 embedding 模型（如 nomic-embed-text），不能用 LLM 模型（如 qwen3.5:9b）。cacheSize/cacheTtlMs 控制 LRU 缓存（默认 256 条 / 10min，设为 0 禁用）",
     "apiKey": "",
     "baseURL": "http://localhost:11434",
     "model": "nomic-embed-text",
     "dimensions": 768,
-    "keepAlive": "5m"
+    "keepAlive": "5m",
+    "cacheSize": 256,
+    "cacheTtlMs": 600000
   },
   "recallMaxNodes": 6,
   "recallMaxDepth": 2,

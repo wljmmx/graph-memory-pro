@@ -33,6 +33,22 @@
 > - **P1-3**：ROADMAP 验收 checklist 勾选已落地项
 > - **新增能力**：主会话本地模型优先策略（`createRuntimeCompleteFn`，provider 探测 + 缓存，+22 测试）
 > - 单元测试 340 → 367 用例（+27），tsc 0 错误，全部向后兼容
+>
+> **v2.3.0 工程化与用户体验增强**（eslint / 维度校验 / gm_doctor / 预设配置 / 文档）：
+> - eslint 阻塞 CI（0 errors），Embedding 维度校验，gm_doctor 自检工具，3 档预设配置
+> - QUICKSTART.md 快速入门，LLM token 用量监控（`recordUsage`）
+> - 单元测试 367 → 370 用例（+3），tsc 0 错误，全部向后兼容
+>
+> **v2.3.1 召回与写入性能优化**（11 项，两轮）：
+> - 第一轮：vectorSearchWithScore 并行 / 社区查询合并 / QueryCache 扫描限制 / graphWalk LIMIT / FTS‖vec 并行
+> - 第二轮：P0-1 type 探测去重 / P0-2 recall 入口预热投影 / P0-3 extractInBackground 批量化 / P0-4 upsertNode 三步合并 / P1-1 searchNodes 4 索引并行 / P1-2 PPR seed 查找并行
+> - 单元测试 382 → 392 用例（+12 召回性能测试），tsc 0 错误，全部向后兼容
+>
+> **v2.3.2 稳定性修复 + 性能优化 + 可观测韧性**（三阶段 13 项）：
+> - **阶段一 稳定性修复 S1–S6**：GDS 投影互斥锁 / 批量写入失败回退 / timer 重入保护 / archiveKeepCount 配置化 / vectorSearchWithScore 容错 / 重试 jitter + 4xx 不重试
+> - **阶段二 性能优化 P2-1~P2-4**：embed LRU 缓存 / LLM 信号量并发控制 / GDS 自动失效（边数 hash + invalidateProjectionCache）/ 向量索引合并（gm_node_embedding）
+> - **阶段三 可观测与韧性 P3-1~P3-3**：连接池监控（getPoolMetrics + Prometheus 指标）/ 降级熔断器（CircuitBreaker 三态）/ 配置热更新（/api/reload diff-based 部分重建）
+> - 单元测试 401 → 425 用例（+24 并发稳定性 + P2/P3 补充测试），tsc 0 错误，lint 0 errors，全部向后兼容
 
 ---
 

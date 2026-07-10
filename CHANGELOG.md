@@ -22,7 +22,13 @@ v2.3.2 聚焦**稳定性修复**。在 v2.3.1 性能优化（并行化/批量化
 ### Added — 测试
 
 - **S6 embed 4xx 不重试测试**：2 用例（400 不重试直接抛出 / 429 仍重试 3 次）
-- **并发稳定性测试**：新增 [test/concurrency-stability.test.ts](test/concurrency-stability.test.ts) 覆盖投影预热互斥（S1）/ archiveKeepCount 配置化（S4）/ vectorSearchWithScore 部分索引容错（S5）。S2 批量回退、S3 timer 重入为 index.ts 私有闭包内简单 try/catch + flag 模式，由代码审查覆盖。
+- **并发稳定性测试**：新增 [test/concurrency-stability.test.ts](test/concurrency-stability.test.ts) 覆盖投影预热互斥（S1）/ archiveKeepCount 配置化（S4）/ vectorSearchWithScore 部分索引容错（S5）/ 熔断器三态转换（P3-2）。S2 批量回退、S3 timer 重入为 index.ts 私有闭包内简单 try/catch + flag 模式，由代码审查覆盖。
+- **P2-1 embed LRU 缓存测试**：4 用例（缓存命中不重复 fetch / TTL 过期重新请求 / 容量淘汰最旧条目 / cacheSize=0 禁用缓存）
+- **P2-2 LLM 并发控制测试**：3 用例（maxConcurrency=1 串行执行 / maxConcurrency=2 并行执行 / 请求失败时信号量释放）
+- **P2-3 GDS 自动失效测试**：2 用例（invalidateProjectionCache 后投影重建 / 边数变化触发 hash 变化重建）
+- **P3-1 连接池监控测试**：3 用例（getPoolMetrics 返回结构 / Session 计数增减 / 多并发 session 计数）
+- **P3-3 配置热更新测试**：12 用例（diffConfigSegments 段变化检测 6 用例 / checkReloadAuth 鉴权 4 用例 / normalizeReloadConfig 默认值填充 2 用例），覆盖 [src/routes/reload.ts](src/routes/reload.ts) 提取的纯函数
+- 总测试数 401 → **425**（17 文件）
 
 ### Performance — 阶段二性能优化（P2-1 ~ P2-4）
 
@@ -35,7 +41,7 @@ v2.3.2 聚焦**稳定性修复**。在 v2.3.1 性能优化（并行化/批量化
 
 - **P3-1 连接池监控**：[src/store/db.ts](src/store/db.ts) `getSession` 包装 close 做应用层 Session 计数，新增 `getPoolMetrics()` 返回活跃会话数/总创建数/driver 内部活跃连接数（反射读取，防御性）。[/api/health](src/routes/crud.ts) 追加 `connectionPool` 字段，[/api/metrics](src/routes/crud.ts) 新增 4 个 Prometheus 指标（`graph_memory_neo4j_pool_active_sessions` 等）。
 - **P3-2 降级熔断器**：新增 [src/engine/circuit-breaker.ts](src/engine/circuit-breaker.ts) 经典三态熔断器（CLOSED→OPEN→HALF_OPEN）。[src/recaller/recall.ts](src/recaller/recall.ts) embed 路径接入熔断器，OPEN 时跳过 ~9s 重试直接降级 FTS。[index.ts](index.ts) extractInBackground 接入 LLM 熔断器，OPEN 时跳过整个 tick。[/api/health](src/routes/crud.ts) 追加 `circuitBreakers` 状态，[/api/metrics](src/routes/crud.ts) 新增 `graph_memory_circuit_breaker_state` / `_failures_total` 指标。
-- **P3-3 配置热更新**：新增 [/api/reload](index.ts) POST 端点，从 SDK 重新读取配置后 diff-based 部分重建：neo4j 段变化重建 driver + ensureSchema，llm 段变化重建 CompleteFn，embedding 段变化重建 EmbedFn，其余配置 `Object.assign` 原地合并让 Recaller/JudgeManager 持引用自动生效。reload 后自动重置所有熔断器。支持 authToken 鉴权（与 mcp.authToken 共用）。
+- **P3-3 配置热更新**：新增 [/api/reload](index.ts) POST 端点，从 SDK 重新读取配置后 diff-based 部分重建：neo4j 段变化重建 driver + ensureSchema，llm 段变化重建 CompleteFn，embedding 段变化重建 EmbedFn，其余配置 `Object.assign` 原地合并让 Recaller/JudgeManager 持引用自动生效。reload 后自动重置所有熔断器。支持 authToken 鉴权（与 mcp.authToken 共用）。配置 diff / 鉴权 / 默认值填充逻辑提取为 [src/routes/reload.ts](src/routes/reload.ts) 纯函数，便于单元测试。
 
 ### Configuration Migration — 配置迁移（v2.3.1 → v2.3.2）
 

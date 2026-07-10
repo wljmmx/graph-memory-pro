@@ -636,13 +636,12 @@ export default definePluginEntry({
         try {
           if (!_cfg) return { status: 503, body: { error: "plugin not initialized" } };
 
+          const { checkReloadAuth, normalizeReloadConfig, diffConfigSegments } = await import("./src/routes/reload.ts");
+
           // 鉴权：若配置了 authToken，请求需携带匹配的 token
-          const authToken = _cfg?.mcp?.authToken;
-          if (authToken) {
-            const provided = req?.body?.authToken ?? req?.headers?.["x-auth-token"];
-            if (provided !== authToken) {
-              return { status: 401, body: { error: "unauthorized" } };
-            }
+          const authResult = checkReloadAuth(_cfg, req?.body?.authToken ?? req?.headers?.["x-auth-token"]);
+          if (!authResult.ok) {
+            return { status: authResult.status!, body: { error: authResult.error } };
           }
 
           // 从 SDK 重新获取配置
@@ -650,22 +649,15 @@ export default definePluginEntry({
           if (!newCfgRaw?.neo4j?.uri) {
             return { status: 400, body: { error: "new config missing neo4j.uri" } };
           }
-          const newCfg = {
-            ...newCfgRaw,
-            compactTurnCount: newCfgRaw.compactTurnCount ?? 6,
-            recallMaxNodes: newCfgRaw.recallMaxNodes ?? 6,
-            recallMaxDepth: newCfgRaw.recallMaxDepth ?? 2,
-            freshTailCount: newCfgRaw.freshTailCount ?? 10,
-            dedupThreshold: newCfgRaw.dedupThreshold ?? 0.90,
-            pagerankDamping: newCfgRaw.pagerankDamping ?? 0.85,
-            pagerankIterations: newCfgRaw.pagerankIterations ?? 20,
-          } as GmConfig;
+          const newCfg = normalizeReloadConfig(newCfgRaw);
 
           const applied: Record<string, boolean> = {};
 
+          // diff: 检测各配置段是否变化（diff-based 部分重建）
+          const diff = diffConfigSegments(_cfg, newCfg);
+
           // diff: neo4j 段变化 → 重建 driver
-          const neo4jChanged = JSON.stringify(newCfg.neo4j) !== JSON.stringify(_cfg.neo4j);
-          if (neo4jChanged) {
+          if (diff.neo4j) {
             const driver = await getOrCreateDriver(newCfg, logger);
             if (driver) {
               _driver = driver;
@@ -678,8 +670,7 @@ export default definePluginEntry({
           }
 
           // diff: llm 段变化 → 重建 LLM
-          const llmChanged = JSON.stringify(newCfg.llm) !== JSON.stringify(_cfg.llm);
-          if (llmChanged) {
+          if (diff.llm) {
             const runtimeLlm = api.runtime?.llm;
             if (runtimeLlm && typeof runtimeLlm.complete === "function") {
               _llm = createRuntimeCompleteFn(runtimeLlm, newCfg.llm, logger);
@@ -690,16 +681,13 @@ export default definePluginEntry({
           }
 
           // diff: embedding 段变化 → 重建 embed
-          const embedChanged = JSON.stringify(newCfg.embedding) !== JSON.stringify(_cfg.embedding);
-          if (embedChanged) {
+          if (diff.embedding) {
             _embed = newCfg.embedding ? createEmbedFn(newCfg.embedding) : null;
             applied.embedding = true;
           }
 
           // diff: background 间隔变化 → 重建 timer
-          const bgChanged =
-            (newCfg.background?.extractorIntervalMs ?? 60_000) !== (_cfg.background?.extractorIntervalMs ?? 60_000) ||
-            (newCfg.background?.maintenanceIntervalMs ?? 6 * 3600_000) !== (_cfg.background?.maintenanceIntervalMs ?? 6 * 3600_000);
+          const bgChanged = diff.background;
 
           // 原地合并配置（Recaller/JudgeManager 持引用，自动生效）
           Object.assign(_cfg, newCfg);
@@ -708,7 +696,7 @@ export default definePluginEntry({
           // 更新 Recaller 的 embed/judge 注入
           if (_recaller) {
             if (_embed) _recaller.setEmbedFn(_embed);
-            if (llmChanged && _cfg.judge?.enabled !== false) {
+            if (diff.llm && _cfg.judge?.enabled !== false) {
               const { JudgeManager } = await import("./src/recaller/judge.ts");
               const jm = new JudgeManager(_cfg.judge, _llm ?? undefined);
               _recaller.setJudgeManager(jm);

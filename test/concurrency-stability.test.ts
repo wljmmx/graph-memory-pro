@@ -6,16 +6,31 @@
  *   - S4: upsertNode archiveKeepCount 从 cfg 读取（参数化 $keepCount）
  *   - S5: vectorSearchWithScore 容忍部分索引失败（Promise.allSettled）
  *
+ * 阶段二性能优化补充测试：
+ *   - P2-1: embed LRU 缓存（命中/过期/容量淘汰/禁用）
+ *   - P2-2: LLM 并发控制（信号量限流/排队/maxConcurrency）
+ *   - P2-3: GDS 自动失效（invalidateProjectionCache/边数 hash）
+ *
+ * 阶段三可观测与韧性补充测试：
+ *   - P3-1: 连接池监控（getPoolMetrics/Session 计数）
+ *   - P3-3: 配置热更新（diffConfigSegments/checkReloadAuth/normalizeReloadConfig）
+ *
  * S2（extractInBackground 批量回退）与 S3（timer 重入保护）位于 index.ts 私有闭包内，
  * 属于简单 try/catch + flag 模式，由代码审查覆盖，不在此单测范围。
  *
  * 被测模块：
- *   - /workspace/src/graph/pagerank.ts (S1)
+ *   - /workspace/src/graph/pagerank.ts (S1, P2-3)
  *   - /workspace/src/store/nodes.ts (S4, S5)
+ *   - /workspace/src/engine/embed.ts (P2-1)
+ *   - /workspace/src/engine/llm.ts (P2-2)
+ *   - /workspace/src/store/db.ts (P3-1)
+ *   - /workspace/src/routes/reload.ts (P3-3)
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { upsertNode, vectorSearchWithScore } from "../src/store/nodes.ts";
+import { createEmbedFn } from "../src/engine/embed.ts";
+import { createCompleteFn } from "../src/engine/llm.ts";
 import type { GmConfig } from "../src/types.ts";
 
 // ─── S1: preheatProjection 并发互斥 ──────────────────────────────
@@ -426,5 +441,491 @@ describe("v2.3.2 阶段三 P3-2: CircuitBreaker 熔断器", () => {
     breaker.reset();
     expect(breaker.getState()).toBe("closed");
     expect(breaker.allow()).toBe(true);
+  });
+});
+
+// ─── P2-1: embed LRU 缓存 ──────────────────────────────────────
+
+describe("v2.3.2 阶段二 P2-1: embed LRU 缓存", () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.spyOn(globalThis, "fetch");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  function mockEmbedResponse(vec: number[]): Response {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ embeddings: [vec] }),
+      text: async () => JSON.stringify({ embeddings: [vec] }),
+    } as unknown as Response;
+  }
+
+  it("缓存命中：相同 text 第二次不调用 fetch", async () => {
+    fetchSpy.mockResolvedValue(mockEmbedResponse([0.1, 0.2, 0.3]));
+    const embed = createEmbedFn({ baseURL: "http://localhost:11434", model: "test-p21-hit" });
+
+    await embed("hello");
+    await embed("hello");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("TTL 过期后缓存失效，重新调用 fetch", async () => {
+    vi.useFakeTimers();
+    fetchSpy.mockResolvedValue(mockEmbedResponse([0.1]));
+    const embed = createEmbedFn({
+      baseURL: "http://localhost:11434",
+      model: "test-p21-ttl",
+      cacheTtlMs: 1000,
+    });
+
+    await embed("key1");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    // 未过期 → 命中缓存
+    await embed("key1");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    // 过期 → 重新请求
+    vi.advanceTimersByTime(1500);
+    await embed("key1");
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("容量淘汰：超出 cacheSize 时淘汰最旧条目", async () => {
+    fetchSpy.mockImplementation(async (_url: any, init: any) => {
+      const body = JSON.parse(init.body);
+      const text = body.input[0] as string;
+      return mockEmbedResponse([text.length]);
+    });
+    const embed = createEmbedFn({
+      baseURL: "http://localhost:11434",
+      model: "test-p21-evict",
+      cacheSize: 2,
+      cacheTtlMs: 60_000,
+    });
+
+    await embed("a"); // cache: [a]
+    await embed("b"); // cache: [a, b]
+    await embed("c"); // cache: [b, c], a 被淘汰
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+
+    // "a" 已被淘汰 → 需重新 fetch（插入 a 时淘汰 b → cache: [c, a]）
+    await embed("a");
+    expect(fetchSpy).toHaveBeenCalledTimes(4);
+
+    // "c" 仍在缓存中（最近使用）→ 命中缓存
+    await embed("c");
+    expect(fetchSpy).toHaveBeenCalledTimes(4);
+  });
+
+  it("cacheSize=0 禁用缓存，每次都调用 fetch", async () => {
+    fetchSpy.mockResolvedValue(mockEmbedResponse([0.1]));
+    const embed = createEmbedFn({
+      baseURL: "http://localhost:11434",
+      model: "test-p21-disabled",
+      cacheSize: 0,
+    });
+
+    await embed("hello");
+    await embed("hello");
+    await embed("hello");
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  });
+});
+
+// ─── P2-2: LLM 并发控制（信号量） ───────────────────────────────
+
+describe("v2.3.2 阶段二 P2-2: LLM 并发控制（信号量）", () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.spyOn(globalThis, "fetch");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function mockResponse(content: string): Response {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content } }] }),
+      text: async () => content,
+    } as unknown as Response;
+  }
+
+  it("maxConcurrency=1：并发请求串行执行（第二个 fetch 在第一个完成后才开始）", async () => {
+    const callOrder: string[] = [];
+    let resolveFirst!: () => void;
+    const firstBlocked = new Promise<void>((r) => { resolveFirst = r; });
+
+    fetchSpy.mockImplementation(async (_url: any, init: any) => {
+      const body = JSON.parse(init.body);
+      const text = body.messages[1].content as string;
+      callOrder.push(`start:${text}`);
+      if (text === "first") await firstBlocked;
+      callOrder.push(`end:${text}`);
+      return mockResponse("ok");
+    });
+
+    const complete = createCompleteFn({
+      baseURL: "https://p22-serial.test/v1",
+      model: "m1",
+      maxConcurrency: 1,
+    });
+
+    const p1 = complete("sys", "first");
+    // 让第一个请求先获取信号量并进入 fetch
+    await new Promise((r) => setTimeout(r, 10));
+    const p2 = complete("sys", "second");
+
+    // 第二个请求被信号量阻塞（fetch 尚未调用）
+    expect(callOrder).toEqual(["start:first"]);
+
+    resolveFirst();
+    await p1;
+    await p2;
+
+    // 两个请求串行完成
+    expect(callOrder).toEqual(["start:first", "end:first", "start:second", "end:second"]);
+  });
+
+  it("maxConcurrency=2：并发请求可同时执行", async () => {
+    const callOrder: string[] = [];
+    let resolveAll!: () => void;
+    const block = new Promise<void>((r) => { resolveAll = r; });
+
+    fetchSpy.mockImplementation(async (_url: any, init: any) => {
+      const body = JSON.parse(init.body);
+      const text = body.messages[1].content as string;
+      callOrder.push(`start:${text}`);
+      await block;
+      callOrder.push(`end:${text}`);
+      return mockResponse("ok");
+    });
+
+    const complete = createCompleteFn({
+      baseURL: "https://p22-parallel.test/v1",
+      model: "m2",
+      maxConcurrency: 2,
+    });
+
+    const p1 = complete("sys", "a");
+    const p2 = complete("sys", "b");
+    // 让两个请求都进入 fetch
+    await new Promise((r) => setTimeout(r, 10));
+
+    // 两个 fetch 同时启动
+    expect(callOrder).toContain("start:a");
+    expect(callOrder).toContain("start:b");
+
+    resolveAll();
+    await Promise.all([p1, p2]);
+  });
+
+  it("信号量在请求失败时也释放（不阻塞后续请求）", async () => {
+    let callCount = 0;
+    fetchSpy.mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        return { ok: false, status: 400, json: async () => ({}), text: async () => "bad request" } as unknown as Response;
+      }
+      return mockResponse("ok");
+    });
+
+    const complete = createCompleteFn({
+      baseURL: "https://p22-error.test/v1",
+      model: "m3",
+      maxConcurrency: 1,
+    });
+
+    // 第一个请求失败（400 → 不重试 → 立即抛错，信号量释放）
+    await expect(complete("sys", "fail")).rejects.toThrow();
+
+    // 第二个请求能正常执行（信号量已释放）
+    const result = await complete("sys", "ok");
+    expect(result).toBe("ok");
+  });
+});
+
+// ─── P2-3: GDS 自动失效 ─────────────────────────────────────────
+
+describe("v2.3.2 阶段二 P2-3: GDS 自动失效", () => {
+  it("invalidateProjectionCache 后再次调用触发投影重建", async () => {
+    vi.resetModules();
+    const { preheatProjection, invalidateProjectionCache } = await import("../src/graph/pagerank.ts");
+
+    let dropCalls = 0;
+    let projectCalls = 0;
+
+    const session = {
+      async run(query: string, _params: Record<string, any> = {}) {
+        if (query.includes("RETURN DISTINCT type(r)")) {
+          return { records: [{ get: (k: string) => (k === "t" ? "MENTIONS" : null) }] };
+        }
+        if (query.includes("count(r) AS cnt")) {
+          return { records: [{ get: () => 5 }] };
+        }
+        if (query.includes("gds.graph.exists")) {
+          return { records: [{ get: () => false }] };
+        }
+        if (query.includes("gds.graph.drop")) { dropCalls++; return { records: [] }; }
+        if (query.includes("gds.graph.project")) { projectCalls++; return { records: [] }; }
+        return { records: [] };
+      },
+      async close() {},
+    };
+    const driver = { session: () => session, async close() {} } as any;
+
+    // 第一次：冷缓存 → drop + project
+    await preheatProjection(driver);
+    expect(dropCalls).toBe(1);
+    expect(projectCalls).toBe(1);
+
+    // 失效缓存
+    invalidateProjectionCache();
+
+    // 第二次：缓存已失效 → 再次 drop + project
+    await preheatProjection(driver);
+    expect(dropCalls).toBe(2);
+    expect(projectCalls).toBe(2);
+  });
+
+  it("边数变化触发 hash 变化 → 投影重建", async () => {
+    vi.resetModules();
+    const { preheatProjection } = await import("../src/graph/pagerank.ts");
+
+    let dropCalls = 0;
+    let projectCalls = 0;
+    let edgeCount = 5;
+
+    const session = {
+      async run(query: string, _params: Record<string, any> = {}) {
+        if (query.includes("RETURN DISTINCT type(r)")) {
+          return { records: [{ get: (k: string) => (k === "t" ? "MENTIONS" : null) }] };
+        }
+        if (query.includes("count(r) AS cnt")) {
+          return { records: [{ get: () => edgeCount }] };
+        }
+        if (query.includes("gds.graph.exists")) {
+          // 缓存命中检查：hash 匹配时 exists=true → 不重建
+          return { records: [{ get: () => true }] };
+        }
+        if (query.includes("gds.graph.drop")) { dropCalls++; return { records: [] }; }
+        if (query.includes("gds.graph.project")) { projectCalls++; return { records: [] }; }
+        return { records: [] };
+      },
+      async close() {},
+    };
+    const driver = { session: () => session, async close() {} } as any;
+
+    // 第一次：edgeCount=5 → 冷缓存 → drop + project
+    await preheatProjection(driver);
+    expect(dropCalls).toBe(1);
+    expect(projectCalls).toBe(1);
+
+    // 第二次：edgeCount 不变 → hash 匹配 → exists=true → 缓存命中（不重建）
+    await preheatProjection(driver);
+    expect(dropCalls).toBe(1);
+    expect(projectCalls).toBe(1);
+
+    // 边数变化 → hash 变化 → 跳过 fast path → 重建
+    edgeCount = 6;
+    await preheatProjection(driver);
+    expect(dropCalls).toBe(2);
+    expect(projectCalls).toBe(2);
+  });
+});
+
+// ─── P3-1: 连接池监控 ──────────────────────────────────────────
+
+describe("v2.3.2 阶段三 P3-1: 连接池监控", () => {
+  it("getPoolMetrics 返回正确结构", async () => {
+    vi.resetModules();
+    const { getPoolMetrics } = await import("../src/store/db.ts");
+    const metrics = getPoolMetrics();
+    expect(metrics).toHaveProperty("appActiveSessions");
+    expect(metrics).toHaveProperty("appTotalSessionsCreated");
+    expect(metrics).toHaveProperty("maxPoolSize");
+    expect(metrics).toHaveProperty("driverActiveConnections");
+    expect(typeof metrics.appActiveSessions).toBe("number");
+    expect(typeof metrics.appTotalSessionsCreated).toBe("number");
+    expect(metrics.maxPoolSize).toBe(50);
+    // driver 未初始化 → null
+    expect(metrics.driverActiveConnections).toBeNull();
+  });
+
+  it("getSession 递增计数，close 递减 active", async () => {
+    vi.resetModules();
+    const { getSession, getPoolMetrics } = await import("../src/store/db.ts");
+
+    const driver = {
+      session: () => ({ close: async () => {} }),
+      async close() {},
+    } as any;
+
+    // 初始状态
+    expect(getPoolMetrics().appActiveSessions).toBe(0);
+
+    // 获取 session → active +1, total +1
+    const s1 = getSession(driver);
+    let m = getPoolMetrics();
+    expect(m.appActiveSessions).toBe(1);
+    expect(m.appTotalSessionsCreated).toBe(1);
+
+    // 关闭 session → active -1, total 不变
+    await s1.close();
+    m = getPoolMetrics();
+    expect(m.appActiveSessions).toBe(0);
+    expect(m.appTotalSessionsCreated).toBe(1);
+  });
+
+  it("多个并发 session 计数正确", async () => {
+    vi.resetModules();
+    const { getSession, getPoolMetrics } = await import("../src/store/db.ts");
+
+    const driver = {
+      // 每次返回新 session 对象（避免 close 包装链问题）
+      session: () => ({ close: async () => {} }),
+      async close() {},
+    } as any;
+
+    const s1 = getSession(driver);
+    const s2 = getSession(driver);
+    const s3 = getSession(driver);
+
+    let m = getPoolMetrics();
+    expect(m.appActiveSessions).toBe(3);
+    expect(m.appTotalSessionsCreated).toBe(3);
+
+    await s2.close();
+    m = getPoolMetrics();
+    expect(m.appActiveSessions).toBe(2);
+    expect(m.appTotalSessionsCreated).toBe(3);
+  });
+});
+
+// ─── P3-3: 配置热更新（reload 纯函数） ──────────────────────────
+
+describe("v2.3.2 阶段三 P3-3: 配置热更新（reload 纯函数）", () => {
+  const baseCfg = {
+    neo4j: { uri: "bolt://localhost:7687", user: "neo4j", password: "pass" },
+    llm: { model: "gpt-4o", apiKey: "sk-1" },
+    embedding: { model: "text-embed", baseURL: "http://localhost:11434" },
+    background: { extractorIntervalMs: 60_000, maintenanceIntervalMs: 6 * 3600_000 },
+  } as any;
+
+  describe("diffConfigSegments", () => {
+    it("完全相同的配置 → 全部 false", async () => {
+      const { diffConfigSegments } = await import("../src/routes/reload.ts");
+      const diff = diffConfigSegments(baseCfg, baseCfg);
+      expect(diff.neo4j).toBe(false);
+      expect(diff.llm).toBe(false);
+      expect(diff.embedding).toBe(false);
+      expect(diff.background).toBe(false);
+    });
+
+    it("neo4j.uri 变化 → neo4j=true", async () => {
+      const { diffConfigSegments } = await import("../src/routes/reload.ts");
+      const newCfg = { ...baseCfg, neo4j: { ...baseCfg.neo4j, uri: "bolt://newhost:7687" } };
+      const diff = diffConfigSegments(baseCfg, newCfg);
+      expect(diff.neo4j).toBe(true);
+      expect(diff.llm).toBe(false);
+    });
+
+    it("llm.model 变化 → llm=true", async () => {
+      const { diffConfigSegments } = await import("../src/routes/reload.ts");
+      const newCfg = { ...baseCfg, llm: { ...baseCfg.llm, model: "gpt-5" } };
+      const diff = diffConfigSegments(baseCfg, newCfg);
+      expect(diff.llm).toBe(true);
+      expect(diff.neo4j).toBe(false);
+    });
+
+    it("embedding.model 变化 → embedding=true", async () => {
+      const { diffConfigSegments } = await import("../src/routes/reload.ts");
+      const newCfg = { ...baseCfg, embedding: { ...baseCfg.embedding, model: "new-embed" } };
+      const diff = diffConfigSegments(baseCfg, newCfg);
+      expect(diff.embedding).toBe(true);
+    });
+
+    it("background.extractorIntervalMs 变化 → background=true", async () => {
+      const { diffConfigSegments } = await import("../src/routes/reload.ts");
+      const newCfg = { ...baseCfg, background: { ...baseCfg.background, extractorIntervalMs: 120_000 } };
+      const diff = diffConfigSegments(baseCfg, newCfg);
+      expect(diff.background).toBe(true);
+    });
+
+    it("background 从 undefined → 有值 → background=true", async () => {
+      const { diffConfigSegments } = await import("../src/routes/reload.ts");
+      const oldCfg = { ...baseCfg, background: undefined };
+      const newCfg = { ...baseCfg, background: { extractorIntervalMs: 30_000 } };
+      const diff = diffConfigSegments(oldCfg as any, newCfg);
+      expect(diff.background).toBe(true);
+    });
+  });
+
+  describe("checkReloadAuth", () => {
+    it("未配置 authToken → 允许访问", async () => {
+      const { checkReloadAuth } = await import("../src/routes/reload.ts");
+      const result = checkReloadAuth(baseCfg, undefined);
+      expect(result.ok).toBe(true);
+    });
+
+    it("authToken 匹配 → 允许访问", async () => {
+      const { checkReloadAuth } = await import("../src/routes/reload.ts");
+      const cfg = { ...baseCfg, mcp: { authToken: "secret-token" } } as any;
+      const result = checkReloadAuth(cfg, "secret-token");
+      expect(result.ok).toBe(true);
+    });
+
+    it("authToken 不匹配 → 401", async () => {
+      const { checkReloadAuth } = await import("../src/routes/reload.ts");
+      const cfg = { ...baseCfg, mcp: { authToken: "secret-token" } } as any;
+      const result = checkReloadAuth(cfg, "wrong-token");
+      expect(result.ok).toBe(false);
+      expect(result.status).toBe(401);
+      expect(result.error).toBe("unauthorized");
+    });
+
+    it("cfg 为 null → 允许访问（未初始化时由上层 503 兜底）", async () => {
+      const { checkReloadAuth } = await import("../src/routes/reload.ts");
+      const result = checkReloadAuth(null, undefined);
+      expect(result.ok).toBe(true);
+    });
+  });
+
+  describe("normalizeReloadConfig", () => {
+    it("填充默认值", async () => {
+      const { normalizeReloadConfig } = await import("../src/routes/reload.ts");
+      const cfg = normalizeReloadConfig({ neo4j: { uri: "bolt://x", user: "u", password: "p" } });
+      expect(cfg.compactTurnCount).toBe(6);
+      expect(cfg.recallMaxNodes).toBe(6);
+      expect(cfg.recallMaxDepth).toBe(2);
+      expect(cfg.freshTailCount).toBe(10);
+      expect(cfg.dedupThreshold).toBe(0.90);
+      expect(cfg.pagerankDamping).toBe(0.85);
+      expect(cfg.pagerankIterations).toBe(20);
+    });
+
+    it("保留用户提供的值", async () => {
+      const { normalizeReloadConfig } = await import("../src/routes/reload.ts");
+      const cfg = normalizeReloadConfig({
+        neo4j: { uri: "bolt://x", user: "u", password: "p" },
+        recallMaxNodes: 20,
+        pagerankIterations: 50,
+      });
+      expect(cfg.recallMaxNodes).toBe(20);
+      expect(cfg.pagerankIterations).toBe(50);
+      // 未提供的仍填充默认
+      expect(cfg.compactTurnCount).toBe(6);
+    });
   });
 });
