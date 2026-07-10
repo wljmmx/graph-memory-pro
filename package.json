@@ -18,6 +18,7 @@
     "build": "tsup",
     "dev": "tsup index.ts --format esm --watch",
     "test": "vitest run",
+    "test:smoke": "vitest run --config vitest.smoke.config.ts",
     "lint": "eslint src/ index.ts",
     "typecheck": "tsc --noEmit",
     "benchmark": "tsx src/benchmark/cli.ts"

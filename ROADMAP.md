@@ -49,6 +49,18 @@
 > - **阶段二 性能优化 P2-1~P2-4**：embed LRU 缓存 / LLM 信号量并发控制 / GDS 自动失效（边数 hash + invalidateProjectionCache）/ 向量索引合并（gm_node_embedding）
 > - **阶段三 可观测与韧性 P3-1~P3-3**：连接池监控（getPoolMetrics + Prometheus 指标）/ 降级熔断器（CircuitBreaker 三态）/ 配置热更新（/api/reload diff-based 部分重建）
 > - 单元测试 401 → 425 用例（+24 并发稳定性 + P2/P3 补充测试），tsc 0 错误，lint 0 errors，全部向后兼容
+>
+> **v2.3.3 可靠性与安全加固**（7 项评审修复）：
+> - ERR-1 runtimeComplete 超时 / SEC-1 路由统一鉴权 / MCP-1 健康探测 / MCP-2 tool 超时包装 / DOCKER-1 npm ci 修复 / CB-2 熔断器日志 / SEC-2 apiKey 注释
+> - 单元测试 425 → 431 用例（+6），tsc 0 错误，lint 0 errors，全部向后兼容
+>
+> **v2.3.4 架构优化**（4 项评审修复）：
+> - ARCH-1 拆分 index.ts → extract-service.ts / CB-1 熔断器时间窗口衰减 / SDK-1 runtime LLM 重探测 / SDK-2 supplement 类型标注
+> - 单元测试 431 → 435 用例（+4），tsc 0 错误，lint 0 errors，全部向后兼容
+>
+> **v2.3.5 集成测试骨架**：
+> - TEST-1 smoke test：docker-compose.smoke.yml + test/smoke.test.ts + vitest.smoke.config.ts，连接真实 Neo4j 验证 schema/写入/向量索引/连接池
+> - 主测试套件不受影响（435 用例），smoke test 通过 `npm run test:smoke` 独立运行
 
 ---
 

@@ -1,0 +1,34 @@
+# graph-memory-pro v2.3.5 集成测试编排
+#
+# 用途：启动 Neo4j + 插件镜像，运行 smoke test 验证真实环境连通性。
+#
+# 启动：
+#   docker compose -f docker-compose.smoke.yml up -d neo4j
+#   sleep 15  # 等待 Neo4j 就绪
+#   npm run test:smoke
+#
+# 清理：
+#   docker compose -f docker-compose.smoke.yml down -v
+
+services:
+  neo4j:
+    image: neo4j:5.20-community
+    ports:
+      - "7687:7687"  # Bolt
+      - "7474:7474"  # HTTP browser
+    environment:
+      NEO4J_AUTH: neo4j/smoke-test-pass
+      NEO4J_PLUGINS: '["graph-data-science"]'  # GDS 插件（PageRank/community detection 必需）
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1G
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:7474 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    volumes:
+      - neo4j-data:/data
+
+volumes:
+  neo4j-data:

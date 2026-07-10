@@ -4,6 +4,43 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.3.5] — 2026-07-10
+
+### Added — 集成测试
+
+- **TEST-1 smoke test 骨架**：新增 [test/smoke.test.ts](test/smoke.test.ts) + [docker-compose.smoke.yml](docker-compose.smoke.yml) + [vitest.smoke.config.ts](vitest.smoke.config.ts)，连接真实 Neo4j 验证 schema/写入/读取/向量索引/连接池计数。Neo4j 不可用时自动 skip，不影响主测试套件。通过 `npm run test:smoke` 运行。
+
+## [2.3.4] — 2026-07-10
+
+### Changed — 架构优化
+
+- **ARCH-1 拆分 index.ts**：extractInBackground 提取到 [src/services/extract-service.ts](src/services/extract-service.ts)，index.ts 从 1248→~1160 行
+- **CB-1 熔断器时间窗口衰减**：新增 `failureWindowMs` 可选配置，窗口外旧失败自动过期（默认 0 不衰减，向后兼容）
+- **SDK-1 runtime LLM 重探测**：/api/reload 在 llm 配置未变时也检查 runtime LLM 是否首次可用
+- **SDK-2 supplement 类型标注**：search/read 方法添加显式返回类型，不再依赖 SDK 隐式约定
+
+### Added — 测试
+
+- CB-1 时间窗口衰减测试（2 用例）+ ARCH-1 拆分验证测试（2 用例）
+- 总测试数 431 → **435**
+
+## [2.3.3] — 2026-07-10
+
+### Fixed — 可靠性与安全加固
+
+- **ERR-1 runtimeComplete 超时**：runtime LLM complete 添加 `AbortSignal.timeout(30_000)`，probe 添加 10s 超时
+- **SEC-1 HTTP 路由统一鉴权**：写操作 + 敏感读操作（/api/health/metrics/usage/doctor）在配置 `mcp.authToken` 时需要鉴权
+- **MCP-1 MCP server 健康探测**：startMcpServer 成功后 GET /health 确认 server 真正就绪
+- **MCP-2 tool execute 超时包装**：新增 withTimeout，5 个长操作 tool 添加超时（maintain/reembed 120s / feedback 60s / benchmark 300s / tune 120s）
+- **DOCKER-1 npm ci 回退修复**：移除 `|| npm install` 回退，避免版本漂移
+- **CB-2 熔断器状态变更日志**：transition() 时记录 info 级别日志
+- **SEC-2 apiKey 环境变量注释**：config.example.json 新增 $comment_apiKey
+
+### Added — 测试
+
+- SEC-1 鉴权逻辑（3）+ MCP-2 withTimeout（2）+ CB-2 日志（1）
+- 总测试数 425 → **431**
+
 ## [2.3.2] — 2026-07-10
 
 ### 总结

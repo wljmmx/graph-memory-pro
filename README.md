@@ -79,12 +79,13 @@ graph-memory-pro 是**记忆底层引擎**，只做"图内"操作：
 **P2-1：结构化日志** — 统一 `createLogger(namespace)` 接口，分级 debug/info/warn/error，环境变量 `GM_LOG_LEVEL` 过滤、`GM_LOG_JSON=true` 输出 JSON 行（便于 Loki/ELK 采集），`setTraceId` 跨模块关联请求链路，`setExternalLogger` 注入 OpenClaw SDK logger。已迁移 maintenance + recall + judge 共 44 处 console 调用。
 
 ### 测试覆盖
-- 17 个测试文件，425 个用例（Neo4j mock 基础设施，CI 友好）
-- 覆盖全部 5 批次核心功能 + v2.3.2 新增（稳定性修复 S1–S6 / 性能优化 P2-1~P2-4 / 可观测韧性 P3-1~P3-3）：指标计算 / AutoTuner / 关联矩阵 / 裁判闭环 / 维护阶段 / 软替换 / 缓存 / 社区 / 类型配置 / HTTP API 路由 / LLM-Embedding 引擎 / 三元组抽取 / 增量维护 / 结构化日志 / PageRank 容错 / runtime LLM provider 探测 / 并发稳定性 / embed LRU 缓存 / LLM 信号量 / GDS 自动失效 / 连接池监控 / 配置热更新
+- 17 个单元测试文件，435 个用例（Neo4j mock 基础设施，CI 友好）+ 1 个 smoke test 文件（真实 Neo4j 集成）
+- 覆盖全部 5 批次核心功能 + v2.3.2~v2.3.5 全部新增：稳定性修复 S1–S6 / 性能优化 P2-1~P2-4 / 可观测韧性 P3-1~P3-3 / 安全加固 ERR-1/SEC-1/MCP-1/MCP-2 / 架构优化 ARCH-1/CB-1/SDK-1/SDK-2 / 集成测试 TEST-1
+- 运行方式：`npm test`（单元测试 435）/ `npm run test:smoke`（集成测试，需 Neo4j）
 
 ## 版本
 
-**当前版本：2.3.2**
+**当前版本：2.3.5**
 
 ## 安装
 
