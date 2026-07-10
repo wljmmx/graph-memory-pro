@@ -12,6 +12,8 @@ export type CompleteFn = (system: string, user: string) => Promise<string>;
 
 /** 重试延迟 */
 const RETRY_DELAYS = [2000, 5000, 10_000];
+// v2.3.2 S6: 重试 jitter 上限 — 防止并发失败时重试波峰对齐加剧下游过载
+const RETRY_JITTER_MAX_MS = 500;
 
 /**
  * 内置 LLM 补全引擎
@@ -149,7 +151,9 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
         }
 
         if (attempt < delays.length) {
-          await new Promise((r) => setTimeout(r, delays[attempt]));
+          // v2.3.2 S6: 加 jitter 防并发重试波峰对齐
+          const jitter = Math.random() * RETRY_JITTER_MAX_MS;
+          await new Promise((r) => setTimeout(r, delays[attempt] + jitter));
         }
       }
     }

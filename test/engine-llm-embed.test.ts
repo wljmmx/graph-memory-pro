@@ -256,7 +256,8 @@ describe("createCompleteFn", () => {
       baseURL: "https://api.openai.com/v1",
     });
     const promise = complete("s", "u");
-    await vi.advanceTimersByTimeAsync(2000);
+    // v2.3.2 S6: 首次重试延迟 = 2000 + jitter(≤500)，快进覆盖
+    await vi.advanceTimersByTimeAsync(3000);
     const result = await promise;
     expect(result).toBe("ok");
     expect(fetchSpy).toHaveBeenCalledTimes(2);
@@ -678,7 +679,8 @@ describe("createEmbedFn", () => {
     // 先附加 rejection 断言，避免快进定时器期间产生 unhandled rejection
     const assertion = expect(promise).rejects.toThrow(/no embedding data/);
     // 重试延迟 1000 + 3000 + 5000 = 9000ms
-    await vi.advanceTimersByTimeAsync(10_000);
+    // v2.3.2 S6: 重试加 jitter（≤500ms/次），3 次重试总延迟最大 10500ms，快进覆盖
+    await vi.advanceTimersByTimeAsync(12_000);
     await assertion;
     expect(fetchSpy).toHaveBeenCalledTimes(4);
   });
@@ -691,7 +693,8 @@ describe("createEmbedFn", () => {
     const promise = embed("text");
     // 错误消息应同时包含模型名 + 响应预览
     const assertion = expect(promise).rejects.toThrow(/model=qwen3\.5:9b.*does not support embed/);
-    await vi.advanceTimersByTimeAsync(10_000);
+    // v2.3.2 S6: 重试加 jitter（≤500ms/次），3 次重试总延迟最大 10500ms，快进覆盖
+    await vi.advanceTimersByTimeAsync(12_000);
     await assertion;
   });
 
@@ -702,7 +705,8 @@ describe("createEmbedFn", () => {
       .mockResolvedValueOnce(mockResponse({ embeddings: [[0.5, 0.6]] }));
     const embed = createEmbedFn({ baseURL: "http://localhost:11434" });
     const promise = embed("text");
-    await vi.advanceTimersByTimeAsync(1000);
+    // v2.3.2 S6: 首次重试延迟 = 1000 + jitter(≤500)，快进覆盖
+    await vi.advanceTimersByTimeAsync(2000);
     const result = await promise;
     expect(result).toEqual([0.5, 0.6]);
     expect(fetchSpy).toHaveBeenCalledTimes(2);
@@ -719,6 +723,25 @@ describe("createEmbedFn", () => {
     expect((init.headers as Record<string, string>).Authorization).toBe(
       "Bearer sk-embed",
     );
+  });
+
+  it("v2.3.2 S6: 4xx 非 429 错误不重试，直接抛出", async () => {
+    fetchSpy.mockResolvedValue(mockResponse("invalid model", { status: 400 }));
+    const embed = createEmbedFn({ baseURL: "http://localhost:11434" });
+    await expect(embed("text")).rejects.toThrow(/Embedding API 400/);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("v2.3.2 S6: 429 限流错误仍重试", async () => {
+    vi.useFakeTimers();
+    fetchSpy.mockResolvedValue(mockResponse("rate limited", { status: 429 }));
+    const embed = createEmbedFn({ baseURL: "http://localhost:11434" });
+    const promise = embed("text");
+    const assertion = expect(promise).rejects.toThrow(/Embedding API 429/);
+    await vi.advanceTimersByTimeAsync(12_000);
+    await assertion;
+    // 429 应重试：1 次初始 + 3 次重试 = 4 次
+    expect(fetchSpy).toHaveBeenCalledTimes(4);
   });
 
   it("未提供 apiKey 时不附加 Authorization 头", async () => {
@@ -776,7 +799,8 @@ describe("createEmbedFn", () => {
     });
     const promise = embed("text");
     const assertion = expect(promise).rejects.toThrow(/Embedding dimension mismatch.*expected 768.*got 3.*nomic-embed-text/);
-    await vi.advanceTimersByTimeAsync(10_000);
+    // v2.3.2 S6: 重试加 jitter（≤500ms/次），3 次重试总延迟最大 10500ms，快进覆盖
+    await vi.advanceTimersByTimeAsync(12_000);
     await assertion;
   });
 

@@ -1,7 +1,7 @@
 /**
  * graph-memory-pro — Neo4j Knowledge Graph Memory Plugin
  *
- * Version: 2.3.0
+ * Version: 2.3.2
  *
  * 架构定位（A 方案）:
  *   - 不占用 slots（memory/contextEngine）
@@ -27,7 +27,7 @@ import type { EmbedFn } from "./src/engine/embed.ts";
 import { createCompleteFn, createRuntimeCompleteFn } from "./src/engine/llm.ts";
 import { createEmbedFn } from "./src/engine/embed.ts";
 import { initDriver, closeDriver, verifyWithRetry } from "./src/store/db.ts";
-import { ensureSchema, getNodeCount, getEdgeCount, searchNodes, upsertNode, batchUpsertNodes, batchUpsertEdges, findById } from "./src/store/store.ts";
+import { ensureSchema, getNodeCount, getEdgeCount, searchNodes, upsertNode, upsertEdge, batchUpsertNodes, batchUpsertEdges, findById } from "./src/store/store.ts";
 import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
 import { runMaintenance } from "./src/graph/maintenance.ts";
@@ -45,6 +45,9 @@ let _extractor: Extractor | null = null;
 let _recaller: Recaller | null = null;
 let _extractorTimer: ReturnType<typeof setInterval> | null = null;
 let _maintenanceTimer: ReturnType<typeof setInterval> | null = null;
+// v2.3.2 S3: 后台 timer 重入保护 — 防止单次执行超过 interval 时下一次 tick 重叠执行
+let _extractorRunning = false;
+let _maintenanceRunning = false;
 let _mcpServerHandle: { close(): Promise<void> } | null = null;
 
 // ─── 辅助函数 ──────────────────────────────────────────
@@ -133,7 +136,10 @@ async function extractInBackground(
         try {
           await batchUpsertNodes(driver, nodesToWrite);
         } catch (e) {
-          if (process.env.GM_DEBUG) logger?.debug?.(`  [graph-memory-pro] batchUpsertNodes failed: ${e}`);
+          // v2.3.2 S2 稳定性修复: 批量失败时回退到逐条 upsert，保证部分成功（防数据丢失）
+          // v2.3.2 S4: 传入 _cfg 以读取 archiveKeepCount 配置
+          if (process.env.GM_DEBUG) logger?.debug?.(`  [graph-memory-pro] batchUpsertNodes failed, fallback to single upsert: ${e}`);
+          await Promise.allSettled(nodesToWrite.map(n => upsertNode(driver, n, _cfg ?? undefined)));
         }
 
         // v2.3.1 P0-3: 批量 upsert 边（UNWIND + MERGE，按关系类型分组）
@@ -158,7 +164,9 @@ async function extractInBackground(
           try {
             await batchUpsertEdges(driver, edgesToWrite);
           } catch (e) {
-            if (process.env.GM_DEBUG) logger?.debug?.(`  [graph-memory-pro] batchUpsertEdges failed: ${e}`);
+            // v2.3.2 S2: 批量边写入失败也回退到逐条 upsertEdge
+            if (process.env.GM_DEBUG) logger?.debug?.(`  [graph-memory-pro] batchUpsertEdges failed, fallback to single upsert: ${e}`);
+            await Promise.allSettled(edgesToWrite.map(e => upsertEdge(driver, e)));
           }
         }
       }
@@ -502,6 +510,9 @@ export default definePluginEntry({
         const interval = _cfg?.background?.extractorIntervalMs ?? 60_000;
         _extractorTimer = setInterval(async () => {
           if (!_driver || !_extractor || !_llm) return;
+          // v2.3.2 S3: 重入保护 — 上一次 tick 仍在执行时跳过本次
+          if (_extractorRunning) return;
+          _extractorRunning = true;
           try {
             // 从队列文件读取待提取消息对（由 lcm-graph-extra 写入）
             const { readFile } = await import('node:fs/promises');
@@ -538,6 +549,8 @@ export default definePluginEntry({
             await writeFile(queuePath, '').catch(() => {});
           } catch (err) {
             logger?.warn?.(`[graph-memory-pro] extractor tick failed: ${err}`);
+          } finally {
+            _extractorRunning = false;
           }
         }, interval);
       },
@@ -560,12 +573,17 @@ export default definePluginEntry({
         const initialDelay = 5 * 60_000;
         const runOnce = async () => {
           if (!_driver || !_cfg) return;
+          // v2.3.2 S3: 重入保护 — 上一次 tick 仍在执行时跳过本次
+          if (_maintenanceRunning) return;
+          _maintenanceRunning = true;
           try {
             logger?.info?.("[graph-memory-pro] background maintenance start");
             const result = await runMaintenance(_driver, _cfg, _llm ?? undefined, _embed ?? undefined);
             logger?.info?.(`[graph-memory-pro] maintenance done: ${result.dedup.merged} merged, ${result.community.count} communities`);
           } catch (err) {
             logger?.warn?.(`[graph-memory-pro] maintenance error: ${err}`);
+          } finally {
+            _maintenanceRunning = false;
           }
         };
         setTimeout(runOnce, initialDelay);

@@ -6,7 +6,7 @@
 
 import type { Driver } from "neo4j-driver";
 import neo4j from "neo4j-driver";
-import type { GmNode, GmEdge } from "../types.ts";
+import type { GmNode, GmEdge, GmConfig } from "../types.ts";
 import { getSession } from "./db.ts";
 import {
   typeToLabel,
@@ -20,6 +20,7 @@ import {
 export async function upsertNode(
   driver: Driver,
   node: GmNode,
+  cfg?: GmConfig,
 ): Promise<void> {
   const session = getSession(driver);
   try {
@@ -36,8 +37,13 @@ export async function upsertNode(
     // R-4 可进化嵌入逻辑保留：
     //   - content 变化（hash 不同）且旧 embedding 存在 → 归档到 embeddingHistory，清空 embedding
     //   - content 未变化或新节点 → 正常写入 hash
+    //
+    // v2.3.2 S4 稳定性修复: archiveKeepCount 从 cfg 读取（修复硬编码 [..3]）
+    //   旧实现硬编码 [..3]，忽略 cfg.evolvableEmbedding.archiveKeepCount 配置
+    //   新实现用参数 $keepCount，默认 3，可由 cfg 覆盖
     const newContentHash = computeEmbeddingHash(node.name, node.description, node.content);
     const archivedAt = Date.now();
+    const keepCount = cfg?.evolvableEmbedding?.archiveKeepCount ?? 3;
 
     await session.run(
       `OPTIONAL MATCH (old:${label} {id: $id})
@@ -55,7 +61,7 @@ export async function upsertNode(
                   embeddingHash: old.embeddingHash,
                   archivedAt: $archivedAt
                 }
-              ] + COALESCE(old.embeddingHistory, []))[..3]
+              ] + COALESCE(old.embeddingHistory, []))[..$keepCount]
               ELSE COALESCE(old.embeddingHistory, [])
             END AS newHistory,
             CASE
@@ -120,6 +126,7 @@ export async function upsertNode(
         embeddingModel: node.embeddingModel ?? null,
         newContentHash,
         archivedAt,
+        keepCount,
       },
     );
   } finally {
@@ -301,13 +308,19 @@ export async function vectorSearchWithScore(
   // v2.3.1 性能优化: 3 个向量索引并行查询（旧实现 UNION ALL 顺序执行，耗时 ≈ 3T）。
   // 并行后耗时 ≈ max(T)，预期 vec_search 阶段省 ~66% 时间。
   // 每个 session 独立（Neo4j session 非线程安全），结果合并后去重 + 重排。
+  //
+  // v2.3.2 S5 稳定性修复: Promise.all → Promise.allSettled
+  //   旧实现：单个向量索引失败（如索引损坏/重建中）导致整个 vec_search reject，
+  //          上层 recall 因无 fallback 直接降级为纯 FTS 召回，召回质量下降。
+  //   新实现：allSettled 容忍部分索引失败，合并成功索引的结果。
+  //          全部失败时返回空数组（上层仍可走 FTS 兜底）。
   const indexNames = [
     "gm_node_embedding_task",
     "gm_node_embedding_skill",
     "gm_node_embedding_event",
   ] as const;
 
-  const perIndexResults = await Promise.all(
+  const settled = await Promise.allSettled(
     indexNames.map(async (indexName) => {
       const session = getSession(driver);
       try {
@@ -329,7 +342,12 @@ export async function vectorSearchWithScore(
     }),
   );
 
-  // 合并 3 个索引结果，按 nodeId 去重（保留最高 score），再按 score 降序
+  // 仅合并 fulfilled 的结果，rejected 的索引被跳过
+  const perIndexResults = settled
+    .filter((r): r is PromiseFulfilledResult<{ node: GmNode; score: number }[]> => r.status === "fulfilled")
+    .map((r) => r.value);
+
+  // 合并可用索引结果，按 nodeId 去重（保留最高 score），再按 score 降序
   const merged = new Map<string, { node: GmNode; score: number }>();
   for (const batch of perIndexResults) {
     for (const item of batch) {

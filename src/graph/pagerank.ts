@@ -21,6 +21,10 @@ let _cachedRelTypeHash: string | null = null;
 let _cachedTimestamp = 0;
 const PROJECTION_TTL_MS = 15 * 60 * 1000; // 15 min TTL
 
+// v2.3.2 S1: 投影预热互斥锁 — 防止并发 recall 触发重复 drop/recreate
+// 当 preheatProjection 正在执行时，后续调用复用同一 Promise，避免竞态
+let _projectionInFlight: Promise<boolean> | null = null;
+
 async function getExistingRelTypes(session: Session): Promise<string[]> {
   const result = await session.run(`
     MATCH (:Task|Skill|Event)-[r]->(:Task|Skill|Event)
@@ -111,20 +115,32 @@ export interface PPRResult {
  * 调用后全局 _cachedRelTypeHash + _cachedTimestamp 被设置，
  * 后续 personalizedPageRank 内部的 ensureSharedProjection 直接命中 fast path。
  *
+ * v2.3.2 S1 稳定性修复: 加互斥锁 — 并发 recall 时复用同一 in-flight Promise，
+ * 防止两条路径同时触发 drop/recreate 导致 gds.pageRank.stream 执行期间图被删除。
+ *
  * @returns true 表示投影就绪可用
  */
 export async function preheatProjection(driver: Driver): Promise<boolean> {
-  const session = getSession(driver);
-  try {
-    const existingTypes = await getExistingRelTypes(session);
-    if (existingTypes.length === 0) return false;
-    return await ensureSharedProjection(session, existingTypes);
-  } catch {
-    // 预热失败不影响主流程，personalizedPageRank 内部会重试
-    return false;
-  } finally {
-    try { await session.close(); } catch {}
-  }
+  // v2.3.2 S1: 如果已有预热线程在执行，复用它（防并发 drop/recreate 竞态）
+  if (_projectionInFlight) return _projectionInFlight;
+
+  _projectionInFlight = (async () => {
+    const session = getSession(driver);
+    try {
+      const existingTypes = await getExistingRelTypes(session);
+      if (existingTypes.length === 0) return false;
+      return await ensureSharedProjection(session, existingTypes);
+    } catch {
+      // 预热失败不影响主流程，personalizedPageRank 内部会重试
+      return false;
+    } finally {
+      try { await session.close(); } catch {}
+    }
+  })().finally(() => {
+    _projectionInFlight = null;
+  });
+
+  return _projectionInFlight;
 }
 
 export async function personalizedPageRank(

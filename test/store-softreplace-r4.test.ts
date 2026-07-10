@@ -157,9 +157,10 @@ describe("upsertNode R-4 可进化嵌入", () => {
     const calls = driver.getAllRunCalls();
     // 单条 Cypher，归档在服务端 CASE WHEN 中完成
     expect(calls).toHaveLength(1);
-    // 服务端 trim 到 3 条：Cypher 含 [..3] 切片
+    // v2.3.2 S4: 服务端 trim 到 archiveKeepCount 条（参数化 $keepCount，默认 3）
     expect(calls[0].query).toContain("newHistory");
-    expect(calls[0].query).toContain("[..3]");
+    expect(calls[0].query).toContain("[..$keepCount]");
+    expect(calls[0].params.keepCount).toBe(3);
     // archivedAt 参数存在
     expect(calls[0].params.archivedAt).toBeGreaterThan(0);
   });

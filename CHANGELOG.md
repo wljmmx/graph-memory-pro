@@ -4,6 +4,62 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.3.2] — 2026-07-10
+
+### 总结
+
+v2.3.2 聚焦**稳定性修复**。在 v2.3.1 性能优化（并行化/批量化）基础上，针对并发竞态、批量失败、timer 重入、配置硬编码、部分索引失败、重试雪崩 6 类稳定性风险完成 S1–S6 修复。全部向后兼容，无破坏性变更。
+
+### Fixed — 稳定性修复（S1–S6）
+
+- **S1 GDS 投影互斥锁**：[src/graph/pagerank.ts](src/graph/pagerank.ts) `preheatProjection` 新增 in-flight Promise 复用。并发 recall 同时触发 `preheatProjection` 时，复用同一执行而非各自触发 `gds.graph.drop` + `gds.graph.project`，消除 `gds.pageRank.stream` 执行期间图被删除的竞态。
+- **S2 批量写入失败回退**：[index.ts](index.ts) `extractInBackground` 中 `batchUpsertNodes` / `batchUpsertEdges` 失败时回退到 `Promise.allSettled(nodes.map(upsertNode))`，保证批量失败时仍部分成功，防数据丢失。
+- **S3 后台 timer 重入保护**：[index.ts](index.ts) extractor / maintenance 两个 `setInterval` 回调新增 `_extractorRunning` / `_maintenanceRunning` flag。单次执行超过 interval 时，下一次 tick 跳过执行，防重叠执行导致资源竞争与重复写入。
+- **S4 archiveKeepCount 配置化**：[src/store/nodes.ts](src/store/nodes.ts) `upsertNode` 新增可选 `cfg` 参数，归档切片从硬编码 `[..3]` 改为参数化 `[..$keepCount]`，读取 `cfg.evolvableEmbedding.archiveKeepCount`（默认 3）。修复 v2.3.1 P0-4 合并 Cypher 时遗留的硬编码。
+- **S5 vectorSearchWithScore 容错**：[src/store/nodes.ts](src/store/nodes.ts) 向量索引并行查询从 `Promise.all` 改为 `Promise.allSettled`。单个向量索引失败（损坏/重建中）不再导致整个 vec_search reject，合并成功索引结果；全部失败时返回空数组由上层 FTS 兜底。
+- **S6 重试 jitter + 4xx 不重试**：[src/engine/embed.ts](src/engine/embed.ts) 与 [src/engine/llm.ts](src/engine/llm.ts) 重试延迟加 `Math.random() * 500ms` jitter，防并发失败时重试波峰对齐加剧下游过载；embed 引擎新增 4xx（非 429）不重试（与 llm 引擎已有逻辑对齐）。
+
+### Added — 测试
+
+- **S6 embed 4xx 不重试测试**：2 用例（400 不重试直接抛出 / 429 仍重试 3 次）
+- **并发稳定性测试**：新增 [test/concurrency-stability.test.ts](test/concurrency-stability.test.ts) 覆盖投影预热互斥（S1）/ archiveKeepCount 配置化（S4）/ vectorSearchWithScore 部分索引容错（S5）。S2 批量回退、S3 timer 重入为 index.ts 私有闭包内简单 try/catch + flag 模式，由代码审查覆盖。
+
+### Configuration Migration — 配置迁移（v2.3.1 → v2.3.2）
+
+无破坏性变更，现有 v2.3.1 配置无需任何改动。`upsertNode` 新增第 3 个可选参数 `cfg`，未传入时行为与 v2.3.1 完全一致（archiveKeepCount 默认 3）。
+
+---
+
+## [2.3.1] — 2026-07-09
+
+### 总结
+
+v2.3.1 聚焦**召回与写入性能优化**。分两轮落地 11 项优化：第一轮 5 项（vectorSearchWithScore 并行 / 社区查询合并 / QueryCache 扫描限制 / graphWalk LIMIT / FTS‖vec 并行），第二轮 6 项（P0-1 ~ P1-2）。召回延迟显著下降，写入吞吐提升。
+
+### Performance — 性能优化（第一轮）
+
+- **vectorSearchWithScore 并行**：3 个向量索引从 UNION ALL 串行改为 `Promise.all` 并行，耗时 ≈ 3T → max(T)。
+- **社区查询合并**：`communityVectorSearchWithReps` 合并向量搜索 + 代表节点查询为单条 Cypher。
+- **QueryCache 扫描限制**：`getSimilar` 限制扫描条目数为 `similarityScanLimit`（默认 20），倒序扫描。
+- **graphWalk LIMIT**：加 `[..$maxNodes]` 切片限制返回节点数，防 PPR 排序开销爆炸。
+- **FTS‖vec 并行**：recallPrecise 内全文搜索与向量搜索并行执行。
+
+### Performance — 性能优化（第二轮 P0/P1）
+
+- **P0-1 PPR type 探测去重**：`ensureSharedProjection` 接受预计算 types，消除重复 `getExistingRelTypes` 查询。
+- **P0-2 recall 入口预热投影**：`recall()` 入口 `preheatProjection` 与 embed 并行，避免双路径各自触发 ensureSharedProjection。
+- **P0-3 extractInBackground 批量化**：`batchUpsertNodes` / `batchUpsertEdges` 用 UNWIND + MERGE 批量写入。
+- **P0-4 upsertNode 三步合并**：3 次串行 session.run 合并为单条 OPTIONAL MATCH + CASE WHEN + MERGE Cypher。
+- **P1-1 searchNodes 4 索引并行**：UNION ALL 改为 4 个 fulltext 索引 `Promise.all` 并行。
+- **P1-2 PPR seed 查找并行**：type 探测与 seed 查找 `Promise.all` 并行。
+
+### Added — 测试
+
+- 新增 [test/recall-perf.test.ts](test/recall-perf.test.ts) 12 项性能测试。
+- 适配 R-4 软替换测试 / pagerank closeCalls / crud searchNodes 并行断言。
+
+---
+
 ## [2.3.0] — 2026-07-06
 
 ### 总结

@@ -81,7 +81,7 @@ async function handleStatus(): Promise<{ status: number; body: any }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   try {
     await _driver.verifyConnectivity();
-    return { status: 200, body: { status: "connected", version: "2.3.0" } };
+    return { status: 200, body: { status: "connected", version: "2.3.2" } };
   } catch (err: any) {
     return { status: 503, body: { status: "disconnected", error: err.message } };
   }
@@ -291,7 +291,7 @@ async function handleMetrics(): Promise<{ status: number; body: string }> {
   }
 
   const lines: string[] = [];
-  const labels = `plugin="graph-memory-pro",version="2.3.0"`;
+  const labels = `plugin="graph-memory-pro",version="2.3.2"`;
 
   // 基础计数
   let nodeCount = 0;
@@ -645,7 +645,7 @@ async function handleDoctor(): Promise<{ status: number; body: any }> {
     status: errorCount > 0 ? 503 : 200,
     body: {
       status: overallStatus,
-      version: "2.3.0",
+      version: "2.3.2",
       timestamp: new Date().toISOString(),
       summary: {
         ok: checks.filter(c => c.status === "ok").length,
@@ -669,7 +669,7 @@ async function handleUsage(): Promise<{ status: number; body: any }> {
     return {
       status: 200,
       body: {
-        version: "2.3.0",
+        version: "2.3.2",
         timestamp: new Date().toISOString(),
         ...stats,
       },

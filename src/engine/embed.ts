@@ -18,6 +18,8 @@ export type EmbedFn = (text: string) => Promise<number[]>;
 
 /** 重试延迟 */
 const RETRY_DELAYS = [1000, 3000, 5000];
+// v2.3.2 S6: 重试 jitter 上限 — 防止并发失败时重试波峰对齐加剧下游过载
+const RETRY_JITTER_MAX_MS = 500;
 
 /**
  * 清洗 baseURL：去除反引号、首尾空格、尾部斜杠
@@ -115,8 +117,15 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
         const error = err instanceof Error ? err : new Error(String(err));
         lastErr.push(error);
 
+        // v2.3.2 S6: 4xx 错误（非 429 限流）不重试 — 重试也不会成功（如 400 无效模型/401 鉴权失败）
+        if (error.message.match(/Embedding API 4\d{2}/) && !error.message.includes("429")) {
+          throw error;
+        }
+
         if (attempt < delays.length) {
-          await new Promise((r) => setTimeout(r, delays[attempt]));
+          // v2.3.2 S6: 加 jitter 防并发重试波峰对齐
+          const jitter = Math.random() * RETRY_JITTER_MAX_MS;
+          await new Promise((r) => setTimeout(r, delays[attempt] + jitter));
         }
       }
     }

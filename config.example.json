@@ -1,5 +1,5 @@
 {
-  "$schema": "Graph Memory Pro v2.3.0 配置示例",
+  "$schema": "Graph Memory Pro v2.3.2 配置示例",
   "$comment": "复制为 config.json 后通过 --config 参数传给 npm run benchmark，或填入 openclaw.json plugins.entries.graph-memory-pro.config",
   "neo4j": {
     "uri": "bolt://localhost:7687",

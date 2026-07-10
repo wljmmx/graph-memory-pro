@@ -74,7 +74,7 @@ export async function startMcpServer(
   // ── 创建 MCP server ──────────────────────────────────────────────
   const mcpServer = new McpServer({
     name: "graph-memory-pro",
-    version: "2.3.0",
+    version: "2.3.2",
   });
 
   // ── read-only tools ─────────────────────────────────────────────
@@ -92,8 +92,8 @@ export async function startMcpServer(
         try {
           await driver.verifyConnectivity();
           return {
-            content: [{ type: "text", text: `connected, version=2.3.0` }],
-            structuredContent: asStructured({ status: "connected", version: "2.3.0" }),
+            content: [{ type: "text", text: `connected, version=2.3.2` }],
+            structuredContent: asStructured({ status: "connected", version: "2.3.2" }),
           };
         } catch (err: any) {
           return {
@@ -272,7 +272,7 @@ export async function startMcpServer(
             updatedAt: now,
             embeddingModel: cfg.embedding?.model,
             source: source ?? "experience",
-          });
+          }, cfg);
           return {
             content: [{ type: "text", text: `Recorded: ${id} (source=${source ?? "experience"})` }],
             structuredContent: asStructured({ id, source: source ?? "experience" }),
