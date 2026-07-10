@@ -305,59 +305,77 @@ export async function vectorSearchWithScore(
   vec: number[],
   topK: number,
 ): Promise<Array<{ node: GmNode; score: number }>> {
-  // v2.3.1 性能优化: 3 个向量索引并行查询（旧实现 UNION ALL 顺序执行，耗时 ≈ 3T）。
-  // 并行后耗时 ≈ max(T)，预期 vec_search 阶段省 ~66% 时间。
-  // 每个 session 独立（Neo4j session 非线程安全），结果合并后去重 + 重排。
-  //
-  // v2.3.2 S5 稳定性修复: Promise.all → Promise.allSettled
-  //   旧实现：单个向量索引失败（如索引损坏/重建中）导致整个 vec_search reject，
-  //          上层 recall 因无 fallback 直接降级为纯 FTS 召回，召回质量下降。
-  //   新实现：allSettled 容忍部分索引失败，合并成功索引的结果。
-  //          全部失败时返回空数组（上层仍可走 FTS 兜底）。
-  const indexNames = [
-    "gm_node_embedding_task",
-    "gm_node_embedding_skill",
-    "gm_node_embedding_event",
-  ] as const;
+  // v2.3.2 阶段二: 优先使用合并索引 gm_node_embedding（单索引跨 Task|Skill|Event）
+  // 旧实现：3 个按 label 分离索引并行查询 + 合并去重（3 个 session）。
+  // 新实现：单索引单 session 查询，省 2 个 session + 去重逻辑，连接池压力降 2/3。
+  // 兼容回退：合并索引不存在（旧环境未升级 schema）时，回退到 3 索引并行（v2.3.1 路径）。
+  const MERGED_INDEX = "gm_node_embedding";
+  const FALLBACK_INDEXES = ["gm_node_embedding_task", "gm_node_embedding_skill", "gm_node_embedding_event"];
 
-  const settled = await Promise.allSettled(
-    indexNames.map(async (indexName) => {
-      const session = getSession(driver);
-      try {
-        const result = await session.run(
-          `CALL db.index.vector.queryNodes($indexName, toInteger($topK), $vec)
-           YIELD node, score
-           WITH node, score WHERE node.status = 'active'
-           RETURN node, score
-           ORDER BY score DESC`,
-          { indexName, vec, topK },
-        );
-        return result.records.map((r) => ({
-          node: recordToNode(r.get("node")),
-          score: r.get("score"),
-        })).filter((r): r is { node: GmNode; score: number } => r.node !== null);
-      } finally {
-        await session.close();
-      }
-    }),
-  );
+  // 尝试合并索引
+  const session = getSession(driver);
+  try {
+    try {
+      const result = await session.run(
+        `CALL db.index.vector.queryNodes($indexName, toInteger($topK), $vec)
+         YIELD node, score
+         WITH node, score WHERE node.status = 'active'
+         RETURN node, score
+         ORDER BY score DESC`,
+        { indexName: MERGED_INDEX, vec, topK },
+      );
+      const out = result.records.map((r) => ({
+        node: recordToNode(r.get("node")),
+        score: r.get("score"),
+      })).filter((r): r is { node: GmNode; score: number } => r.node !== null);
+      // 合并索引查询成功 → 直接返回（单索引天然去重，无需合并）
+      return out.sort((a, b) => b.score - a.score);
+    } catch {
+      // 合并索引不存在或查询失败 → 回退到 3 索引并行（旧环境兼容）
+    }
 
-  // 仅合并 fulfilled 的结果，rejected 的索引被跳过
-  const perIndexResults = settled
-    .filter((r): r is PromiseFulfilledResult<{ node: GmNode; score: number }[]> => r.status === "fulfilled")
-    .map((r) => r.value);
+    // v2.3.2 S5: Promise.allSettled 容忍部分索引失败
+    const settled = await Promise.allSettled(
+      FALLBACK_INDEXES.map(async (indexName) => {
+        const s = getSession(driver);
+        try {
+          const result = await s.run(
+            `CALL db.index.vector.queryNodes($indexName, toInteger($topK), $vec)
+             YIELD node, score
+             WITH node, score WHERE node.status = 'active'
+             RETURN node, score
+             ORDER BY score DESC`,
+            { indexName, vec, topK },
+          );
+          return result.records.map((r) => ({
+            node: recordToNode(r.get("node")),
+            score: r.get("score"),
+          })).filter((r): r is { node: GmNode; score: number } => r.node !== null);
+        } finally {
+          await s.close();
+        }
+      }),
+    );
 
-  // 合并可用索引结果，按 nodeId 去重（保留最高 score），再按 score 降序
-  const merged = new Map<string, { node: GmNode; score: number }>();
-  for (const batch of perIndexResults) {
-    for (const item of batch) {
-      const existing = merged.get(item.node.id);
-      if (!existing || item.score > existing.score) {
-        merged.set(item.node.id, item);
+    // 仅合并 fulfilled 的结果，rejected 的索引被跳过
+    const perIndexResults = settled
+      .filter((r): r is PromiseFulfilledResult<{ node: GmNode; score: number }[]> => r.status === "fulfilled")
+      .map((r) => r.value);
+
+    // 合并可用索引结果，按 nodeId 去重（保留最高 score），再按 score 降序
+    const merged = new Map<string, { node: GmNode; score: number }>();
+    for (const batch of perIndexResults) {
+      for (const item of batch) {
+        const existing = merged.get(item.node.id);
+        if (!existing || item.score > existing.score) {
+          merged.set(item.node.id, item);
+        }
       }
     }
+    return Array.from(merged.values()).sort((a, b) => b.score - a.score);
+  } finally {
+    await session.close();
   }
-  return Array.from(merged.values()).sort((a, b) => b.score - a.score);
 }
 
 export async function graphWalk(

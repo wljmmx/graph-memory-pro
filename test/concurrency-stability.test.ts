@@ -189,20 +189,68 @@ describe("v2.3.2 S4: upsertNode archiveKeepCount 从 cfg 读取", () => {
 
 // ─── S5: vectorSearchWithScore 部分索引失败容错 ──────────────────
 
-describe("v2.3.2 S5: vectorSearchWithScore 容忍部分索引失败", () => {
-  it("3 个索引中 1 个 reject 时仍返回其余索引结果", async () => {
-    // 每个 indexName 对应一次 driver.session() 调用 → 返回独立 session
-    const sessions: any[] = [];
+describe("v2.3.2 S5 + 阶段二 P2-4: vectorSearchWithScore 容忍部分索引失败", () => {
+  it("合并索引优先：单索引 gm_node_embedding 成功直接返回", async () => {
+    // v2.3.2 阶段二 P2-4: 优先用合并索引，单 session 单查询即返回
     const driver = {
       session() {
-        const s = {
-          async run(query: string, params: Record<string, any> = {}) {
+        return {
+          async run(_query: string, params: Record<string, any> = {}) {
             const indexName = params.indexName;
+            // 合并索引返回 2 个节点
+            if (indexName === "gm_node_embedding") {
+              return {
+                records: [
+                  {
+                    get: (k: string) => {
+                      if (k === "node") return { properties: { id: "Task-1", name: "t", type: "TASK", status: "active" }, labels: ["Task"] };
+                      if (k === "score") return 0.95;
+                      return null;
+                    },
+                  },
+                  {
+                    get: (k: string) => {
+                      if (k === "node") return { properties: { id: "Event-1", name: "e", type: "EVENT", status: "active" }, labels: ["Event"] };
+                      if (k === "score") return 0.8;
+                      return null;
+                    },
+                  },
+                ],
+              };
+            }
+            return { records: [] };
+          },
+          async close() {},
+        };
+      },
+      async close() {},
+    } as any;
+
+    const result = await vectorSearchWithScore(driver, [0.1, 0.2], 5);
+    // 合并索引成功 → 直接返回，按 score 降序
+    expect(result.length).toBe(2);
+    expect(result[0].node.id).toBe("Task-1");
+    expect(result[0].score).toBe(0.95);
+    expect(result[1].node.id).toBe("Event-1");
+  });
+
+  it("合并索引不存在时回退到 3 索引并行，1 个 reject 仍返回其余结果", async () => {
+    // v2.3.2 阶段二 P2-4: 合并索引查询抛错 → 回退 3 索引并行（兼容旧环境）
+    let callCount = 0;
+    const driver = {
+      session() {
+        return {
+          async run(_query: string, params: Record<string, any> = {}) {
+            const indexName = params.indexName;
+            callCount++;
+            // 第一次：合并索引 → 抛错（模拟不存在）
+            if (indexName === "gm_node_embedding") {
+              throw new Error("index not found");
+            }
+            // 回退 3 索引：skill 索引失败，task/event 各返回 1 个
             if (indexName === "gm_node_embedding_skill") {
-              // 模拟索引失败（如损坏/重建中）
               throw new Error("vector index corrupt");
             }
-            // task / event 索引各返回 1 个节点
             const label = indexName.includes("task") ? "Task" : "Event";
             return {
               records: [{
@@ -218,8 +266,6 @@ describe("v2.3.2 S5: vectorSearchWithScore 容忍部分索引失败", () => {
           },
           async close() {},
         };
-        sessions.push(s);
-        return s;
       },
       async close() {},
     } as any;
@@ -248,25 +294,28 @@ describe("v2.3.2 S5: vectorSearchWithScore 容忍部分索引失败", () => {
     expect(result).toEqual([]);
   });
 
-  it("全部索引成功时合并去重（同 id 保留最高 score）", async () => {
+  it("合并索引天然去重（单索引返回同 id 仅保留一条）", async () => {
+    // v2.3.2 阶段二 P2-4: 合并索引单查询，结果天然不重复
     const driver = {
       session() {
         return {
           async run(_query: string, params: Record<string, any> = {}) {
-            // 3 个索引都返回同一节点 id，但 score 不同
             const indexName = params.indexName;
-            const score = indexName.includes("task") ? 0.95 : (indexName.includes("skill") ? 0.8 : 0.7);
-            return {
-              records: [{
-                get: (k: string) => {
-                  if (k === "node") {
-                    return { properties: { id: "dup-1", name: "dup", type: "TASK", status: "active" }, labels: ["Task"] };
-                  }
-                  if (k === "score") return score;
-                  return null;
-                },
-              }],
-            };
+            if (indexName === "gm_node_embedding") {
+              // 合并索引返回 1 个节点（单索引天然不重复）
+              return {
+                records: [{
+                  get: (k: string) => {
+                    if (k === "node") {
+                      return { properties: { id: "dup-1", name: "dup", type: "TASK", status: "active" }, labels: ["Task"] };
+                    }
+                    if (k === "score") return 0.95;
+                    return null;
+                  },
+                }],
+              };
+            }
+            return { records: [] };
           },
           async close() {},
         };
@@ -275,7 +324,7 @@ describe("v2.3.2 S5: vectorSearchWithScore 容忍部分索引失败", () => {
     } as any;
 
     const result = await vectorSearchWithScore(driver, [0.1, 0.2], 5);
-    // 3 索引返回同 id 节点 → 去重后仅 1 个，保留最高 score 0.95
+    // 合并索引单查询 → 1 个结果
     expect(result.length).toBe(1);
     expect(result[0].node.id).toBe("dup-1");
     expect(result[0].score).toBe(0.95);

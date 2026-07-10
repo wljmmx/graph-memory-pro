@@ -15,6 +15,52 @@ const RETRY_DELAYS = [2000, 5000, 10_000];
 // v2.3.2 S6: 重试 jitter 上限 — 防止并发失败时重试波峰对齐加剧下游过载
 const RETRY_JITTER_MAX_MS = 500;
 
+// v2.3.2 阶段二: 简易信号量（限制 LLM 并发请求数，防 Ollama 单流排队级联超时）
+// 无外部依赖，基于 Promise 队列实现
+const DEFAULT_LLM_MAX_CONCURRENCY = 1;
+
+interface Semaphore {
+  acquire(): Promise<() => void>;
+  activeCount(): number;
+  waitCount(): number;
+}
+
+function createSemaphore(max: number): Semaphore {
+  let active = 0;
+  const waiters: Array<() => void> = [];
+  return {
+    async acquire(): Promise<() => void> {
+      if (active >= max) {
+        await new Promise<void>((resolve) => waiters.push(resolve));
+      }
+      active++;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        active--;
+        const next = waiters.shift();
+        if (next) next();
+      };
+    },
+    activeCount(): number { return active; },
+    waitCount(): number { return waiters.length; },
+  };
+}
+
+// 模块级共享信号量（同配置的 CompleteFn 共享同一限制器）
+// key = `${baseURL}|${model}`，确保不同 LLM 配置互不干扰
+const _semaphores = new Map<string, Semaphore>();
+function getSemaphore(baseURL: string, model: string, maxConcurrency: number): Semaphore {
+  const key = `${baseURL}|${model}`;
+  let sem = _semaphores.get(key);
+  if (!sem) {
+    sem = createSemaphore(maxConcurrency);
+    _semaphores.set(key, sem);
+  }
+  return sem;
+}
+
 /**
  * 内置 LLM 补全引擎
  * 使用 fetch + retry，支持 OpenAI-compatible API
@@ -55,10 +101,19 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
   const isOllamaNative = /127\.0\.0\.1:11434|localhost:11434|0\.0\.0\.0:11434/.test(baseURL)
     && !/\/v1\b/.test(baseURL);
 
+  // v2.3.2 阶段二: 并发控制信号量
+  // Ollama 默认单流处理（OLLAMA_NUM_PARALLEL=1），并发请求排队易级联超时。
+  // 云端 API 可配置 maxConcurrency 提高吞吐。同 baseURL+model 共享同一信号量。
+  const maxConcurrency = config.maxConcurrency ?? DEFAULT_LLM_MAX_CONCURRENCY;
+  const semaphore = getSemaphore(baseURL, model, maxConcurrency);
+
   return async function complete(system: string, user: string): Promise<string> {
     const lastErr: Error[] = [];
     const delays = [...RETRY_DELAYS];
 
+    // v2.3.2 阶段二: acquire 信号量，确保并发不超限（重试在持锁期间复用同一槽位）
+    const release = await semaphore.acquire();
+    try {
     for (let attempt = 0; attempt <= delays.length; attempt++) {
       try {
         let response: Response;
@@ -159,6 +214,10 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
     }
 
     throw lastErr[lastErr.length - 1] || new Error("LLM completion failed");
+    } finally {
+      // v2.3.2 阶段二: 无论成功/失败/重试耗尽，都释放信号量槽位
+      release();
+    }
   };
 }
 
@@ -286,37 +345,51 @@ export function createRuntimeCompleteFn(
     return cachedFallback;
   }
 
+  // v2.3.2 阶段二: runtime LLM 并发控制（与 fallback 路径独立，避免双重限流）
+  // runtime LLM 通常为本地 Ollama，默认 maxConcurrency=1 防级联超时
+  const runtimeSemaphore = getSemaphore(
+    `runtime:${(fallbackConfig?.baseURL ?? "runtime")}`,
+    fallbackConfig?.model ?? "runtime",
+    fallbackConfig?.maxConcurrency ?? DEFAULT_LLM_MAX_CONCURRENCY,
+  );
+
   /**
    * 基于 runtime LLM 的补全调用（含 content 规范化）
    */
   async function runtimeComplete(system: string, user: string): Promise<string> {
-    const result = await runtimeLlm.complete({
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user },
-      ],
-      maxTokens: 1024,
-      temperature: 0.3,
-      purpose: "graph-memory-pro:llm",
-    });
-    const text = normalizeContent(result?.text);
-    if (!text) {
-      throw new Error("runtime LLM returned no content");
-    }
-
-    // v2.3.0: 记录 runtime LLM token 用量（usage 字段来自 OpenClaw runtime）
+    // v2.3.2 阶段二: 信号量限流（runtime LLM 通常本地单流）
+    const release = await runtimeSemaphore.acquire();
     try {
-      const { recordUsage } = await import("../store/usage.ts");
-      const usage = (result as any)?.usage;
-      recordUsage(
-        result?.provider ? `runtime-${result.provider}` : "runtime",
-        "unknown",
-        usage?.promptTokens ?? 0,
-        usage?.completionTokens ?? 0,
-      );
-    } catch { /* usage 记录失败不影响主流程 */ }
+      const result = await runtimeLlm.complete({
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+        maxTokens: 1024,
+        temperature: 0.3,
+        purpose: "graph-memory-pro:llm",
+      });
+      const text = normalizeContent(result?.text);
+      if (!text) {
+        throw new Error("runtime LLM returned no content");
+      }
 
-    return text.trim();
+      // v2.3.0: 记录 runtime LLM token 用量（usage 字段来自 OpenClaw runtime）
+      try {
+        const { recordUsage } = await import("../store/usage.ts");
+        const usage = (result as any)?.usage;
+        recordUsage(
+          result?.provider ? `runtime-${result.provider}` : "runtime",
+          "unknown",
+          usage?.promptTokens ?? 0,
+          usage?.completionTokens ?? 0,
+        );
+      } catch { /* usage 记录失败不影响主流程 */ }
+
+      return text.trim();
+    } finally {
+      release();
+    }
   }
 
   /**

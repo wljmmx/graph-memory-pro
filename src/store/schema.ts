@@ -74,7 +74,19 @@ export async function ensureSchema(driver: Driver, dimension: number = 1024): Pr
       );
     } catch { /* may exist */ }
 
-    // 向量索引 (Neo4j 5.11+): 按标签分离的向量索引，用于语义搜索和去重
+    // 向量索引 (Neo4j 5.11+):
+    // v2.3.2 阶段二: 合并为单一多 label 索引（Task|Skill|Event 共用 'embedding' 属性）
+    // 旧实现按 label 分离 3 个索引，查询需并行 3 次 session + 合并去重。
+    // 新实现单索引跨 3 label 检索，省 2 个 session + 去重逻辑，连接池压力降 2/3。
+    // 兼容策略：保留创建 3 个旧索引的语句（IF NOT EXISTS 语义，已存在则 no-op），
+    //          避免破坏旧环境；查询层优先用合并索引，旧索引仅向后兼容。
+    try {
+      await session.run(`
+        CALL db.index.vector.createNodeIndex(
+          'gm_node_embedding', ['Task', 'Skill', 'Event'], 'embedding', ${dimension}, 'cosine'
+        )
+      `);
+    } catch { /* may exist or version < 5.11 multi-label index */ }
     try {
       await session.run(`
         CALL db.index.vector.createNodeIndex(

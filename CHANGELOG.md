@@ -24,6 +24,13 @@ v2.3.2 聚焦**稳定性修复**。在 v2.3.1 性能优化（并行化/批量化
 - **S6 embed 4xx 不重试测试**：2 用例（400 不重试直接抛出 / 429 仍重试 3 次）
 - **并发稳定性测试**：新增 [test/concurrency-stability.test.ts](test/concurrency-stability.test.ts) 覆盖投影预热互斥（S1）/ archiveKeepCount 配置化（S4）/ vectorSearchWithScore 部分索引容错（S5）。S2 批量回退、S3 timer 重入为 index.ts 私有闭包内简单 try/catch + flag 模式，由代码审查覆盖。
 
+### Performance — 阶段二性能优化（P2-1 ~ P2-4）
+
+- **P2-1 embed LRU 缓存**：[src/engine/embed.ts](src/engine/embed.ts) `createEmbedFn` 内置 LRU 缓存（默认 256 条 / 10min TTL），命中缓存直接返回避免重复调用 Ollama。可配置 `embedding.cacheSize` / `embedding.cacheTtlMs`，设为 0 禁用。主要收益：associationMatrix 对同一 query 再次 embed、doctor 探测固定文本。
+- **P2-2 LLM 并发控制**：[src/engine/llm.ts](src/engine/llm.ts) 新增信号量限流，防 Ollama 单流排队级联超时。默认 `maxConcurrency=1`（本地 Ollama），可配置 `llm.maxConcurrency` 提高（云端 API）。同 baseURL+model 共享同一信号量，runtime LLM 与 fallback 独立限流避免双重限制。
+- **P2-3 GDS 自动失效**：[src/graph/pagerank.ts](src/graph/pagerank.ts) 投影 hash 纳入边数（`relTypeHash(types, edgeCount)`），修复旧实现仅基于 type 集合导致新增/删除同类型边不触发重建的缺陷。新增 `invalidateProjectionCache()` 导出函数，在 [src/store/edges.ts](src/store/edges.ts) 的 `upsertEdge` / `batchUpsertEdges` 成功后调用，主动失效让下次 PPR 重建投影反映新拓扑。
+- **P2-4 向量索引合并**：[src/store/schema.ts](src/store/schema.ts) 新增合并索引 `gm_node_embedding`（多 label Task|Skill|Event），[src/store/nodes.ts](src/store/nodes.ts) `vectorSearchWithScore` 优先用合并索引单 session 查询，省 2 个 session + 去重逻辑。兼容回退：合并索引不存在时回退到 3 索引并行（旧环境）。保留旧索引创建语句确保向后兼容。
+
 ### Configuration Migration — 配置迁移（v2.3.1 → v2.3.2）
 
 无破坏性变更，现有 v2.3.1 配置无需任何改动。`upsertNode` 新增第 3 个可选参数 `cfg`，未传入时行为与 v2.3.1 完全一致（archiveKeepCount 默认 3）。

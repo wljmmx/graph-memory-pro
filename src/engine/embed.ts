@@ -21,6 +21,47 @@ const RETRY_DELAYS = [1000, 3000, 5000];
 // v2.3.2 S6: 重试 jitter 上限 — 防止并发失败时重试波峰对齐加剧下游过载
 const RETRY_JITTER_MAX_MS = 500;
 
+// v2.3.2 阶段二: 简易 LRU 缓存（无外部依赖，基于 Map 插入顺序）
+// 避免相同 text 跨 tick 重复 embed（如 associationMatrix 对同一 query 再次 embed、doctor 探测固定文本）
+interface LruCacheEntry {
+  vec: number[];
+  ts: number;
+}
+const DEFAULT_EMBED_CACHE_SIZE = 256;
+const DEFAULT_EMBED_CACHE_TTL_MS = 10 * 60 * 1000; // 10min（短于 QueryCache 30min，保证嵌入新鲜度）
+
+function createLruCache(capacity: number, ttlMs: number) {
+  const map = new Map<string, LruCacheEntry>();
+  return {
+    get(key: string): number[] | null {
+      const entry = map.get(key);
+      if (!entry) return null;
+      if (Date.now() - entry.ts > ttlMs) {
+        map.delete(key);
+        return null;
+      }
+      // 命中：移到末尾（Map 末尾为最近使用）
+      map.delete(key);
+      map.set(key, entry);
+      return entry.vec;
+    },
+    set(key: string, vec: number[]): void {
+      if (map.size >= capacity) {
+        // 删除最旧（Map 头部第一个 key）
+        const oldestKey = map.keys().next().value;
+        if (oldestKey !== undefined) map.delete(oldestKey);
+      }
+      map.set(key, { vec, ts: Date.now() });
+    },
+    clear(): void {
+      map.clear();
+    },
+    size(): number {
+      return map.size;
+    },
+  };
+}
+
 /**
  * 清洗 baseURL：去除反引号、首尾空格、尾部斜杠
  * 防止 markdown 代码块标记 ` ` 误入 JSON 配置
@@ -54,10 +95,23 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
   // 防止模型更换后维度与向量索引不一致（如 nomic-embed-text 768 → 1024）
   const expectedDim = config.dimensions;
 
+  // v2.3.2 阶段二: LRU 缓存 — 避免相同 text 跨 tick 重复 embed
+  // 缓存配置可通过 config.cacheSize / config.cacheTtlMs 覆盖（0 表示禁用缓存）
+  const cacheSize = (config as any).cacheSize ?? DEFAULT_EMBED_CACHE_SIZE;
+  const cacheTtlMs = (config as any).cacheTtlMs ?? DEFAULT_EMBED_CACHE_TTL_MS;
+  const cache = (cacheSize > 0 && cacheTtlMs > 0) ? createLruCache(cacheSize, cacheTtlMs) : null;
+
   return async function embed(text: string): Promise<number[]> {
     if (text == null || text === '') {
       throw new Error('Embedding API: input text cannot be null, undefined, or empty');
     }
+
+    // v2.3.2 阶段二: 命中缓存直接返回，避免重复调用 Ollama
+    if (cache) {
+      const cached = cache.get(text);
+      if (cached) return cached;
+    }
+
     const lastErr: Error[] = [];
     const delays = [...RETRY_DELAYS];
 
@@ -111,6 +165,9 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
             `Check embedding.model or embedding.dimensions in config.`,
           );
         }
+
+        // v2.3.2 阶段二: 成功后写入 LRU 缓存
+        if (cache) cache.set(text, vec);
 
         return vec;
       } catch (err) {

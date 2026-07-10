@@ -9,6 +9,7 @@ import neo4j from "neo4j-driver";
 import type { GmEdge } from "../types.ts";
 import { getSession } from "./db.ts";
 import { recordToEdge } from "./schema.ts";
+import { invalidateProjectionCache } from "../graph/pagerank.ts";
 
 // ─── 边 CRUD ────────────────────────────────────────────────
 
@@ -42,6 +43,8 @@ export async function upsertEdge(
         updatedAt: neo4j.int(edge.updatedAt),
       },
     );
+    // v2.3.2 阶段二: 边写入后失效投影缓存，让下次 PPR 重建投影反映新拓扑
+    invalidateProjectionCache();
   } finally {
     await session.close();
   }
@@ -103,6 +106,8 @@ export async function batchUpsertEdges(
       const c = result.records[0]?.get("c");
       totalWritten += (typeof c === "number" ? c : c?.toNumber?.() ?? 0);
     }
+    // v2.3.2 阶段二: 批量边写入后失效投影缓存
+    if (totalWritten > 0) invalidateProjectionCache();
     return totalWritten;
   } finally {
     await session.close();

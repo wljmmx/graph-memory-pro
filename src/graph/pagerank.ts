@@ -34,11 +34,46 @@ async function getExistingRelTypes(session: Session): Promise<string[]> {
   return result.records.map(r => r.get("t"));
 
 }
+
 /**
- * Compute a stable hash of the relation-type set (for change detection).
+ * v2.3.2 阶段二: 查询当前关系类型集合 + 关系总数（用于投影失效检测）
+ *
+ * 合并到单条 Cypher，避免新增额外往返。
+ * 边数纳入 hash 后，新增/删除边（即使 type 集合不变）也能触发投影重建。
  */
-function relTypeHash(types: string[]): string {
-  return types.sort().join(",");
+async function getExistingRelTypesWithCount(session: Session): Promise<{ types: string[]; edgeCount: number }> {
+  const result = await session.run(`
+    MATCH (a:Task|Skill|Event)-[r]->(b:Task|Skill|Event)
+    WHERE type(r) IN $types
+    RETURN collect(DISTINCT type(r)) AS types, count(r) AS cnt
+  `, { types: ALL_REL_TYPES });
+  if (result.records.length === 0) return { types: [], edgeCount: 0 };
+  const rec = result.records[0];
+  const types = (rec.get("types") as string[]) ?? [];
+  const cnt = rec.get("cnt");
+  return { types, edgeCount: typeof cnt === "number" ? cnt : (cnt?.toNumber?.() ?? 0) };
+}
+/**
+ * Compute a stable hash of the relation-type set + edge count (for change detection).
+ *
+ * v2.3.2 阶段二: hash 纳入边数，修复旧实现仅基于 type 集合的缺陷。
+ * 旧 hash 仅当 type 集合变化才失效，新增/删除同类型边不触发重建 → PPR 分数过时。
+ * 新 hash 把边数拼入，任何边增删都会改变 hash → 触发投影重建。
+ */
+function relTypeHash(types: string[], edgeCount: number): string {
+  return `${types.sort().join(",")}|${edgeCount}`;
+}
+
+/**
+ * v2.3.2 阶段二: 显式失效投影缓存（供边变更路径调用）
+ *
+ * 场景：批量写边/合并节点等拓扑变化后，主动失效让下次 ensureSharedProjection 重建。
+ * 若 preheatProjection 在飞行中，置 hash=null 让其结果不命中 fast path，
+ * 下次调用自然重建。
+ */
+export function invalidateProjectionCache(): void {
+  _cachedRelTypeHash = null;
+  _cachedTimestamp = 0;
 }
 
 function buildRelProjection(existingTypes: string[]): string {
@@ -64,9 +99,27 @@ async function ensureSharedProjection(
   const now = Date.now();
   const tEnsure = Date.now();
 
-  // v2.3.1: 复用调用方预计算的 types，避免重复查询
-  const currentTypes = precomputedTypes ?? await getExistingRelTypes(session);
-  const currentHash = relTypeHash(currentTypes);
+  // v2.3.2 阶段二: 用带边数的 types+count 查询（合并单条 Cypher，无额外往返）
+  // 旧实现仅查 types → hash 不含边数 → 新增/删除同类型边不触发重建。
+  // 若调用方传了 precomputedTypes（v2.3.1 P0-1 并行复用），仍需补查边数以纳入 hash。
+  let currentTypes: string[];
+  let edgeCount: number;
+  if (precomputedTypes) {
+    currentTypes = precomputedTypes;
+    // 复用 types 时仍需查边数（轻量 COUNT，仅 ~5ms）
+    const cntResult = await session.run(`
+      MATCH (:Task|Skill|Event)-[r]->(:Task|Skill|Event)
+      WHERE type(r) IN $types
+      RETURN count(r) AS cnt
+    `, { types: ALL_REL_TYPES });
+    const cnt = cntResult.records[0]?.get("cnt");
+    edgeCount = typeof cnt === "number" ? cnt : (cnt?.toNumber?.() ?? 0);
+  } else {
+    const info = await getExistingRelTypesWithCount(session);
+    currentTypes = info.types;
+    edgeCount = info.edgeCount;
+  }
+  const currentHash = relTypeHash(currentTypes, edgeCount);
 
   // Fast path: within TTL and hash unchanged, check GDS-side existence
   if (_cachedRelTypeHash && (now - _cachedTimestamp) < PROJECTION_TTL_MS) {
@@ -99,7 +152,7 @@ async function ensureSharedProjection(
   );
   _cachedTimestamp = now;
   _cachedRelTypeHash = currentHash;
-  logPhase("ensure_projection", Date.now() - tEnsure, { status: "rebuilt" });
+  logPhase("ensure_projection", Date.now() - tEnsure, { status: "rebuilt", edgeCount });
   return true;
 }
 export interface PPRResult {

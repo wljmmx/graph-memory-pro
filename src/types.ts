@@ -14,6 +14,8 @@ export interface LlmConfig {
   model?: string;
   /** Ollama keep_alive 参数（仅 Ollama 识别，OpenAI 会忽略） */
   keepAlive?: string;
+  /** v2.3.2 阶段二: 最大并发请求数（默认 1 for Ollama 本地，可调高 for 云端） */
+  maxConcurrency?: number;
 }
 
 export interface EmbeddingConfig {
@@ -23,6 +25,10 @@ export interface EmbeddingConfig {
   dimensions?: number;
   options?: Record<string, number | boolean | string>;
   keepAlive?: string;
+  /** v2.3.2 阶段二: LRU 缓存容量（默认 256，设为 0 禁用缓存） */
+  cacheSize?: number;
+  /** v2.3.2 阶段二: LRU 缓存 TTL（默认 10min） */
+  cacheTtlMs?: number;
 }
 
 /** Timing / latency distribution options */
