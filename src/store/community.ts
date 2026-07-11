@@ -187,7 +187,7 @@ export async function communityVectorSearchWithReps(
     const result = await session.run(
       `CALL db.index.vector.queryNodes('gm_community_embedding', toInteger($maxCommunities), $vec)
        YIELD node, score
-       WITH node.communityId AS cid, score AS cscore
+       WITH node.id AS cid, score AS cscore
        WHERE cid IS NOT NULL
        MATCH (n:Task|Skill|Event {status: 'active'})
        WHERE n.communityId = cid

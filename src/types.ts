@@ -295,7 +295,11 @@ export type EdgeType =
   | "RELATES_TO"
   // S-5 因果关系（v2.1.2 新增）
   | "CAUSED_BY"   // EVENT → EVENT：A 事件直接导致 B 事件
-  | "LEADS_TO";   // TASK → EVENT：任务执行产生了某事件
+  | "LEADS_TO"    // TASK → EVENT：任务执行产生了某事件
+  // 会话/全文/提及关系（v2.3.5 补充）
+  | "MENTIONS"
+  | "NEXT_SESSION"
+  | "CONTAINS";
 
 export type NodeStatus = "active" | "deprecated" | "merged";
 

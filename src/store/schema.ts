@@ -194,8 +194,8 @@ export function recordToEdge(rec: any): GmEdge | null {
   const p = rec.properties;
   // 使用 startNodeElementId/endNodeElementId 获取节点 element ID
   // 但我们需要的是业务 ID（n.id），需要通过 startNode/endNode 获取
-  const fromId = p.fromId ?? rec.startNodeElementId ?? rec.start?.toNumber?.() ?? "";
-  const toId = p.toId ?? rec.endNodeElementId ?? rec.end?.toNumber?.() ?? "";
+  const fromId = p.fromId ?? "";
+  const toId = p.toId ?? "";
   return {
     id: p.id ?? `${fromId}-${toId}-${rec.type}`,
     type: rec.type,

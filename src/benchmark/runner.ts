@@ -24,6 +24,7 @@ import { Extractor } from "../extractor/extract.ts";
 import type { CompleteFn } from "../engine/llm.ts";
 import type { EmbedFn } from "../engine/embed.ts";
 import { upsertNode, upsertEdge, saveVector, computeEmbeddingHash } from "../store/store.ts";
+import { withTimeout } from "../utils.ts";
 
 export interface BenchmarkOptions {
   /** 指定运行的数据集（"all" 或具体名称数组） */
@@ -266,19 +267,7 @@ async function buildGraphFromConversation(
 }
 
 /**
- * 带超时的 Promise
- */
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) =>
-      setTimeout(() => reject(new Error(`timeout after ${timeoutMs}ms`)), timeoutMs),
-    ),
-  ]);
-}
-
-/**
- * 生成汇总报告文本
+ * 汇总报告文本
  */
 export function formatAggregateReport(result: BenchmarkRunResult): string {
   const lines: string[] = [

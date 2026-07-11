@@ -21,6 +21,7 @@ import {
 import type { CompleteFn } from "../engine/llm.ts";
 import type { EmbedFn } from "../engine/embed.ts";
 import type { Recaller } from "../recaller/recall.ts";
+import { VERSION } from "../version.ts";
 
 let _driver: Driver | null = null;
 let _cfg: GmConfig | null = null;
@@ -81,7 +82,7 @@ async function handleStatus(): Promise<{ status: number; body: any }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   try {
     await _driver.verifyConnectivity();
-    return { status: 200, body: { status: "connected", version: "2.3.2" } };
+    return { status: 200, body: { status: "connected", version: VERSION } };
   } catch (err: any) {
     return { status: 503, body: { status: "disconnected", error: err.message } };
   }
@@ -301,7 +302,7 @@ async function handleMetrics(): Promise<{ status: number; body: string }> {
   }
 
   const lines: string[] = [];
-  const labels = `plugin="graph-memory-pro",version="2.3.2"`;
+  const labels = `plugin="graph-memory-pro",version="${VERSION}"`;
 
   // 基础计数
   let nodeCount = 0;
@@ -694,7 +695,7 @@ async function handleDoctor(): Promise<{ status: number; body: any }> {
     status: errorCount > 0 ? 503 : 200,
     body: {
       status: overallStatus,
-      version: "2.3.2",
+      version: VERSION,
       timestamp: new Date().toISOString(),
       summary: {
         ok: checks.filter(c => c.status === "ok").length,
@@ -718,7 +719,7 @@ async function handleUsage(): Promise<{ status: number; body: any }> {
     return {
       status: 200,
       body: {
-        version: "2.3.2",
+        version: VERSION,
         timestamp: new Date().toISOString(),
         ...stats,
       },

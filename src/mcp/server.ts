@@ -32,6 +32,8 @@ import {
   runMaintenance, healthCheck,
 } from "../graph/maintenance.ts";
 import { reEmbedNodes } from "../graph/reembed.ts";
+import { withTimeout } from "../utils.ts";
+import { VERSION } from "../version.ts";
 
 export interface McpServerHandle {
   httpServer: http.Server;
@@ -41,30 +43,6 @@ export interface McpServerHandle {
 /** 将强类型对象转为 MCP SDK 要求的 Record<string, unknown> 结构 */
 function asStructured<T>(obj: T): Record<string, unknown> {
   return obj as unknown as Record<string, unknown>;
-}
-
-/**
- * v2.3.3 MCP-2: 为 tool execute 添加超时包装
- *
- * 防止 recall/maintain 等长操作因 LLM/embed 挂起而无限阻塞 MCP 客户端。
- * 超时后返回错误 content，而非让客户端等待直到自身超时。
- */
-const MCP_TOOL_TIMEOUT_MS = 60_000; // 60s — 覆盖 recall(~5s) + maintain(~30s) 正常耗时
-
-async function withTimeout<T>(
-  fn: () => Promise<T>,
-  timeoutMs: number = MCP_TOOL_TIMEOUT_MS,
-  toolName: string = "unknown",
-): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`MCP tool '${toolName}' timed out after ${timeoutMs}ms`)), timeoutMs);
-  });
-  try {
-    return await Promise.race([fn(), timeoutPromise]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
 }
 
 /**
@@ -98,7 +76,7 @@ export async function startMcpServer(
   // ── 创建 MCP server ──────────────────────────────────────────────
   const mcpServer = new McpServer({
     name: "graph-memory-pro",
-    version: "2.3.2",
+    version: VERSION,
   });
 
   // ── read-only tools ─────────────────────────────────────────────
@@ -116,8 +94,8 @@ export async function startMcpServer(
         try {
           await driver.verifyConnectivity();
           return {
-            content: [{ type: "text", text: `connected, version=2.3.2` }],
-            structuredContent: asStructured({ status: "connected", version: "2.3.2" }),
+            content: [{ type: "text", text: `connected, version=${VERSION}` }],
+            structuredContent: asStructured({ status: "connected", version: VERSION }),
           };
         } catch (err: any) {
           return {
@@ -514,7 +492,7 @@ export async function startMcpServer(
     // 健康检查端点（无需鉴权）
     if (req.method === "GET" && req.url === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ status: "ok", service: "graph-memory-pro-mcp", version: "2.2.1" }));
+      res.end(JSON.stringify({ status: "ok", service: "graph-memory-pro-mcp", version: VERSION }));
       return;
     }
 

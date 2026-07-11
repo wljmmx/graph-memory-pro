@@ -33,6 +33,7 @@ import { Recaller } from "./src/recaller/recall.ts";
 import { runMaintenance } from "./src/graph/maintenance.ts";
 import { reEmbedNodes } from "./src/graph/reembed.ts";
 import { initRoutes, getRoutes } from "./src/routes/crud.ts";
+import { VERSION } from "./src/version.ts";
 import { setTimingEnabled } from "./src/timing.ts";
 import { extractInBackground } from "./src/services/extract-service.ts";  // v2.3.4 ARCH-1: 从 index.ts 拆出
 
@@ -636,7 +637,7 @@ export default definePluginEntry({
           resetAllCircuitBreakers();
 
           logger?.info?.(`[graph-memory-pro] config reloaded: ${JSON.stringify(applied)}`);
-          return { status: 200, body: { applied, version: "2.3.2" } };
+          return { status: 200, body: { applied, version: VERSION } };
         } catch (err: any) {
           logger?.error?.(`[graph-memory-pro] reload failed: ${err}`);
           return { status: 500, body: { error: err.message } };

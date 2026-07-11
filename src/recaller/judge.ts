@@ -21,6 +21,7 @@
 import type { GmNode } from "../types.ts";
 import type { CompleteFn } from "../engine/llm.ts";
 import { createLogger } from "../logger.ts";
+import { withTimeout } from "../utils.ts";
 
 const log = createLogger("judge");
 
@@ -250,17 +251,6 @@ class CustomJudgeStrategy implements JudgeStrategy {
       throw new Error(`Tier 3 custom strategy "${this.name}" failed: ${err}`);
     }
   }
-}
-
-// ── 工具：带超时的 Promise ──────────────────────────────────────
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) =>
-      setTimeout(() => reject(new Error(`Tier 2 LLM judge timeout after ${timeoutMs}ms`)), timeoutMs),
-    ),
-  ]);
 }
 
 // ── 裁判管理器（v2.2.0 重构，支持 Tier 1/2/3 分发） ──────────────

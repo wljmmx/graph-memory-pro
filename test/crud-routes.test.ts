@@ -25,6 +25,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { initRoutes, getRoutes } from "../src/routes/crud.ts";
 import { mockDriver, MockInteger } from "./helpers/neo4j-mock.ts";
 import type { GmConfig } from "../src/types.ts";
+import { VERSION } from "../src/version.ts";
 
 // ── 辅助 ──────────────────────────────────────────────────────
 
@@ -100,7 +101,7 @@ describe("handleStatus", () => {
 
     expect(result.status).toBe(200);
     expect(result.body.status).toBe("connected");
-    expect(result.body.version).toBe("2.3.2");
+    expect(result.body.version).toBe(VERSION);
   });
 
   it("disconnected: verifyConnectivity 抛错 → 503", async () => {
