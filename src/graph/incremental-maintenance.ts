@@ -225,9 +225,9 @@ async function incrementalImportance(
     let updated = 0;
     for (const rec of result.records) {
       const id = rec.get("id") as string;
-      const pr = (rec.get("pagerank") as number) ?? 0;
-      const vc = (rec.get("vc") as number) ?? 0;
-      const updatedAt = rec.get("updatedAt")?.toNumber?.() ?? rec.get("updatedAt") ?? 0;
+      const pr = rec.get("pagerank")?.toNumber?.() ?? 0;
+      const vc = rec.get("vc")?.toNumber?.() ?? 0;
+      const updatedAt = rec.get("updatedAt")?.toNumber?.() ?? 0;
       const source = rec.get("source") as string | undefined;
 
       const ageDays = updatedAt > 0 ? (now - updatedAt) / (1000 * 60 * 60 * 24) : decayDays;
@@ -344,7 +344,7 @@ async function incrementalEdgeWeights(
     // 脏节点被访问 = 强化；其他时间流逝 = 衰减
     for (const rec of result.records) {
       const edgeId = rec.get("edgeId");
-      const weight = (rec.get("weight") as number) ?? 1.0;
+      const weight = rec.get("weight")?.toNumber?.() ?? 1.0;
       const fromId = rec.get("fromId");
       const toId = rec.get("toId");
       const type = rec.get("type");
