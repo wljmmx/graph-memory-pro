@@ -110,17 +110,17 @@ export default definePluginEntry({
     pagerankDamping: Type.Optional(Type.Number({ default: 0.85 })),
     pagerankIterations: Type.Optional(Type.Number({ default: 20 })),
     llm: Type.Optional(Type.Object({
-      apiKey: Type.Optional(Type.String()),
-      baseURL: Type.Optional(Type.String()),
-      model: Type.Optional(Type.String()),
-      keepAlive: Type.Optional(Type.String()),
+      apiKey: Type.Optional(Type.String({ default: "" })),
+      baseURL: Type.Optional(Type.String({ default: "" })),
+      model: Type.Optional(Type.String({ default: "" })),
+      keepAlive: Type.Optional(Type.String({ default: "" })),
     })),
     embedding: Type.Optional(Type.Object({
-      apiKey: Type.Optional(Type.String()),
-      baseURL: Type.Optional(Type.String()),
-      model: Type.Optional(Type.String()),
+      apiKey: Type.Optional(Type.String({ default: "" })),
+      baseURL: Type.Optional(Type.String({ default: "" })),
+      model: Type.Optional(Type.String({ default: "" })),
       dimensions: Type.Optional(Type.Number({ default: 1024 })),
-      keepAlive: Type.Optional(Type.String()),
+      keepAlive: Type.Optional(Type.String({ default: "" })),
     })),
     timing: Type.Optional(Type.Object({
       enabled: Type.Boolean({ default: false }),
@@ -180,7 +180,7 @@ export default definePluginEntry({
       tier: Type.Optional(Type.Union([Type.Literal(1), Type.Literal(2), Type.Literal(3)])),
       llmJudgeMaxNodes: Type.Optional(Type.Number({ default: 10 })),
       llmJudgeTimeoutMs: Type.Optional(Type.Number({ default: 8000 })),
-      customStrategy: Type.Optional(Type.String()),
+      customStrategy: Type.Optional(Type.String({ default: "" })),
     })),
     feedback: Type.Optional(Type.Object({
       enabled: Type.Optional(Type.Boolean({ default: true })),
@@ -251,7 +251,7 @@ export default definePluginEntry({
     // ── v2.1.2 第五批 Benchmark + 自主调优 ────────────
     benchmark: Type.Optional(Type.Object({
       enabled: Type.Optional(Type.Boolean({ default: false })),
-      dataDir: Type.Optional(Type.String()),
+      dataDir: Type.Optional(Type.String({ default: "" })),
       maxCases: Type.Optional(Type.Number({ default: 0 })),
       buildGraph: Type.Optional(Type.Boolean({ default: true })),
       caseTimeoutMs: Type.Optional(Type.Number({ default: 30_000 })),
@@ -271,7 +271,7 @@ export default definePluginEntry({
       port: Type.Optional(Type.Number({ default: 7800 })),
       host: Type.Optional(Type.String({ default: "127.0.0.1" })),
       path: Type.Optional(Type.String({ default: "/mcp" })),
-      authToken: Type.Optional(Type.String()),
+      authToken: Type.Optional(Type.String({ default: "" })),
       enabledTools: Type.Optional(Type.Array(Type.String())),
     })),
   }) as any),
