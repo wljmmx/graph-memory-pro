@@ -50,7 +50,8 @@
             "default": "neo4j"
           },
           "password": {
-            "type": "string"
+            "type": "string",
+            "default": ""
           }
         },
         "required": [
@@ -116,16 +117,20 @@
         "additionalProperties": false,
         "properties": {
           "baseURL": {
-            "type": "string"
+            "type": "string",
+            "default": ""
           },
           "model": {
-            "type": "string"
+            "type": "string",
+            "default": ""
           },
           "apiKey": {
-            "type": "string"
+            "type": "string",
+            "default": ""
           },
           "keepAlive": {
             "type": "string",
+            "default": "",
             "description": "Ollama keep_alive 参数（仅 Ollama 识别，OpenAI 会忽略）。默认不传，Ollama 5m 后卸载模型"
           }
         }
@@ -135,19 +140,23 @@
         "additionalProperties": false,
         "properties": {
           "baseURL": {
-            "type": "string"
+            "type": "string",
+            "default": ""
           },
           "model": {
-            "type": "string"
+            "type": "string",
+            "default": ""
           },
           "keepAlive": {
-            "type": "string"
+            "type": "string",
+            "default": ""
           },
           "dimensions": {
             "type": "integer"
           },
           "apiKey": {
-            "type": "string"
+            "type": "string",
+            "default": ""
           }
         }
       },
@@ -313,6 +322,7 @@
           },
           "customStrategy": {
             "type": "string",
+            "default": "",
             "description": "Tier 3 自定义策略名称（需先通过 JudgeManager.registerStrategy 注册）"
           }
         }
@@ -574,7 +584,8 @@
             "default": false
           },
           "dataDir": {
-            "type": "string"
+            "type": "string",
+            "default": ""
           },
           "maxCases": {
             "type": "integer",
@@ -655,7 +666,8 @@
             "default": "/mcp"
           },
           "authToken": {
-            "type": "string"
+            "type": "string",
+            "default": ""
           },
           "enabledTools": {
             "type": "array",
