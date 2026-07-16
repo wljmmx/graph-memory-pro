@@ -671,7 +671,8 @@
           },
           "enabledTools": {
             "type": "array",
-            "items": { "type": "string" }
+            "items": { "type": "string", "default": "" },
+            "default": []
           }
         }
       }
