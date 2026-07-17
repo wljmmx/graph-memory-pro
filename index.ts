@@ -272,7 +272,7 @@ export default definePluginEntry({
       host: Type.Optional(Type.String({ default: "127.0.0.1" })),
       path: Type.Optional(Type.String({ default: "/mcp" })),
       authToken: Type.Optional(Type.String({ default: "" })),
-      enabledTools: Type.Optional(Type.Array(Type.String())),
+      enabledTools: Type.Optional(Type.Array(Type.String({ default: "" }))),
     })),
   }) as any),
   register(api: any) {
@@ -906,9 +906,9 @@ export default definePluginEntry({
       description: "Submit feedback on which recalled nodes were actually used in the assistant reply. Triggers I-2 heuristic judge + I-3 persistence.",
       parameters: Type.Object({
         query: Type.String({ description: "Original user query" }),
-        recalledNodeIds: Type.Array(Type.String(), { description: "Node IDs returned by recall" }),
-        assistantReply: Type.String({ description: "Assistant's reply content" }),
-        sessionId: Type.Optional(Type.String()),
+        recalledNodeIds: Type.Array(Type.String({ default: "" }), { description: "Node IDs returned by recall" }),
+        assistantReply: Type.String({ description: "Assistant's reply content", default: "" }),
+        sessionId: Type.Optional(Type.String({ default: "" })),
       }),
       async execute(_callId: string, params: any) {
         if (!_driver || !_recaller) {
@@ -953,7 +953,7 @@ export default definePluginEntry({
       parameters: Type.Object({
         datasets: Type.Optional(Type.Union([
           Type.Literal("all"),
-          Type.Array(Type.String()),
+          Type.Array(Type.String({ default: "" })),
         ])),
         maxCases: Type.Optional(Type.Number({ description: "Max cases per dataset (0 = all)" })),
         buildGraph: Type.Optional(Type.Boolean({ description: "Build graph from conversation history before evaluation (default true)" })),
