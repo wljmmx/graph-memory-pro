@@ -66,11 +66,12 @@ function createLruCache(capacity: number, ttlMs: number) {
  * 清洗 baseURL：去除反引号、首尾空格、尾部斜杠
  * 防止 markdown 代码块标记 ` ` 误入 JSON 配置
  */
-function sanitizeBaseURL(url: string): string {
-  return url
-    .replace(/`/g, "")        // 去除反引号
-    .trim()                    // 去除首尾空格
-    .replace(/\/+$/, "");      // 去除尾部斜杠
+function sanitizeBaseURL(url: string | null | undefined): string {
+  const u = url ?? "";
+  return u
+    .replace(/`/g, "")
+    .trim()
+    .replace(/\/+$/, "");
 }
 
 /**

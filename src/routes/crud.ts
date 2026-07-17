@@ -160,7 +160,7 @@ async function handleSearch(params: { query?: string; limit?: string }): Promise
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   const q = params.query || "";
   const limit = safeParseInt(params.limit, 10, 50);
-  if (!q.trim()) return { status: 400, body: { error: "query required" } };
+  if (!q || !q.trim()) return { status: 400, body: { error: "query required" } };
   try {
     const nodes = await searchNodes(_driver, q, limit);
     const ids = nodes.map(n => n.id);

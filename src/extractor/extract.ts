@@ -72,7 +72,7 @@ export async function extractTriplets(
 }
 
 function parseExtractResult(raw: string): ExtractResult {
-  const cleaned = raw
+  const cleaned = ((raw ?? "") as string)
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```$/i, "")
     .trim();

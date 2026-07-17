@@ -84,7 +84,7 @@ export function createCompleteFn(config?: LlmConfig): CompleteFn | null {
 function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
   const apiKey = config.apiKey || "";
   // 清洗 baseURL：去除反引号/首尾空格/尾部斜杠（防止 markdown 标记误入 JSON）
-  const baseURL = (config.baseURL || "https://api.openai.com/v1")
+  const baseURL = ((config?.baseURL ?? "https://api.openai.com/v1") as string)
     .replace(/`/g, "")
     .trim()
     .replace(/\/+$/, "");
@@ -195,7 +195,7 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
           );
         } catch { /* usage 记录失败不影响主流程 */ }
 
-        return content.trim();
+        return (content ?? "").trim();
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
         lastErr.push(error);
@@ -388,7 +388,7 @@ export function createRuntimeCompleteFn(
         );
       } catch { /* usage 记录失败不影响主流程 */ }
 
-      return text.trim();
+      return (text ?? "").trim();
     } finally {
       release();
     }

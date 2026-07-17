@@ -146,7 +146,7 @@ export async function assembleContext(
       const tag = n.type.toLowerCase();
       const srcAttr = n.src === "recalled" ? ` source="recalled"` : "";
       const timeAttr = ` updated="${new Date(n.updatedAt).toISOString().slice(0, 10)}"`;
-      xmlParts.push(`    <${tag} name="${escapeXml(n.name)}" desc="${escapeXml(n.description)}"${srcAttr}${timeAttr}>\n${escapeXml(n.content.trim())}\n    </${tag}>`);
+      xmlParts.push(`    <${tag} name="${escapeXml(n.name)}" desc="${escapeXml(n.description)}"${srcAttr}${timeAttr}>\n${escapeXml((n.content ?? "").trim())}\n    </${tag}>`);
     }
     xmlParts.push(`  </community>`);
   }
@@ -155,7 +155,7 @@ export async function assembleContext(
     const tag = n.type.toLowerCase();
     const srcAttr = n.src === "recalled" ? ` source="recalled"` : "";
     const timeAttr = ` updated="${new Date(n.updatedAt).toISOString().slice(0, 10)}"`;
-    xmlParts.push(`  <${tag} name="${escapeXml(n.name)}" desc="${escapeXml(n.description)}"${srcAttr}${timeAttr}>\n${escapeXml(n.content.trim())}\n  </${tag}>`);
+    xmlParts.push(`  <${tag} name="${escapeXml(n.name)}" desc="${escapeXml(n.description)}"${srcAttr}${timeAttr}>\n${escapeXml((n.content ?? "").trim())}\n  </${tag}>`);
   }
 
   const nodesXml = xmlParts.join("\n");

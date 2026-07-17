@@ -115,7 +115,7 @@ export async function loadLongMemEval(dataDir: string = "benchmarks/data"): Prom
 
   try {
     const raw = readFileSync(filePath, "utf-8");
-    const lines = raw.split("\n").filter(l => l.trim());
+    const lines = raw.split("\n").filter(l => l && l.trim());
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];

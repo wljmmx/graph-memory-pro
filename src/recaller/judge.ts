@@ -187,7 +187,8 @@ export class LlmJudgeStrategy implements JudgeStrategy {
     try {
       const prompt = buildLlmJudgePrompt(targetNodes, reply);
       const response = await withTimeout(this.llm(prompt, "判断召回节点是否被使用"), this.timeoutMs);
-      const cleaned = response.trim()
+      const cleaned = ((response ?? "") as string)
+        .trim()
         .replace(/```json\s*/i, "")
         .replace(/```\s*$/g, "")
         .trim();

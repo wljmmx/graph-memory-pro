@@ -490,7 +490,8 @@ export async function summarizeCommunities(
 
     try {
       const summary = await llm(COMMUNITY_SUMMARY_SYS, `社区成员：\n${memberText}`);
-      const cleaned = summary.trim()
+      const cleaned = ((summary ?? "") as string)
+        .trim()
         .replace(/<think>[\s\S]*?<\/think>/gi, "")
         .replace(/<think>[\s\S]*/gi, "")
         .replace(/^["'「」]|["'「」]$/g, "")

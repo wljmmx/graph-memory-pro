@@ -370,7 +370,8 @@ ${JSON.stringify(ACTION_BOUNDS, null, 2)}
 
     try {
       const response = await this.llm(sysPrompt, "诊断召回失败");
-      const cleaned = response.trim()
+      const cleaned = ((response ?? "") as string)
+        .trim()
         .replace(/```json\s*/i, "")
         .replace(/```\s*$/, "");
       const parsed = JSON.parse(cleaned);

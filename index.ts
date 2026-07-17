@@ -439,7 +439,7 @@ export default definePluginEntry({
               // 队列文件不存在时静默返回
               return;
             }
-            if (!queueContent.trim()) return;
+            if (!queueContent || !queueContent.trim()) return;
 
             const lines = queueContent.split('\n').filter(Boolean);
             const pairs: Array<{ user: string; assistant: string }> = [];
@@ -1012,7 +1012,7 @@ export default definePluginEntry({
           // 尝试从持久化文件恢复状态
           try {
             const saved = await readFile(statePath, "utf-8");
-            if (saved.trim()) tuner.deserialize(saved);
+            if (saved && saved.trim()) tuner.deserialize(saved);
           } catch { /* 首次运行无状态文件 */ }
 
           const rounds = Math.max(1, Math.min(params.rounds ?? 1, _cfg.autoTuner?.maxRounds ?? 10));

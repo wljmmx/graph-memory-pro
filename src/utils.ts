@@ -7,6 +7,10 @@
 // ── 关系类型常量 ──────────────────────────────────────────────
 
 /** 所有已知关系类型，供 GDS 投影、社区检测等模块共用 */
+export function normalizeString(value: string | null | undefined): string {
+  return value ?? "";
+}
+
 export const ALL_REL_TYPES = [
   "NEXT_SESSION",
   "CONTAINS",
