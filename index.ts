@@ -34,6 +34,7 @@ import { runMaintenance } from "./src/graph/maintenance.ts";
 import { reEmbedNodes } from "./src/graph/reembed.ts";
 import { initRoutes, getRoutes } from "./src/routes/crud.ts";
 import { VERSION } from "./src/version.ts";
+import { setExternalLogger } from "./src/logger.ts";
 import { setTimingEnabled } from "./src/timing.ts";
 import { extractInBackground } from "./src/services/extract-service.ts";  // v2.3.4 ARCH-1: 从 index.ts 拆出
 
@@ -278,12 +279,7 @@ export default definePluginEntry({
   register(api: any) {
     const logger = api.logger ?? console;
     // v2.2.0 P2-1：把 SDK logger 注入到结构化日志模块
-    try {
-      const { setExternalLogger } = require("./src/logger.ts");
-      setExternalLogger(api.logger ?? null);
-    } catch {
-      // logger 模块加载失败不影响主流程
-    }
+    setExternalLogger(api.logger ?? null);
 
     // ── Gateway 启动时初始化 ──────────────────────
     api.on("gateway_start", async (event: any) => {
