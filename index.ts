@@ -139,7 +139,7 @@ export default definePluginEntry({
         Type.Literal("experience"),
         Type.Literal("knowledge"),
         Type.Literal("imported"),
-      ])),
+      ], { default: "experience" })),
     })),
     state: Type.Optional(Type.Object({
       enabled: Type.Optional(Type.Boolean({ default: true })),
@@ -151,7 +151,7 @@ export default definePluginEntry({
       mode: Type.Optional(Type.Union([
         Type.Literal("heuristic"),
         Type.Literal("llm"),
-      ])),
+      ], { default: "heuristic" })),
     })),
     causalEdges: Type.Optional(Type.Object({
       enabled: Type.Optional(Type.Boolean({ default: true })),
@@ -176,9 +176,9 @@ export default definePluginEntry({
         Type.Literal("id"),
         Type.Literal("name"),
         Type.Literal("both"),
-      ])),
+      ], { default: "both" })),
       // v2.2.0 Tier 1/2/3
-      tier: Type.Optional(Type.Union([Type.Literal(1), Type.Literal(2), Type.Literal(3)])),
+      tier: Type.Optional(Type.Union([Type.Literal(1), Type.Literal(2), Type.Literal(3)], { default: 1 })),
       llmJudgeMaxNodes: Type.Optional(Type.Number({ default: 10 })),
       llmJudgeTimeoutMs: Type.Optional(Type.Number({ default: 8000 })),
       customStrategy: Type.Optional(Type.String({ default: "" })),
@@ -228,7 +228,7 @@ export default definePluginEntry({
         Type.Literal(1),
         Type.Literal(2),
         Type.Literal(3),
-      ])),
+      ], { default: 3 })),
     })),
     conflictResolution: Type.Optional(Type.Object({
       enabled: Type.Optional(Type.Boolean({ default: true })),
