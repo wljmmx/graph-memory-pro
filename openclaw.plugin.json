@@ -43,7 +43,7 @@
         "properties": {
           "uri": {
             "type": "string",
-            "default": "bolt://localhost:7687"
+            "default": "bolt://localhost:37687"
           },
           "user": {
             "type": "string",
@@ -107,7 +107,12 @@
           },
           "reportEveryN": {
             "type": "integer",
-            "default": 10,
+            "default": 50,
+            "minimum": 1
+          },
+          "maxSamples": {
+            "type": "integer",
+            "default": 1000,
             "minimum": 1
           }
         }
@@ -152,7 +157,8 @@
             "default": ""
           },
           "dimensions": {
-            "type": "integer"
+            "type": "integer",
+            "default": 1024
           },
           "apiKey": {
             "type": "string",
@@ -364,7 +370,7 @@
         "properties": {
           "enabled": {
             "type": "boolean",
-            "default": false
+            "default": true
           },
           "learningRate": {
             "type": "number",
