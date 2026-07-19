@@ -411,9 +411,8 @@ export default definePluginEntry({
     // 如果该队列为空，后台服务空转。
     // ─────────────────────────────────────────────────────────────────
     api.registerService({
-      name: "graph-memory-extractor",
-      description: "Background triplet extraction from conversation messages",
-      async start() {
+      id: "graph-memory-extractor",
+      async start(_ctx: any) {
         const interval = _cfg?.background?.extractorIntervalMs ?? 60_000;
         _extractorTimer = setInterval(async () => {
           if (!_driver || !_extractor || !_llm) return;
@@ -461,7 +460,7 @@ export default definePluginEntry({
           }
         }, interval);
       },
-      async stop() {
+      async stop(_ctx: any) {
         if (_extractorTimer) { clearInterval(_extractorTimer); _extractorTimer = null; }
       },
     });
@@ -472,9 +471,8 @@ export default definePluginEntry({
     // 不再使用 session_end 钩子（会阻塞会话结束），改为周期性运行。
     // ─────────────────────────────────────────────────────────────────
     api.registerService({
-      name: "graph-memory-maintenance",
-      description: "Background graph maintenance (dedup + PageRank + community)",
-      async start() {
+      id: "graph-memory-maintenance",
+      async start(_ctx: any) {
         const interval = _cfg?.background?.maintenanceIntervalMs ?? 6 * 3600_000;
         // 启动后延迟 5 分钟执行第一次，避免与初始化竞争
         const initialDelay = 5 * 60_000;
@@ -496,7 +494,7 @@ export default definePluginEntry({
         setTimeout(runOnce, initialDelay);
         _maintenanceTimer = setInterval(runOnce, interval);
       },
-      async stop() {
+      async stop(_ctx: any) {
         if (_maintenanceTimer) { clearInterval(_maintenanceTimer); _maintenanceTimer = null; }
       },
     });
@@ -649,9 +647,8 @@ export default definePluginEntry({
     // ─────────────────────────────────────────────────────────────────
     if (_cfg?.mcp?.enabled === true) {
       api.registerService({
-        name: "graph-memory-mcp",
-        description: "MCP server exposing graph-memory-pro tools to dashboard / external clients",
-        async start() {
+        id: "graph-memory-mcp",
+        async start(_ctx: any) {
           if (!_driver || !_cfg) return;
           try {
             const { startMcpServer } = await import("./src/mcp/server.ts");
@@ -679,7 +676,7 @@ export default definePluginEntry({
             logger?.error?.(`[graph-memory-pro] MCP server start failed: ${err}`);
           }
         },
-        async stop() {
+        async stop(_ctx: any) {
           if (_mcpServerHandle) {
             try { await _mcpServerHandle.close(); } catch { /* ignore */ }
             _mcpServerHandle = null;
