@@ -114,14 +114,14 @@ export default definePluginEntry({
       apiKey: Type.Optional(Type.String({ default: "" })),
       baseURL: Type.Optional(Type.String({ default: "" })),
       model: Type.Optional(Type.String({ default: "" })),
-      keepAlive: Type.Optional(Type.String({ default: "" })),
+      keepAlive: Type.Optional(Type.Union([Type.String({ default: "" }), Type.Number({ default: -1 })])),
     })),
     embedding: Type.Optional(Type.Object({
       apiKey: Type.Optional(Type.String({ default: "" })),
       baseURL: Type.Optional(Type.String({ default: "" })),
       model: Type.Optional(Type.String({ default: "" })),
       dimensions: Type.Optional(Type.Number({ default: 1024 })),
-      keepAlive: Type.Optional(Type.String({ default: "" })),
+      keepAlive: Type.Optional(Type.Union([Type.String({ default: "" }), Type.Number({ default: -1 })])),
     })),
     timing: Type.Optional(Type.Object({
       enabled: Type.Boolean({ default: false }),

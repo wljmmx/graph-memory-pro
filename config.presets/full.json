@@ -18,7 +18,7 @@
     "baseURL": "http://localhost:11434",
     "model": "nomic-embed-text",
     "dimensions": 768,
-    "keepAlive": "5m"
+    "keepAlive": -1
   },
   "recallMaxNodes": 6,
   "recallMaxDepth": 2,

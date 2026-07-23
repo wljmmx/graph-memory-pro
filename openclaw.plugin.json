@@ -134,9 +134,12 @@
             "default": ""
           },
           "keepAlive": {
-            "type": "string",
+            "oneOf": [
+              { "type": "string", "default": "" },
+              { "type": "number", "default": -1 }
+            ],
             "default": "",
-            "description": "Ollama keep_alive 参数（仅 Ollama 识别，OpenAI 会忽略）。默认不传，Ollama 5m 后卸载模型"
+            "description": "Ollama keep_alive 参数（仅 Ollama 识别，OpenAI 会忽略）。-1 永久驻留，5m/1h 等字符串表示 ttl"
           }
         }
       },
@@ -153,7 +156,10 @@
             "default": ""
           },
           "keepAlive": {
-            "type": "string",
+            "oneOf": [
+              { "type": "string", "default": "" },
+              { "type": "number", "default": -1 }
+            ],
             "default": ""
           },
           "dimensions": {
