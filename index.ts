@@ -513,6 +513,7 @@ export default definePluginEntry({
       api.registerHttpRoute({
         method: route.method,
         path: route.path,
+        auth: "plugin",
         handler: async (req: any) => {
           if (needsAuth && _cfg?.mcp?.authToken) {
             const provided = req?.headers?.["x-auth-token"] ?? req?.body?.authToken;
@@ -536,6 +537,7 @@ export default definePluginEntry({
     api.registerHttpRoute({
       method: "POST",
       path: "/api/reload",
+      auth: "plugin",
       handler: async (req: any) => {
         try {
           if (!_cfg) return { status: 503, body: { error: "plugin not initialized" } };
