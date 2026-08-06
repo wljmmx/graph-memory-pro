@@ -282,6 +282,13 @@ export interface GmConfig {
     /** 启用的工具列表（省略则全部启用） */
     enabledTools?: string[];
   };
+  /** 独立 HTTP API 服务器配置（默认启用，端口 7850） */
+  apiServer?: {
+    enabled?: boolean;
+    port?: number;
+    host?: string;
+    authToken?: string;
+  };
 }
 
 export type NodeType = "TASK" | "SKILL" | "EVENT";

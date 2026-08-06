@@ -32,7 +32,7 @@ import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
 import { runMaintenance } from "./src/graph/maintenance.ts";
 import { reEmbedNodes } from "./src/graph/reembed.ts";
-import { initRoutes, getRoutes } from "./src/routes/crud.ts";
+import { initRoutes } from "./src/routes/crud.ts";
 import { VERSION } from "./src/version.ts";
 import { setExternalLogger } from "./src/logger.ts";
 import { setTimingEnabled } from "./src/timing.ts";
@@ -52,6 +52,7 @@ let _maintenanceTimer: ReturnType<typeof setInterval> | null = null;
 let _extractorRunning = false;
 let _maintenanceRunning = false;
 let _mcpServerHandle: { close(): Promise<void> } | null = null;
+let _apiServerHandle: { close(): Promise<void> } | null = null;
 
 // ─── 辅助函数 ──────────────────────────────────────────
 
@@ -275,6 +276,12 @@ export default definePluginEntry({
       authToken: Type.Optional(Type.String({ default: "" })),
       enabledTools: Type.Optional(Type.Array(Type.String({ default: "" }))),
     })),
+    apiServer: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      port: Type.Optional(Type.Number({ default: 7850 })),
+      host: Type.Optional(Type.String({ default: "127.0.0.1" })),
+      authToken: Type.Optional(Type.String({ default: "" })),
+    })),
   }) as any),
   register(api: any) {
     const logger = api.logger ?? console;
@@ -375,171 +382,30 @@ export default definePluginEntry({
       // 5. 初始化 HTTP 路由模块状态
       initRoutes(driver, _cfg, _llm ?? undefined, _embed ?? undefined, _recaller ?? undefined);
 
-      // 6. 注册 HTTP 路由到 Gateway（必须在 gateway_start 内注册，确保 Gateway HTTP 服务器已就绪）
-      const routes = getRoutes();
-      const SENSITIVE_READ_PATHS = new Set(["/api/health", "/api/metrics", "/api/usage", "/api/doctor"]);
-
-      const parseRequestParams = async (req: any, pathPattern: string): Promise<any> => {
-        const url = new URL(req.url ?? "/", `http://${req.headers?.host ?? "localhost"}`);
-        const params: any = {};
-        for (const [k, v] of url.searchParams) params[k] = v;
-        const patParts = pathPattern.split("/");
-        const pathParts = url.pathname.split("/");
-        for (let i = 0; i < patParts.length; i++) {
-          if (patParts[i].startsWith(":")) params[patParts[i].slice(1)] = pathParts[i] ?? "";
+      // 6. 启动独立 HTTP API 服务器（不依赖 Gateway 路由注册）
+      const apiServerCfg = _cfg.apiServer;
+      if (apiServerCfg?.enabled !== false) {
+        try {
+          const { startApiServer } = await import("./src/server/http-server.ts");
+          _apiServerHandle = await startApiServer(
+            driver, _cfg,
+            {
+              enabled: true,
+              port: apiServerCfg?.port ?? 7850,
+              host: apiServerCfg?.host ?? "127.0.0.1",
+              authToken: apiServerCfg?.authToken,
+            },
+            _llm ?? undefined,
+            _embed ?? undefined,
+            _recaller ?? undefined,
+          );
+          const port = apiServerCfg?.port ?? 7850;
+          const host = apiServerCfg?.host ?? "127.0.0.1";
+          logger?.info?.(`[graph-memory-pro] API server started on http://${host}:${port}`);
+        } catch (err) {
+          logger?.error?.(`[graph-memory-pro] API server failed to start: ${err}`);
         }
-        if (req.method !== "GET" && req.method !== "HEAD") {
-          try {
-            const raw = await new Promise<string>((resolve, reject) => {
-              let data = "";
-              req.on("data", (chunk: string) => { data += chunk; });
-              req.on("end", () => resolve(data));
-              req.on("error", reject);
-            });
-            if (raw) {
-              try { Object.assign(params, JSON.parse(raw)); } catch { /* ignore */ }
-            }
-          } catch { /* ignore */ }
-        }
-        return params;
-      };
-
-      const writeJson = (res: any, status: number, body: any) => {
-        res.setHeader("Content-Type", "application/json");
-        res.writeHead(status);
-        res.end(JSON.stringify(body));
-      };
-
-      const routesByPath = new Map<string, typeof routes[0][]>();
-      for (const route of routes) {
-        if (!routesByPath.has(route.path)) routesByPath.set(route.path, []);
-        routesByPath.get(route.path)!.push(route);
       }
-
-      for (const [path, pathRoutes] of routesByPath) {
-        const methodMap = new Map(pathRoutes.map(r => [r.method, r]));
-        api.registerHttpRoute({
-          path,
-          auth: "plugin",
-          match: "exact",
-          handler: async (req: any, res: any) => {
-            const route = methodMap.get(req.method as "GET" | "POST" | "DELETE");
-            if (!route) {
-              writeJson(res, 405, { error: "method not allowed" });
-              return true;
-            }
-            const needsAuth = route.method !== "GET" || SENSITIVE_READ_PATHS.has(path);
-            if (needsAuth && _cfg?.mcp?.authToken) {
-              const provided = req.headers?.["x-auth-token"];
-              if (provided !== _cfg.mcp.authToken) {
-                writeJson(res, 401, { error: "unauthorized" });
-                return true;
-              }
-            }
-            try {
-              const params = await parseRequestParams(req, path);
-              const result = await route.handler(params);
-              writeJson(res, result.status, result.body);
-            } catch (err: any) {
-              writeJson(res, 500, { error: String(err?.message ?? err) });
-            }
-            return true;
-          },
-        });
-      }
-
-      // v2.3.2 阶段三: 配置热更新 — /api/reload 端点
-      api.registerHttpRoute({
-        path: "/api/reload",
-        auth: "plugin",
-        match: "exact",
-        handler: async (req: any, res: any) => {
-          try {
-            if (!_cfg) { writeJson(res, 503, { error: "plugin not initialized" }); return true; }
-            const { checkReloadAuth, normalizeReloadConfig, diffConfigSegments } = await import("./src/routes/reload.ts");
-            let body: any = {};
-            try {
-              const raw = await new Promise<string>((resolve, reject) => {
-                let data = "";
-                req.on("data", (chunk: string) => { data += chunk; });
-                req.on("end", () => resolve(data));
-                req.on("error", reject);
-              });
-              if (raw) body = JSON.parse(raw);
-            } catch { /* ignore */ }
-            const authResult = checkReloadAuth(_cfg, body?.authToken ?? req.headers?.["x-auth-token"]);
-            if (!authResult.ok) {
-              writeJson(res, authResult.status!, { error: authResult.error });
-              return true;
-            }
-            const newCfgRaw = api.config ?? {};
-            if (!newCfgRaw?.neo4j?.uri) {
-              writeJson(res, 400, { error: "new config missing neo4j.uri" });
-              return true;
-            }
-            const newCfg = normalizeReloadConfig(newCfgRaw);
-            const applied: Record<string, boolean> = {};
-            const diff = diffConfigSegments(_cfg, newCfg);
-            if (diff.neo4j) {
-              const driver2 = await getOrCreateDriver(newCfg, logger);
-              if (driver2) {
-                _driver = driver2;
-                const embedDimension = resolveEmbedDimension(newCfg);
-                try { await ensureSchema(driver2, embedDimension); } catch (err) {
-                  logger?.warn?.(`[graph-memory-pro] reload schema init: ${err}`);
-                }
-                applied.neo4j = true;
-              }
-            }
-            if (diff.llm) {
-              const runtimeLlm = api.runtime?.llm;
-              if (runtimeLlm && typeof runtimeLlm.complete === "function") {
-                _llm = createRuntimeCompleteFn(runtimeLlm, newCfg.llm, logger);
-              } else {
-                _llm = createCompleteFn(newCfg.llm);
-              }
-              applied.llm = true;
-            } else {
-              if (!_llm || _llm === createCompleteFn(newCfg.llm)) {
-                const runtimeLlm = api.runtime?.llm;
-                if (runtimeLlm && typeof runtimeLlm.complete === "function") {
-                  _llm = createRuntimeCompleteFn(runtimeLlm, newCfg.llm, logger);
-                  applied.llmRuntimeDetected = true;
-                }
-              }
-            }
-            if (diff.embedding) {
-              _embed = newCfg.embedding ? createEmbedFn(newCfg.embedding) : null;
-              applied.embedding = true;
-            }
-            const bgChanged = diff.background;
-            Object.assign(_cfg, newCfg);
-            applied.inPlace = true;
-            if (_recaller) {
-              if (_embed) _recaller.setEmbedFn(_embed);
-              if (diff.llm && _cfg.judge?.enabled !== false) {
-                const { JudgeManager } = await import("./src/recaller/judge.ts");
-                const jm = new JudgeManager(_cfg.judge, _llm ?? undefined);
-                _recaller.setJudgeManager(jm);
-              }
-            }
-            initRoutes(_driver!, _cfg, _llm ?? undefined, _embed ?? undefined, _recaller ?? undefined);
-            if (bgChanged) {
-              applied.timers = false;
-              logger?.info?.("[graph-memory-pro] background interval changed, restart plugin to apply timer changes");
-            }
-            const { resetAllCircuitBreakers } = await import("./src/engine/circuit-breaker.ts");
-            resetAllCircuitBreakers();
-            logger?.info?.(`[graph-memory-pro] config reloaded: ${JSON.stringify(applied)}`);
-            writeJson(res, 200, { applied, version: VERSION });
-            return true;
-          } catch (err: any) {
-            logger?.error?.(`[graph-memory-pro] reload failed: ${err}`);
-            writeJson(res, 500, { error: err.message });
-            return true;
-          }
-        },
-      });
 
       logger?.info?.("[graph-memory-pro] initialized");
     }, { name: "graph-memory-pro-init" });
@@ -548,6 +414,7 @@ export default definePluginEntry({
     api.registerHook("gateway_stop", async () => {
       if (_extractorTimer) { clearInterval(_extractorTimer); _extractorTimer = null; }
       if (_maintenanceTimer) { clearInterval(_maintenanceTimer); _maintenanceTimer = null; }
+      if (_apiServerHandle) { try { await _apiServerHandle.close(); } catch { /* ignore */ } _apiServerHandle = null; }
       closeDriver();
       _driver = null;
       _cfg = null;

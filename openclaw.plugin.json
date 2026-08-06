@@ -687,6 +687,30 @@
             "default": []
           }
         }
+      },
+      "apiServer": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "port": {
+            "type": "integer",
+            "default": 7850,
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "host": {
+            "type": "string",
+            "default": "127.0.0.1"
+          },
+          "authToken": {
+            "type": "string",
+            "default": ""
+          }
+        }
       }
     }
   }
