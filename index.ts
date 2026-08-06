@@ -503,26 +503,83 @@ export default definePluginEntry({
     // P0-4: HTTP 路由通过 api.registerHttpRoute 注册
     //
     // 之前 initRoutes() 只初始化模块状态，路由从未注册到 Gateway。
+    // SDK handler 签名为 (req: IncomingMessage, res: ServerResponse) → boolean|void
     // ─────────────────────────────────────────────────────────────────
     const routes = getRoutes();
     // v2.3.3 SEC-1: 统一鉴权 — 写操作 + 敏感读操作（health/metrics/usage/doctor）需 authToken
     // 未配置 mcp.authToken 时允许本地访问（向后兼容）
     const SENSITIVE_READ_PATHS = new Set(["/api/health", "/api/metrics", "/api/usage", "/api/doctor"]);
+
+    // 辅助: 解析请求参数（query + path params + body）
+    const parseRequestParams = async (req: any, pathPattern: string): Promise<any> => {
+      const url = new URL(req.url ?? "/", `http://${req.headers?.host ?? "localhost"}`);
+      const params: any = {};
+      for (const [k, v] of url.searchParams) params[k] = v;
+      // 路径参数提取 (:id / :type)
+      const patParts = pathPattern.split("/");
+      const pathParts = url.pathname.split("/");
+      for (let i = 0; i < patParts.length; i++) {
+        if (patParts[i].startsWith(":")) params[patParts[i].slice(1)] = pathParts[i] ?? "";
+      }
+      // POST/PUT/DELETE body
+      if (req.method !== "GET" && req.method !== "HEAD") {
+        try {
+          const raw = await new Promise<string>((resolve, reject) => {
+            let data = "";
+            req.on("data", (chunk: string) => { data += chunk; });
+            req.on("end", () => resolve(data));
+            req.on("error", reject);
+          });
+          if (raw) {
+            try { Object.assign(params, JSON.parse(raw)); } catch { /* ignore */ }
+          }
+        } catch { /* ignore */ }
+      }
+      return params;
+    };
+
+    // 辅助: 写 JSON 响应
+    const writeJson = (res: any, status: number, body: any) => {
+      res.setHeader("Content-Type", "application/json");
+      res.writeHead(status);
+      res.end(JSON.stringify(body));
+    };
+
+    // 按 path 分组（处理 /api/maintain/dirty-nodes 同时有 GET 和 DELETE）
+    const routesByPath = new Map<string, typeof routes[0][]>();
     for (const route of routes) {
-      const needsAuth = route.method !== "GET" || SENSITIVE_READ_PATHS.has(route.path);
+      if (!routesByPath.has(route.path)) routesByPath.set(route.path, []);
+      routesByPath.get(route.path)!.push(route);
+    }
+
+    for (const [path, pathRoutes] of routesByPath) {
+      const methodMap = new Map(pathRoutes.map(r => [r.method, r]));
       api.registerHttpRoute({
-        method: route.method,
-        path: route.path,
+        path,
         auth: "plugin",
-        handler: async (req: any) => {
+        match: "exact",
+        handler: async (req: any, res: any) => {
+          const route = methodMap.get(req.method as "GET" | "POST" | "DELETE");
+          if (!route) {
+            writeJson(res, 405, { error: "method not allowed" });
+            return true;
+          }
+          const needsAuth = route.method !== "GET" || SENSITIVE_READ_PATHS.has(path);
           if (needsAuth && _cfg?.mcp?.authToken) {
-            const provided = req?.headers?.["x-auth-token"] ?? req?.body?.authToken;
+            const provided = req.headers?.["x-auth-token"];
             if (provided !== _cfg.mcp.authToken) {
-              return { status: 401, body: { error: "unauthorized" } };
+              writeJson(res, 401, { error: "unauthorized" });
+              return true;
             }
           }
-          const result = await route.handler(req?.params ?? req?.query ?? {});
-          return { status: result.status, body: result.body };
+          try {
+            const params = await parseRequestParams(req, path);
+            const result = await route.handler(params);
+            writeJson(res, result.status, result.body);
+          } catch (err: any) {
+            writeJson(res, 500, { error: String(err?.message ?? err) });
+          }
+          return true;
         },
       });
     }
@@ -535,25 +592,39 @@ export default definePluginEntry({
     // 鉴权：通过 body.authToken 校验（与 mcp.authToken 一致），未配置 authToken 时允许本地访问。
     // ─────────────────────────────────────────────────────────────────
     api.registerHttpRoute({
-      method: "POST",
       path: "/api/reload",
       auth: "plugin",
-      handler: async (req: any) => {
+      match: "exact",
+      handler: async (req: any, res: any) => {
         try {
-          if (!_cfg) return { status: 503, body: { error: "plugin not initialized" } };
+          if (!_cfg) { writeJson(res, 503, { error: "plugin not initialized" }); return true; }
 
           const { checkReloadAuth, normalizeReloadConfig, diffConfigSegments } = await import("./src/routes/reload.ts");
 
+          // 解析 body
+          let body: any = {};
+          try {
+            const raw = await new Promise<string>((resolve, reject) => {
+              let data = "";
+              req.on("data", (chunk: string) => { data += chunk; });
+              req.on("end", () => resolve(data));
+              req.on("error", reject);
+            });
+            if (raw) body = JSON.parse(raw);
+          } catch { /* ignore */ }
+
           // 鉴权：若配置了 authToken，请求需携带匹配的 token
-          const authResult = checkReloadAuth(_cfg, req?.body?.authToken ?? req?.headers?.["x-auth-token"]);
+          const authResult = checkReloadAuth(_cfg, body?.authToken ?? req.headers?.["x-auth-token"]);
           if (!authResult.ok) {
-            return { status: authResult.status!, body: { error: authResult.error } };
+            writeJson(res, authResult.status!, { error: authResult.error });
+            return true;
           }
 
           // 从 SDK 重新获取配置
           const newCfgRaw = api.config ?? {};
           if (!newCfgRaw?.neo4j?.uri) {
-            return { status: 400, body: { error: "new config missing neo4j.uri" } };
+            writeJson(res, 400, { error: "new config missing neo4j.uri" });
+            return true;
           }
           const newCfg = normalizeReloadConfig(newCfgRaw);
 
@@ -586,7 +657,6 @@ export default definePluginEntry({
             applied.llm = true;
           } else {
             // v2.3.4 SDK-1: 即使 llm 配置未变，也检查 runtime LLM 是否首次可用
-            // （初始化时 api.runtime 可能未就绪，reload 时重试探测）
             if (!_llm || _llm === createCompleteFn(newCfg.llm)) {
               const runtimeLlm = api.runtime?.llm;
               if (runtimeLlm && typeof runtimeLlm.complete === "function") {
@@ -633,10 +703,12 @@ export default definePluginEntry({
           resetAllCircuitBreakers();
 
           logger?.info?.(`[graph-memory-pro] config reloaded: ${JSON.stringify(applied)}`);
-          return { status: 200, body: { applied, version: VERSION } };
+          writeJson(res, 200, { applied, version: VERSION });
+          return true;
         } catch (err: any) {
           logger?.error?.(`[graph-memory-pro] reload failed: ${err}`);
-          return { status: 500, body: { error: err.message } };
+          writeJson(res, 500, { error: err.message });
+          return true;
         }
       },
     });
