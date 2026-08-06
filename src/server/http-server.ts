@@ -108,7 +108,7 @@ export async function startApiServer(
 
     // 路由匹配
     let matched: RouteMatcher | null = null;
-    let matchedParams: Record<string, string> = {};
+    const matchedParams: Record<string, string> = {};
 
     for (const matcher of routeMatchers) {
       const m = pathname.match(matcher.regex);

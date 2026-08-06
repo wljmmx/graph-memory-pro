@@ -21,7 +21,7 @@
 import { definePluginEntry, buildJsonPluginConfigSchema } from "openclaw/plugin-sdk/plugin-entry";
 import { Type } from "typebox";
 import type { Driver } from "neo4j-driver";
-import type { GmConfig, GmNode } from "./src/types.ts";
+import type { GmConfig } from "./src/types.ts";
 import type { CompleteFn } from "./src/engine/llm.ts";
 import type { EmbedFn } from "./src/engine/embed.ts";
 import { createCompleteFn, createRuntimeCompleteFn } from "./src/engine/llm.ts";
@@ -32,7 +32,6 @@ import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
 import { runMaintenance } from "./src/graph/maintenance.ts";
 import { reEmbedNodes } from "./src/graph/reembed.ts";
-import { VERSION } from "./src/version.ts";
 import { setExternalLogger } from "./src/logger.ts";
 import { setTimingEnabled } from "./src/timing.ts";
 import { extractInBackground } from "./src/services/extract-service.ts";  // v2.3.4 ARCH-1: 从 index.ts 拆出
@@ -384,7 +383,7 @@ export default definePluginEntry({
     setExternalLogger(api.logger ?? null);
 
     // ── Gateway 启动时初始化 ──────────────────────
-    api.registerHook("gateway_start", async (event: any) => {
+    api.registerHook("gateway_start", async (_event: any) => {
       // P0-2: 配置优先从 SDK 注入，移除 fs.readFileSync
       // SDK 合规：api.pluginConfig 是插件配置的正确来源（InternalHookEvent 不含 config 字段）
       const eventCfg = api.pluginConfig ?? api.config;
