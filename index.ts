@@ -282,7 +282,7 @@ export default definePluginEntry({
     setExternalLogger(api.logger ?? null);
 
     // ── Gateway 启动时初始化 ──────────────────────
-    api.on("gateway_start", async (event: any) => {
+    api.registerHook("gateway_start", async (event: any) => {
       // P0-2: 配置优先从 SDK 注入，移除 fs.readFileSync
       const eventCfg = event?.config ?? event?.pluginConfig ?? api.config;
       if (!eventCfg?.neo4j?.uri) {
@@ -379,7 +379,7 @@ export default definePluginEntry({
     });
 
     // ── Gateway 停止时清理 ──────────────────────
-    api.on("gateway_stop", async () => {
+    api.registerHook("gateway_stop", async () => {
       if (_extractorTimer) { clearInterval(_extractorTimer); _extractorTimer = null; }
       if (_maintenanceTimer) { clearInterval(_maintenanceTimer); _maintenanceTimer = null; }
       closeDriver();
