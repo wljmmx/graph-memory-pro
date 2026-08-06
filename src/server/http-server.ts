@@ -28,6 +28,14 @@ export interface ApiServerHandle {
   close(): Promise<void>;
 }
 
+interface RouteMatcher {
+  regex: RegExp;
+  path: string;
+  paramNames: string[];
+  method: string;
+  handler: (params: any) => Promise<{ status: number; body: any }>;
+}
+
 /**
  * 启动独立 HTTP API 服务器
  */
@@ -35,6 +43,7 @@ export async function startApiServer(
   driver: Driver,
   cfg: GmConfig,
   config: ApiServerConfig,
+  logger: { info?: (msg: string) => void; error?: (msg: string) => void; warn?: (msg: string) => void },
   llm?: CompleteFn,
   embed?: EmbedFn,
   recaller?: Recaller,
@@ -43,19 +52,17 @@ export async function startApiServer(
   const host = config.host ?? "127.0.0.1";
   const authToken = config.authToken;
 
+  logger.info?.(`[graph-memory-pro] API server starting on http://${host}:${port} ...`);
+
   // 初始化路由模块状态
   initRoutes(driver, cfg, llm, embed, recaller);
 
   const routes = getRoutes();
+  logger.info?.(`[graph-memory-pro] API server loaded ${routes.length} routes`);
 
   // 构建路由匹配表
   // 将 /api/nodes/:id 转为正则 /^\/api\/nodes\/([^/]+)$/
-  const routeMatchers: Array<{
-    regex: RegExp;
-    paramNames: string[];
-    method: string;
-    handler: (params: any) => Promise<{ status: number; body: any }>;
-  }> = [];
+  const routeMatchers: RouteMatcher[] = [];
 
   for (const route of routes) {
     const paramNames: string[] = [];
@@ -67,6 +74,7 @@ export async function startApiServer(
       .replace(/\//g, "\\/");
     routeMatchers.push({
       regex: new RegExp(`^${regexStr}$`),
+      path: route.path,
       paramNames,
       method: route.method,
       handler: route.handler,
@@ -99,7 +107,7 @@ export async function startApiServer(
     }
 
     // 路由匹配
-    let matched: typeof routeMatchers[0] | null = null;
+    let matched: RouteMatcher | null = null;
     let matchedParams: Record<string, string> = {};
 
     for (const matcher of routeMatchers) {
@@ -129,8 +137,8 @@ export async function startApiServer(
       return;
     }
 
-    // 鉴权检查
-    const needsAuth = matched.method !== "GET" || SENSITIVE_READ_PATHS.has(matched.handler.toString());
+    // 鉴权检查（修复：用 path 而非 handler.toString()）
+    const needsAuth = matched.method !== "GET" || SENSITIVE_READ_PATHS.has(matched.path);
     if (needsAuth && authToken) {
       const provided = req.headers["x-auth-token"] as string | undefined;
       if (provided !== authToken) {
@@ -175,20 +183,39 @@ export async function startApiServer(
 
   // 启动监听
   await new Promise<void>((resolve, reject) => {
-    httpServer.on("error", reject);
+    httpServer.on("error", (err: NodeJS.ErrnoException) => {
+      logger.error?.(`[graph-memory-pro] API server listen error: ${err.message}`);
+      reject(err);
+    });
     httpServer.listen(port, host, () => {
-      console.log(`[graph-memory-pro] API server listening on http://${host}:${port}`);
+      logger.info?.(`[graph-memory-pro] API server listening on http://${host}:${port}`);
       resolve();
     });
   });
 
+  // 自检：验证服务可达
+  try {
+    const resp = await fetch(`http://${host}:${port}/health`, {
+      signal: AbortSignal.timeout(3000),
+    });
+    if (resp.ok) {
+      const body = await resp.text();
+      logger.info?.(`[graph-memory-pro] API server self-check OK: ${body}`);
+    } else {
+      logger.warn?.(`[graph-memory-pro] API server self-check returned ${resp.status}`);
+    }
+  } catch (err: any) {
+    logger.warn?.(`[graph-memory-pro] API server self-check failed: ${err.message}`);
+  }
+
   return {
     httpServer,
     async close() {
+      logger.info?.("[graph-memory-pro] API server closing...");
       await new Promise<void>((resolve, reject) => {
         httpServer.close((err) => err ? reject(err) : resolve());
       });
-      console.log("[graph-memory-pro] API server closed");
+      logger.info?.("[graph-memory-pro] API server closed");
     },
   };
 }

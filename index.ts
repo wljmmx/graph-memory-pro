@@ -32,7 +32,6 @@ import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
 import { runMaintenance } from "./src/graph/maintenance.ts";
 import { reEmbedNodes } from "./src/graph/reembed.ts";
-import { initRoutes } from "./src/routes/crud.ts";
 import { VERSION } from "./src/version.ts";
 import { setExternalLogger } from "./src/logger.ts";
 import { setTimingEnabled } from "./src/timing.ts";
@@ -310,6 +309,7 @@ export default definePluginEntry({
         dedupThreshold: pluginConfig.dedupThreshold ?? 0.90,
         pagerankDamping: pluginConfig.pagerankDamping ?? 0.85,
         pagerankIterations: pluginConfig.pagerankIterations ?? 20,
+        apiServer: pluginConfig.apiServer ?? { enabled: true, port: 7850, host: "127.0.0.1" },
       };
 
       // 1. 连接 Neo4j
@@ -379,10 +379,7 @@ export default definePluginEntry({
         setTimingEnabled(true);
       }
 
-      // 5. 初始化 HTTP 路由模块状态
-      initRoutes(driver, _cfg, _llm ?? undefined, _embed ?? undefined, _recaller ?? undefined);
-
-      // 6. 启动独立 HTTP API 服务器（不依赖 Gateway 路由注册）
+      // 5. 启动独立 HTTP API 服务器（不依赖 Gateway 路由注册）
       const apiServerCfg = _cfg.apiServer;
       if (apiServerCfg?.enabled !== false) {
         try {
@@ -395,16 +392,16 @@ export default definePluginEntry({
               host: apiServerCfg?.host ?? "127.0.0.1",
               authToken: apiServerCfg?.authToken,
             },
+            logger,
             _llm ?? undefined,
             _embed ?? undefined,
             _recaller ?? undefined,
           );
-          const port = apiServerCfg?.port ?? 7850;
-          const host = apiServerCfg?.host ?? "127.0.0.1";
-          logger?.info?.(`[graph-memory-pro] API server started on http://${host}:${port}`);
         } catch (err) {
           logger?.error?.(`[graph-memory-pro] API server failed to start: ${err}`);
         }
+      } else {
+        logger?.info?.("[graph-memory-pro] API server disabled via config (apiServer.enabled=false)");
       }
 
       logger?.info?.("[graph-memory-pro] initialized");
