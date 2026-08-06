@@ -144,7 +144,7 @@ async function autoStartApiServer(): Promise<void> {
   }
 
   // 快速轮询未就绪，降级为慢速持续重试（driver 可能在 gateway_start 之后才初始化）
-  console.log("[graph-memory-pro] API server auto-start: driver not ready after 30s, switching to slow retry (every 10s)");
+  console.warn("[graph-memory-pro] API server auto-start: driver not ready after 30s, switching to slow retry (every 10s)");
   _autoStartRetryTimer = setInterval(async () => {
     if (_apiServerAutoStarted) {
       if (_autoStartRetryTimer) { clearInterval(_autoStartRetryTimer); _autoStartRetryTimer = null; }
@@ -174,7 +174,7 @@ async function autoStartApiServer(): Promise<void> {
           { enabled: true, port: 7850, host: "127.0.0.1" },
           logger,
         );
-        console.log("[graph-memory-pro] API server auto-started (module-level, slow retry)");
+        console.warn("[graph-memory-pro] API server auto-started (module-level, slow retry)");
       } catch (err) {
         console.error(`[graph-memory-pro] API server auto-start failed (slow retry): ${err}`);
       }
