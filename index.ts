@@ -26,7 +26,7 @@ import type { CompleteFn } from "./src/engine/llm.ts";
 import type { EmbedFn } from "./src/engine/embed.ts";
 import { createCompleteFn, createRuntimeCompleteFn } from "./src/engine/llm.ts";
 import { createEmbedFn } from "./src/engine/embed.ts";
-import { initDriver, closeDriver, verifyWithRetry } from "./src/store/db.ts";
+import { initDriver, closeDriver, verifyWithRetry, getDriver, getConfig } from "./src/store/db.ts";
 import { ensureSchema, getNodeCount, getEdgeCount, searchNodes, upsertNode, findById } from "./src/store/store.ts";
 import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
@@ -52,6 +52,7 @@ let _extractorRunning = false;
 let _maintenanceRunning = false;
 let _mcpServerHandle: { close(): Promise<void> } | null = null;
 let _apiServerHandle: { close(): Promise<void> } | null = null;
+let _apiServerAutoStarted = false;
 
 // ─── 辅助函数 ──────────────────────────────────────────
 
@@ -88,6 +89,62 @@ async function getOrCreateDriver(cfg: GmConfig, logger: any): Promise<Driver | n
     return null;
   }
 }
+
+// ─── 模块级自动启动 API 服务器 ──────────────────────
+//
+// graph-memory-pro 可能被 graph-adapter 作为库导入（不走 register()），
+// 也可能被 Gateway 作为插件加载。无论哪种情况，都需要在 Driver 就绪后
+// 自动启动独立 HTTP API 服务器。
+//
+// 轮询检测 Driver 是否已初始化（由 graph-adapter 或 gateway_start 设置），
+// 最多等待 30 秒。
+
+async function autoStartApiServer(): Promise<void> {
+  if (_apiServerAutoStarted) return;
+
+  const MAX_ATTEMPTS = 15;
+  const POLL_MS = 2000;
+
+  for (let i = 0; i < MAX_ATTEMPTS; i++) {
+    const driver = getDriver();
+    if (driver) {
+      _apiServerAutoStarted = true;
+      try {
+        // 使用已存储的 Neo4j 配置 + 默认 apiServer 配置
+        const neo4jCfg = getConfig();
+        const cfg: GmConfig = {
+          neo4j: neo4jCfg ?? { uri: "bolt://localhost:37687", user: "neo4j", password: "" },
+          compactTurnCount: 6,
+          recallMaxNodes: 6,
+          recallMaxDepth: 2,
+          freshTailCount: 10,
+          dedupThreshold: 0.90,
+          pagerankDamping: 0.85,
+          pagerankIterations: 20,
+          apiServer: { enabled: true, port: 7850, host: "127.0.0.1" },
+        };
+
+        const { startApiServer } = await import("./src/server/http-server.ts");
+        const logger = { info: console.log, error: console.error, warn: console.warn };
+        _apiServerHandle = await startApiServer(
+          driver, cfg,
+          { enabled: true, port: 7850, host: "127.0.0.1" },
+          logger,
+        );
+        console.log("[graph-memory-pro] API server auto-started (module-level)");
+        return;
+      } catch (err) {
+        console.error(`[graph-memory-pro] API server auto-start failed: ${err}`);
+      }
+      return;
+    }
+    await new Promise(r => setTimeout(r, POLL_MS));
+  }
+  console.warn("[graph-memory-pro] API server auto-start: driver not available after 30s, giving up");
+}
+
+// 在模块加载时触发自动启动（不阻塞模块导入）
+autoStartApiServer();
 
 // v2.3.4 ARCH-1: extractInBackground 已拆分到 src/services/extract-service.ts
 
@@ -380,28 +437,34 @@ export default definePluginEntry({
       }
 
       // 5. 启动独立 HTTP API 服务器（不依赖 Gateway 路由注册）
-      const apiServerCfg = _cfg.apiServer;
-      if (apiServerCfg?.enabled !== false) {
-        try {
-          const { startApiServer } = await import("./src/server/http-server.ts");
-          _apiServerHandle = await startApiServer(
-            driver, _cfg,
-            {
-              enabled: true,
-              port: apiServerCfg?.port ?? 7850,
-              host: apiServerCfg?.host ?? "127.0.0.1",
-              authToken: apiServerCfg?.authToken,
-            },
-            logger,
-            _llm ?? undefined,
-            _embed ?? undefined,
-            _recaller ?? undefined,
-          );
-        } catch (err) {
-          logger?.error?.(`[graph-memory-pro] API server failed to start: ${err}`);
-        }
+      // 如果模块级自动启动已经启动了，则跳过
+      if (_apiServerAutoStarted) {
+        logger?.info?.("[graph-memory-pro] API server already auto-started at module level, skipping gateway init");
       } else {
-        logger?.info?.("[graph-memory-pro] API server disabled via config (apiServer.enabled=false)");
+        const apiServerCfg = _cfg.apiServer;
+        if (apiServerCfg?.enabled !== false) {
+          try {
+            const { startApiServer } = await import("./src/server/http-server.ts");
+            _apiServerHandle = await startApiServer(
+              driver, _cfg,
+              {
+                enabled: true,
+                port: apiServerCfg?.port ?? 7850,
+                host: apiServerCfg?.host ?? "127.0.0.1",
+                authToken: apiServerCfg?.authToken,
+              },
+              logger,
+              _llm ?? undefined,
+              _embed ?? undefined,
+              _recaller ?? undefined,
+            );
+            _apiServerAutoStarted = true;
+          } catch (err) {
+            logger?.error?.(`[graph-memory-pro] API server failed to start: ${err}`);
+          }
+        } else {
+          logger?.info?.("[graph-memory-pro] API server disabled via config (apiServer.enabled=false)");
+        }
       }
 
       logger?.info?.("[graph-memory-pro] initialized");
