@@ -542,7 +542,7 @@ export default definePluginEntry({
       });
 
       logger?.info?.("[graph-memory-pro] initialized");
-    });
+    }, { name: "graph-memory-pro-init" });
 
     // ── Gateway 停止时清理 ──────────────────────
     api.registerHook("gateway_stop", async () => {
@@ -555,7 +555,7 @@ export default definePluginEntry({
       _embed = null;
       _recaller = null;
       _extractor = null;
-    });
+    }, { name: "graph-memory-pro-cleanup" });
 
     // ─────────────────────────────────────────────────────────────────
     // P0-1: 移除 before_prompt_build 钩子
