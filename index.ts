@@ -96,21 +96,23 @@ async function getOrCreateDriver(cfg: GmConfig, logger: any): Promise<Driver | n
 // 也可能被 Gateway 作为插件加载。无论哪种情况，都需要在 Driver 就绪后
 // 自动启动独立 HTTP API 服务器。
 //
-// 轮询检测 Driver 是否已初始化（由 graph-adapter 或 gateway_start 设置），
-// 最多等待 30 秒。
+// 策略：先密集轮询 30 秒（2s 间隔），若仍未就绪则降级为 10s 间隔持续重试，
+// 确保 driver 在 gateway_start 之后初始化时也能最终启动。
+
+let _autoStartRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
 async function autoStartApiServer(): Promise<void> {
   if (_apiServerAutoStarted) return;
 
-  const MAX_ATTEMPTS = 15;
-  const POLL_MS = 2000;
+  const FAST_ATTEMPTS = 15;
+  const FAST_POLL_MS = 2000;
+  const SLOW_POLL_MS = 10000;
 
-  for (let i = 0; i < MAX_ATTEMPTS; i++) {
+  for (let i = 0; i < FAST_ATTEMPTS; i++) {
     const driver = getDriver();
     if (driver) {
       _apiServerAutoStarted = true;
       try {
-        // 使用已存储的 Neo4j 配置 + 默认 apiServer 配置
         const neo4jCfg = getConfig();
         const cfg: GmConfig = {
           neo4j: neo4jCfg ?? { uri: "bolt://localhost:37687", user: "neo4j", password: "" },
@@ -138,9 +140,46 @@ async function autoStartApiServer(): Promise<void> {
       }
       return;
     }
-    await new Promise(r => setTimeout(r, POLL_MS));
+    await new Promise(r => setTimeout(r, FAST_POLL_MS));
   }
-  console.warn("[graph-memory-pro] API server auto-start: driver not available after 30s, giving up");
+
+  // 快速轮询未就绪，降级为慢速持续重试（driver 可能在 gateway_start 之后才初始化）
+  console.log("[graph-memory-pro] API server auto-start: driver not ready after 30s, switching to slow retry (every 10s)");
+  _autoStartRetryTimer = setInterval(async () => {
+    if (_apiServerAutoStarted) {
+      if (_autoStartRetryTimer) { clearInterval(_autoStartRetryTimer); _autoStartRetryTimer = null; }
+      return;
+    }
+    const driver = getDriver();
+    if (driver) {
+      _apiServerAutoStarted = true;
+      if (_autoStartRetryTimer) { clearInterval(_autoStartRetryTimer); _autoStartRetryTimer = null; }
+      try {
+        const neo4jCfg = getConfig();
+        const cfg: GmConfig = {
+          neo4j: neo4jCfg ?? { uri: "bolt://localhost:37687", user: "neo4j", password: "" },
+          compactTurnCount: 6,
+          recallMaxNodes: 6,
+          recallMaxDepth: 2,
+          freshTailCount: 10,
+          dedupThreshold: 0.90,
+          pagerankDamping: 0.85,
+          pagerankIterations: 20,
+          apiServer: { enabled: true, port: 7850, host: "127.0.0.1" },
+        };
+        const { startApiServer } = await import("./src/server/http-server.ts");
+        const logger = { info: console.log, error: console.error, warn: console.warn };
+        _apiServerHandle = await startApiServer(
+          driver, cfg,
+          { enabled: true, port: 7850, host: "127.0.0.1" },
+          logger,
+        );
+        console.log("[graph-memory-pro] API server auto-started (module-level, slow retry)");
+      } catch (err) {
+        console.error(`[graph-memory-pro] API server auto-start failed (slow retry): ${err}`);
+      }
+    }
+  }, SLOW_POLL_MS);
 }
 
 // 在模块加载时触发自动启动（不阻塞模块导入）
@@ -475,6 +514,7 @@ export default definePluginEntry({
     api.registerHook("gateway_stop", async () => {
       if (_extractorTimer) { clearInterval(_extractorTimer); _extractorTimer = null; }
       if (_maintenanceTimer) { clearInterval(_maintenanceTimer); _maintenanceTimer = null; }
+      if (_autoStartRetryTimer) { clearInterval(_autoStartRetryTimer); _autoStartRetryTimer = null; }
       if (_apiServerHandle) { try { await _apiServerHandle.close(); } catch { /* ignore */ } _apiServerHandle = null; }
       closeDriver();
       _driver = null;
