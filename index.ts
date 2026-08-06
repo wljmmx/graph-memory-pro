@@ -347,7 +347,8 @@ export default definePluginEntry({
     // ── Gateway 启动时初始化 ──────────────────────
     api.registerHook("gateway_start", async (event: any) => {
       // P0-2: 配置优先从 SDK 注入，移除 fs.readFileSync
-      const eventCfg = event?.config ?? event?.pluginConfig ?? api.config;
+      // SDK 合规：api.pluginConfig 是插件配置的正确来源（InternalHookEvent 不含 config 字段）
+      const eventCfg = api.pluginConfig ?? api.config;
       if (!eventCfg?.neo4j?.uri) {
         logger?.warn?.("[graph-memory-pro] No Neo4j config — plugin skipped");
         return;
@@ -642,36 +643,76 @@ export default definePluginEntry({
     // P1-1: 注册为 memory-core 的语料补充
     //
     // 让 memory_search 工具能搜索到 Neo4j 图谱节点，无需另建 gm_search。
+    //
+    // SDK 合规（v2.3.6）：
+    // - search(params): { query, maxResults, agentSessionKey } → MemoryCorpusSearchResult[]
+    // - get(params):    { lookup, fromLine, lineCount, agentSessionKey } → MemoryCorpusGetResult | null
     // ─────────────────────────────────────────────────────────────────
-    // v2.3.4 SDK-2: supplement 返回值显式类型标注，避免依赖 SDK 隐式约定
     api.registerMemoryCorpusSupplement({
-      async search(query: string, opts?: { limit?: number }): Promise<Array<{
-        id: string;
-        content: string;
-        metadata: Record<string, unknown>;
+      async search(params: {
+        query: string;
+        maxResults?: number;
+        agentSessionKey?: string;
+      }): Promise<Array<{
+        corpus: string;
+        path: string;
+        title?: string;
+        kind?: string;
+        score: number;
+        snippet: string;
+        id?: string;
+        startLine?: number;
+        endLine?: number;
+        citation?: string;
       }>> {
         if (!_driver) return [];
         try {
-          const limit = Math.min(opts?.limit ?? 5, 20);
-          const nodes = await searchNodes(_driver, query, limit);
+          const limit = Math.min(params.maxResults ?? 5, 20);
+          const nodes = await searchNodes(_driver, params.query, limit);
           return nodes.map(n => ({
+            corpus: "graph-memory-pro",
+            path: n.id,
+            title: n.name,
+            kind: n.type,
+            score: n.pagerank ?? 0,
+            snippet: `[${n.type}] ${n.name}: ${n.description}\n${n.content ?? ''}`,
             id: n.id,
-            content: `[${n.type}] ${n.name}: ${n.description}\n${n.content ?? ''}`,
-            metadata: {
-              source: "graph-memory-pro",
-              type: n.type,
-              pagerank: n.pagerank,
-              validatedCount: n.validatedCount,
-            },
           }));
         } catch {
           return [];
         }
       },
-      async read(id: string): Promise<GmNode | null> {
+      async get(params: {
+        lookup: string;
+        fromLine?: number;
+        lineCount?: number;
+        agentSessionKey?: string;
+      }): Promise<{
+        corpus: string;
+        path: string;
+        title?: string;
+        kind?: string;
+        content: string;
+        fromLine: number;
+        lineCount: number;
+        id?: string;
+        provenanceLabel?: string;
+        sourceType?: string;
+      } | null> {
         if (!_driver) return null;
         try {
-          return await findById(_driver, id);
+          const n = await findById(_driver, params.lookup);
+          if (!n) return null;
+          return {
+            corpus: "graph-memory-pro",
+            path: n.id,
+            title: n.name,
+            kind: n.type,
+            content: `[${n.type}] ${n.name}: ${n.description}\n${n.content ?? ''}`,
+            fromLine: 0,
+            lineCount: 0,
+            id: n.id,
+          };
         } catch {
           return null;
         }
