@@ -138,10 +138,9 @@ export interface GmConfig {
 
   /** G-6 冷启动策略 */
   warmup?: {
-    /** M 矩阵冷启动阈值（累计反馈数，默认 100） */
+    /** M 矩阵冷启动阈值（累计反馈数，默认 40，v2.3.5 B1 从 100 降低） */
     warmupFeedbacks?: number;
-    /** 裁判冷启动阈值（默认 50） */
-    judgeWarmupFeedbacks?: number;
+    /** v2.3.5: judgeWarmupFeedbacks 已迁移到 judge 段，不再在此处定义 */
   };
 
   // ── v2.1.2 第三批 在线学习 + 可进化嵌入 + 重要性评分 ────────────

@@ -513,6 +513,7 @@ export default definePluginEntry({
       baseURL: Type.Optional(Type.String({ default: "" })),
       model: Type.Optional(Type.String({ default: "" })),
       keepAlive: Type.Optional(Type.Union([Type.String({ default: "" }), Type.Number({ default: -1 })])),
+      maxConcurrency: Type.Optional(Type.Number({ default: 1, description: "v2.3.2 阶段二: 最大并发请求数（默认 1 for Ollama 本地，可调高 for 云端 API）" })),
     })),
     embedding: Type.Optional(Type.Object({
       apiKey: Type.Optional(Type.String({ default: "" })),
@@ -520,6 +521,9 @@ export default definePluginEntry({
       model: Type.Optional(Type.String({ default: "" })),
       dimensions: Type.Optional(Type.Number({ default: 1024 })),
       keepAlive: Type.Optional(Type.Union([Type.String({ default: "" }), Type.Number({ default: -1 })])),
+      cacheSize: Type.Optional(Type.Number({ default: 256, description: "v2.3.2 阶段二: embed LRU 缓存容量（默认 256，0 禁用缓存）" })),
+      cacheTtlMs: Type.Optional(Type.Number({ default: 600_000, description: "v2.3.2 阶段二: embed LRU 缓存 TTL ms（默认 10min，0 禁用缓存）" })),
+      options: Type.Optional(Type.Object({}, { additionalProperties: true, default: {} })),
     })),
     timing: Type.Optional(Type.Object({
       enabled: Type.Boolean({ default: false }),
@@ -584,6 +588,11 @@ export default definePluginEntry({
     feedback: Type.Optional(Type.Object({
       enabled: Type.Optional(Type.Boolean({ default: true })),
       retentionDays: Type.Optional(Type.Number({ default: 90 })),
+    })),
+    autoFeedback: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true, description: "v2.3.5 B1: agent_end 自动反馈采集，破除冷启动死循环" })),
+      trackGetExpansion: Type.Optional(Type.Boolean({ default: true })),
+      maxRecallRecordsPerSession: Type.Optional(Type.Number({ default: 5 })),
     })),
     warmup: Type.Optional(Type.Object({
       // v2.3.5: judgeWarmupFeedbacks 已迁移到 judge 段（避免冗余）

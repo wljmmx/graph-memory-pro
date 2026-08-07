@@ -11,6 +11,7 @@
       "gm_maintain",
       "gm_reembed",
       "gm_feedback",
+      "gm_bootstrap",
       "gm_benchmark",
       "gm_tune"
     ]
@@ -152,6 +153,12 @@
             ],
             "default": "",
             "description": "Ollama keep_alive 参数（仅 Ollama 识别，OpenAI 会忽略）。-1 永久驻留，5m/1h 等字符串表示 ttl"
+          },
+          "maxConcurrency": {
+            "type": "integer",
+            "default": 1,
+            "minimum": 1,
+            "description": "v2.3.2 阶段二: 最大并发请求数（默认 1 for Ollama 本地，可调高 for 云端 API）"
           }
         }
       },
@@ -181,6 +188,24 @@
           "apiKey": {
             "type": "string",
             "default": ""
+          },
+          "cacheSize": {
+            "type": "integer",
+            "default": 256,
+            "minimum": 0,
+            "description": "v2.3.2 阶段二: embed LRU 缓存容量（默认 256，0 禁用缓存）"
+          },
+          "cacheTtlMs": {
+            "type": "integer",
+            "default": 600000,
+            "minimum": 0,
+            "description": "v2.3.2 阶段二: embed LRU 缓存 TTL ms（默认 10min，0 禁用缓存）"
+          },
+          "options": {
+            "type": "object",
+            "additionalProperties": true,
+            "default": {},
+            "description": "透传给 Ollama /api/embed 的额外 options（如 num_ctx）"
           }
         }
       },
@@ -364,6 +389,29 @@
             "type": "integer",
             "default": 90,
             "minimum": 1
+          }
+        }
+      },
+      "autoFeedback": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "v2.3.5 B1: agent_end 自动反馈采集，破除冷启动死循环。默认启用，无需手动 gm_feedback。",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "是否启用自动反馈采集"
+          },
+          "trackGetExpansion": {
+            "type": "boolean",
+            "default": true,
+            "description": "是否记录 get() 展开作为强使用信号"
+          },
+          "maxRecallRecordsPerSession": {
+            "type": "integer",
+            "default": 5,
+            "minimum": 1,
+            "description": "单 session 最大召回缓存条数"
           }
         }
       },
