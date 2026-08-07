@@ -52,6 +52,9 @@ let _maintenanceRunning = false;
 let _mcpServerHandle: { close(): Promise<void> } | null = null;
 let _apiServerHandle: { close(): Promise<void> } | null = null;
 let _apiServerAutoStarted = false;
+// 跟踪 API 服务器当前使用的 driver 实例
+// 当 gateway_start 替换了自建 driver 时，需要重启 API 服务器
+let _apiServerDriver: Driver | null = null;
 
 // ─── 辅助函数 ──────────────────────────────────────────
 
@@ -137,6 +140,7 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
   if (!_driver) {
     _driver = driver;
   }
+  _apiServerDriver = driver;
 
   try {
     const neo4jCfg = getConfig();
@@ -230,6 +234,7 @@ export function registerExternalDriver(driver: Driver): void {
   if (!_driver) {
     _driver = driver;
   }
+  _apiServerDriver = driver;
   console.log("[graph-memory-pro] external driver registered via registerExternalDriver()");
 }
 
@@ -532,10 +537,26 @@ export default definePluginEntry({
       }
 
       // 5. 启动独立 HTTP API 服务器（不依赖 Gateway 路由注册）
-      // 如果模块级自动启动已经启动了，则跳过
+      // 如果模块级自动启动已经启动了，检查 driver 是否一致
       if (_apiServerAutoStarted) {
-        logger?.info?.("[graph-memory-pro] API server already auto-started at module level, skipping gateway init");
-      } else {
+        // 关键修复：自启动可能用自建 driver（phase 2 self-init）启动了 API 服务器，
+        // 而 gateway_start 的 getOrCreateDriver → initDriver 已经关闭了那个 driver 并创建了新的。
+        // 此时 API 服务器仍持有已关闭的旧 driver 引用，必须重启。
+        if (_apiServerDriver && _apiServerDriver !== driver) {
+          logger?.info?.("[graph-memory-pro] API server was started with a different driver (self-init), restarting with gateway driver");
+          if (_apiServerHandle) {
+            try { await _apiServerHandle.close(); } catch { /* ignore */ }
+            _apiServerHandle = null;
+          }
+          _apiServerAutoStarted = false;
+          _apiServerDriver = null;
+          // 继续走下面的启动逻辑
+        } else {
+          logger?.info?.("[graph-memory-pro] API server already auto-started, skipping gateway init");
+        }
+      }
+
+      if (!_apiServerAutoStarted) {
         const apiServerCfg = _cfg.apiServer;
         if (apiServerCfg?.enabled !== false) {
           try {
@@ -554,6 +575,7 @@ export default definePluginEntry({
               _recaller ?? undefined,
             );
             _apiServerAutoStarted = true;
+            _apiServerDriver = driver;
           } catch (err) {
             logger?.error?.(`[graph-memory-pro] API server failed to start: ${err}`);
           }
