@@ -3,7 +3,9 @@
   "neo4j": {
     "uri": "bolt://localhost:7687",
     "user": "neo4j",
-    "password": "your-password-here"
+    "password": "your-password-here",
+    "maxConnectionPoolSize": 50,
+    "connectionAcquisitionTimeout": 10000
   },
   "llm": {
     "$comment": "Ollama LLM 端点：baseURL 必须含 /v1；Ollama 用法下 apiKey 替换为空字符串；OpenAI 用户改 baseURL 为 https://api.openai.com/v1 并填 sk-xxx",
@@ -27,7 +29,7 @@
   "pagerankDamping": 0.85,
   "pagerankIterations": 20,
   "compactTurnCount": 6,
-  "timing": { "enabled": false, "reportEveryN": 50 },
+  "timing": { "enabled": false, "reportEveryN": 50, "maxSamples": 1000 },
   "background": {
     "extractorIntervalMs": 60000,
     "maintenanceIntervalMs": 21600000
@@ -119,5 +121,11 @@
     "path": "/mcp",
     "authToken": "",
     "enabledTools": []
+  },
+  "apiServer": {
+    "enabled": true,
+    "port": 7850,
+    "host": "127.0.0.1",
+    "authToken": ""
   }
 }

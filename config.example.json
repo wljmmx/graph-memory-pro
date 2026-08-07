@@ -4,7 +4,9 @@
   "neo4j": {
     "uri": "bolt://localhost:37687",
     "user": "neo4j",
-    "password": "your-password"
+    "password": "your-password",
+    "maxConnectionPoolSize": 50,
+    "connectionAcquisitionTimeout": 10000
   },
   "llm": {
     "$comment": "OpenAI-compatible API。使用 Ollama 时设 baseURL 为 http://localhost:11434/v1（必须含 /v1），apiKey 留空；使用 OpenAI 时设 baseURL 为 https://api.openai.com/v1。注：当插件运行在 OpenClaw 容器内且 api.runtime.llm 可用时，会先探测主会话 provider：本地模型（ollama/lmstudio 等）优先用主会话；云端模型才回退到此处的 llm 配置。maxConcurrency 限制并发请求数（Ollama 默认 1 防级联超时，云端可调高）",
@@ -127,5 +129,12 @@
     "path": "/mcp",
     "authToken": "",
     "enabledTools": []
+  },
+  "apiServer": {
+    "$comment": "v2.3.0: 独立 HTTP API 服务器（dashboard / health / metrics / usage / reload）。默认启用端口 7850",
+    "enabled": true,
+    "port": 7850,
+    "host": "127.0.0.1",
+    "authToken": ""
   }
 }

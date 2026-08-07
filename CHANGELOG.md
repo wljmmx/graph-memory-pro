@@ -35,6 +35,21 @@
 
 `version.ts` / `package.json` / `openclaw.plugin.json` / `package-lock.json` 由 **2.3.3 → 2.3.5**，与 CHANGELOG 记录的 v2.3.4（架构优化）/ v2.3.5（冷启动 + LLM 鲁棒性 + 用量修复）已落地代码对齐。旧部署因版本号滞后导致 `dist/` 未含 v2.3.0 起新增的 `/api/usage` 路由。
 
+### Fixed — 配置 Schema 一致性（B4）
+
+交叉比对 [openclaw.plugin.json](openclaw.plugin.json) 配置 schema ↔ [src/types.ts](src/types.ts) `GmConfig` 接口 ↔ [config.example.json](config.example.json) + 3 档预设，发现并修复 10 处不一致：
+
+- **Schema 缺失项**（配置可用但 schema 未声明，Gateway UI 无法展示）：
+  - `autoFeedback` — types.ts / example / 预设均有定义，[openclaw.plugin.json](openclaw.plugin.json) 与 [index.ts](index.ts) TypeBox schema 均未声明。现已补全（enabled / trackGetExpansion / maxRecallRecordsPerSession）。
+  - `llm.maxConcurrency` — types.ts 定义，embed.ts 代码引用，但 schema 缺失。现已补全（默认 1）。
+  - `embedding.cacheSize` / `embedding.cacheTtlMs` — types.ts 定义，embed.ts 代码引用，但 schema 缺失。现已补全（默认 256 / 600000ms）。
+  - `embedding.options` — types.ts 定义，embed.ts 透传至 Ollama /api/embed，但 schema 缺失。现已补全（`additionalProperties: true` 透传对象）。
+- **types.ts 残留字段**：`warmup.judgeWarmupFeedbacks` 已在 B1 中迁移到 `judge` 段并从 schema / 示例中移除，但 types.ts 仍保留该字段，现已清理。
+- **示例/预设缺失项**（schema 已声明但示例未展示，用户无从知晓可用参数）：
+  - `apiServer` — schema 已定义但 config.example.json 与 3 档预设均未包含。现已补全（example/balanced/full 启用，minimal 关闭）。
+  - `neo4j.maxConnectionPoolSize` / `neo4j.connectionAcquisitionTimeout` — schema 已定义但 example 与预设均未包含。现已补全（默认 50 / 10000）。
+  - `timing.maxSamples` — schema 与 example 已定义但 balanced/full 预设缺失。现已补全（默认 1000）。
+
 ### Added — 集成测试
 
 - **TEST-1 smoke test 骨架**：新增 [test/smoke.test.ts](test/smoke.test.ts) + [docker-compose.smoke.yml](docker-compose.smoke.yml) + [vitest.smoke.config.ts](vitest.smoke.config.ts)，连接真实 Neo4j 验证 schema/写入/读取/向量索引/连接池计数。Neo4j 不可用时自动 skip，不影响主测试套件。通过 `npm run test:smoke` 运行。

@@ -3,7 +3,9 @@
   "neo4j": {
     "uri": "bolt://localhost:7687",
     "user": "neo4j",
-    "password": "your-password-here"
+    "password": "your-password-here",
+    "maxConnectionPoolSize": 50,
+    "connectionAcquisitionTimeout": 10000
   },
   "llm": {
     "$comment": "Ollama LLM 端点：baseURL 必须含 /v1；Ollama 用法下 apiKey 替换为空字符串；OpenAI 用户改 baseURL 为 https://api.openai.com/v1 并填 sk-xxx",
@@ -38,5 +40,6 @@
   "associationMatrix": { "enabled": false },
   "autoTuner": { "enabled": false },
   "mcp": { "enabled": false },
-  "benchmark": { "enabled": false }
+  "benchmark": { "enabled": false },
+  "apiServer": { "enabled": false }
 }
