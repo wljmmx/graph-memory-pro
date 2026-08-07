@@ -241,7 +241,27 @@ const { result } = await res.json();
 | GET | `/api/metrics` | Prometheus 指标导出（v2.2.0） |
 | GET | `/api/auto-tuner/state` | AutoTuner 调优状态（v2.2.0） |
 | GET | `/api/association-matrix/state` | 关联矩阵 M 状态（v2.2.0） |
+| GET | `/api/doctor` | 一次性自检：Neo4j/LLM/Embedding 三大依赖连通性 + 配置完整性（v2.3.0） |
+| GET | `/api/usage` | LLM token 用量统计（total/byProvider/byPurpose，内存累计，重启清零）（v2.3.0） |
+| GET | `/api/config` | 当前生效配置（敏感字段已脱敏） |
 | POST | `/api/reload` | 配置热更新（diff-based 部分重建 driver/llm/embed）（v2.3.2） |
+
+### LLM Token 用量
+
+`GET /api/usage` 返回进程级累计的 LLM token 用量，供 dashboard 成本监控：
+
+```json
+{
+  "version": "2.3.5",
+  "timestamp": "2026-08-07T10:00:00.000Z",
+  "total": { "calls": 12, "promptTokens": 1234, "completionTokens": 567, "totalTokens": 1801 },
+  "byProvider": { "config-llm": { "calls": 8, "totalTokens": 1200 }, "runtime-ollama": { "calls": 4, "totalTokens": 601 } },
+  "byPurpose": { "extract": { "calls": 6, "totalTokens": 900 }, "judge": { "calls": 4, "totalTokens": 601 }, "community": { "calls": 2, "totalTokens": 300 } },
+  "startedAt": "2026-08-07T09:00:00.000Z"
+}
+```
+
+v2.3.5 起 `byPurpose` 按真实用途分组（extract / judge / community / diagnose / benchmark），旧版（≤2.3.4）一律记为 `unknown`。用量仅在内存累计，进程重启清零。`calls=0` 时返回 `hint` 字段说明原因（尚未触发 LLM 调用 / provider 不返回 usage）。
 
 ### Prometheus 指标
 
@@ -259,7 +279,7 @@ graph_memory_cache_hit_rate{plugin="graph-memory-pro",version="2.2.1"} 0.123
 graph_memory_association_matrix_updates_applied{plugin="graph-memory-pro",version="2.2.1"} 42
 ```
 
-覆盖指标：`graph_memory_up` / `nodes_total` / `edges_total` / `feedback_total` / `cache_size` / `cache_hit_rate` / `judge_cold_start` / `association_matrix_t` / `association_matrix_updates_applied` / `association_matrix_updates_rejected` / `neo4j_pool_active_sessions` / `neo4j_pool_total_sessions` / `neo4j_pool_max_size` / `neo4j_pool_driver_active` / `circuit_breaker_state` / `circuit_breaker_failures_total`（v2.3.2 新增连接池 + 熔断器指标）。
+覆盖指标：`graph_memory_up` / `nodes_total` / `edges_total` / `feedback_total` / `cache_size` / `cache_hit_rate` / `judge_cold_start` / `association_matrix_t` / `association_matrix_updates_applied` / `association_matrix_updates_rejected` / `neo4j_pool_active_sessions` / `neo4j_pool_total_sessions` / `neo4j_pool_max_size` / `neo4j_pool_driver_active` / `circuit_breaker_state` / `circuit_breaker_failures_total` / `llm_calls_total` / `llm_tokens_total` / `llm_prompt_tokens_total` / `llm_completion_tokens_total`（v2.3.0 新增 LLM 用量指标，v2.3.2 新增连接池 + 熔断器指标）。
 
 ## 知识图谱结构
 

@@ -200,8 +200,9 @@ export class LlmJudgeStrategy implements JudgeStrategy {
       const prompt = buildLlmJudgePrompt(targetNodes, reply);
       // v2.3.5 B2: 使用 withTimeoutSignal 将 AbortSignal 透传到底层 fetch，
       // 超时后取消底层请求，避免 orphan request 继续占用 LLM 配额 / 信号量槽位。
+      // v2.3.5 B3: 透传 purpose="judge" 供 /api/usage 按用途分组统计
       const response = await withTimeoutSignal(
-        (signal) => this.llm(prompt, "判断召回节点是否被使用", signal),
+        (signal) => this.llm(prompt, "判断召回节点是否被使用", signal, "judge"),
         this.timeoutMs,
         "Tier 2 LLM judge",
       );

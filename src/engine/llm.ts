@@ -14,8 +14,18 @@ import { combineSignals } from "../utils.ts";
  * v2.3.5 B2: 新增可选 signal 参数，调用方可传入 AbortSignal 以便在外部
  * 超时（如 judge 的 8s 超时）触发时取消底层 fetch，避免 orphan request。
  * 不传 signal 时引擎仍会应用 30s 内部安全超时。
+ *
+ * v2.3.5 B3: 新增可选 purpose 参数，用于 LLM token 用量按用途分组统计
+ * （extract / recall / judge / community / diagnose / benchmark / probe）。
+ * 调用方应传入自身用途，供 /api/usage 的 byPurpose 维度展示。
+ * 不传时记为 "unknown"（向后兼容）。
  */
-export type CompleteFn = (system: string, user: string, signal?: AbortSignal) => Promise<string>;
+export type CompleteFn = (
+  system: string,
+  user: string,
+  signal?: AbortSignal,
+  purpose?: string,
+) => Promise<string>;
 
 /** 重试延迟 */
 const RETRY_DELAYS = [2000, 5000, 10_000];
@@ -114,7 +124,7 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
   const maxConcurrency = config.maxConcurrency ?? DEFAULT_LLM_MAX_CONCURRENCY;
   const semaphore = getSemaphore(baseURL, model, maxConcurrency);
 
-  return async function complete(system: string, user: string, signal?: AbortSignal): Promise<string> {
+  return async function complete(system: string, user: string, signal?: AbortSignal, purpose: string = "unknown"): Promise<string> {
     const lastErr: Error[] = [];
     const delays = [...RETRY_DELAYS];
 
@@ -197,11 +207,12 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
         }
 
         // v2.3.0: 记录 token 用量（OpenAI-compatible API 通常返回 usage 字段，Ollama 不返回）
+        // v2.3.5 B3: purpose 由调用方传入（extract/judge/community/...），不再硬编码 "unknown"
         try {
           const { recordUsage } = await import("../store/usage.ts");
           recordUsage(
             "config-llm",  // provider 标识（配置的 LLM，非 runtime）
-            "unknown",     // purpose 由上层调用方通过包装注入，此处默认 unknown
+            purpose,
             usage?.prompt_tokens ?? 0,
             usage?.completion_tokens ?? 0,
           );
@@ -374,7 +385,7 @@ export function createRuntimeCompleteFn(
   /**
    * 基于 runtime LLM 的补全调用（含 content 规范化）
    */
-  async function runtimeComplete(system: string, user: string, signal?: AbortSignal): Promise<string> {
+  async function runtimeComplete(system: string, user: string, signal?: AbortSignal, purpose: string = "unknown"): Promise<string> {
     // v2.3.2 阶段二: 信号量限流（runtime LLM 通常本地单流）
     const release = await runtimeSemaphore.acquire();
     try {
@@ -397,12 +408,13 @@ export function createRuntimeCompleteFn(
       }
 
       // v2.3.0: 记录 runtime LLM token 用量（usage 字段来自 OpenClaw runtime）
+      // v2.3.5 B3: purpose 由调用方传入，不再硬编码 "unknown"
       try {
         const { recordUsage } = await import("../store/usage.ts");
         const usage = (result as any)?.usage;
         recordUsage(
           result?.provider ? `runtime-${result.provider}` : "runtime",
-          "unknown",
+          purpose,
           usage?.promptTokens ?? 0,
           usage?.completionTokens ?? 0,
         );
@@ -455,7 +467,7 @@ export function createRuntimeCompleteFn(
     }
   }
 
-  return async (system: string, user: string, signal?: AbortSignal): Promise<string> => {
+  return async (system: string, user: string, signal?: AbortSignal, purpose: string = "unknown"): Promise<string> => {
     // 首次调用：执行 provider 探测（所有并发调用共享同一个 detectPromise）
     if (decision === null) {
       if (!detectPromise) {
@@ -466,12 +478,12 @@ export function createRuntimeCompleteFn(
 
     if (decision === "fallback") {
       const fb = getFallback();
-      if (fb) return fb(system, user, signal);
+      if (fb) return fb(system, user, signal, purpose);
       // fallback 配置无效（如未配置 model/baseURL）→ 退回 runtime
     }
 
     // decision === "runtime" 或 fallback 无效时
-    return runtimeComplete(system, user, signal);
+    return runtimeComplete(system, user, signal, purpose);
   };
 }
 

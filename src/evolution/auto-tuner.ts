@@ -369,7 +369,7 @@ ${JSON.stringify(ACTION_BOUNDS, null, 2)}
 只输出 JSON，不要其他内容。`;
 
     try {
-      const response = await this.llm(sysPrompt, "诊断召回失败");
+      const response = await this.llm(sysPrompt, "诊断召回失败", undefined, "diagnose");
       const cleaned = ((response ?? "") as string)
         .trim()
         .replace(/```json\s*/i, "")

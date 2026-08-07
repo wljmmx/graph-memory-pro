@@ -64,7 +64,7 @@ export async function extractTriplets(
 请提取知识三元组。`;
 
   try {
-    const raw = await llm(EXTRACT_SYSTEM_PROMPT, userPrompt);
+    const raw = await llm(EXTRACT_SYSTEM_PROMPT, userPrompt, undefined, "extract");
     return parseExtractResult(raw);
   } catch {
     return FALLBACK;
