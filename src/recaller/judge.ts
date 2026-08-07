@@ -47,7 +47,11 @@ export interface JudgeConfig {
 export const DEFAULT_JUDGE_CONFIG: JudgeConfig = {
   enabled: true,
   asyncMode: true,
-  judgeWarmupFeedbacks: 50,
+  // v2.3.5 B1: 冷启动阈值降低
+  //   - 旧值 50 在纯手动 gm_feedback 模式下几乎不可能达到，导致永久冷启动
+  //   - 配合方案 A（agent_end 自动反馈），20 条即可退出冷启动启用 LLM 判定
+  //   - 冷启动期仅 Tier 1 启发式（零 LLM 成本），阈值过高无收益
+  judgeWarmupFeedbacks: 20,
   heuristicMatch: "both",
   tier: 1,
   llmJudgeMaxNodes: 10,
@@ -456,8 +460,12 @@ export interface WarmupConfig {
 }
 
 export const DEFAULT_WARMUP_CONFIG: WarmupConfig = {
-  warmupFeedbacks: 100,
-  judgeWarmupFeedbacks: 50,
+  // v2.3.5 B1: M 矩阵冷启动阈值降低
+  //   - 旧值 100 在手动反馈模式下不可达，M 矩阵永久为单位矩阵
+  //   - 配合方案 A 自动反馈，40 条即可开始训练 M（仍然保证基本稳定性）
+  //   - 配合 B2 bootstrap 可一次性喂入历史数据快速达标
+  warmupFeedbacks: 40,
+  judgeWarmupFeedbacks: 20,
 };
 
 /**

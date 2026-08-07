@@ -35,6 +35,7 @@ import { reEmbedNodes } from "./src/graph/reembed.ts";
 import { setExternalLogger } from "./src/logger.ts";
 import { setTimingEnabled } from "./src/timing.ts";
 import { extractInBackground } from "./src/services/extract-service.ts";  // v2.3.4 ARCH-1: 从 index.ts 拆出
+import { getSessionRecallCache, resetSessionRecallCache } from "./src/recaller/session-recall-cache.ts";
 
 // ─── 全局状态 ──────────────────────────────────────────
 
@@ -74,6 +75,54 @@ function resolveEmbedDimension(cfg: any): number {
   }
   // 3. 回退 1024
   return 1024;
+}
+
+/**
+ * v2.3.5: 从 agent_end 事件的 messages[] 提取最后一轮 user query + assistant reply
+ *
+ * AgentMessage 结构因 SDK 版本而异（content 可能是 string / array of content blocks），
+ * 这里做防御性宽松解析，覆盖以下常见形态：
+ *   - { role: "user", content: "..." }
+ *   - { role: "user", content: [{ type: "text", text: "..." }] }
+ *   - { role: "assistant", content: "..." }
+ *   - { role: "assistant", content: [{ type: "text", text: "..." }, { type: "tool_use", ... }] }
+ *
+ * 仅提取最后一条 user 和最后一条 assistant 消息的文本。
+ */
+function extractLastTurn(messages: any[]): { userQuery: string; assistantReply: string } {
+  let userQuery = "";
+  let assistantReply = "";
+
+  // 从后往前找最后一条 assistant 和 user 消息
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (!msg) continue;
+    const role = msg.role ?? msg.type ?? "";
+    const text = extractMessageText(msg);
+    if (!text) continue;
+
+    if (!assistantReply && /assistant/i.test(role)) {
+      assistantReply = text;
+    } else if (!userQuery && /user|human/i.test(role)) {
+      userQuery = text;
+    }
+    if (userQuery && assistantReply) break;
+  }
+
+  return { userQuery, assistantReply };
+}
+
+function extractMessageText(msg: any): string {
+  if (!msg) return "";
+  const content = msg.content ?? msg.text ?? msg.body ?? "";
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((b: any) => b && (typeof b === "string" || b?.type === "text"))
+      .map((b: any) => (typeof b === "string" ? b : b.text ?? ""))
+      .join("\n");
+  }
+  return "";
 }
 
 async function getOrCreateDriver(cfg: GmConfig, logger: any): Promise<Driver | null> {
@@ -798,6 +847,7 @@ export default definePluginEntry({
       if (_maintenanceTimer) { clearInterval(_maintenanceTimer); _maintenanceTimer = null; }
       if (_autoStartRetryTimer) { clearInterval(_autoStartRetryTimer); _autoStartRetryTimer = null; }
       if (_apiServerHandle) { try { await _apiServerHandle.close(); } catch { /* ignore */ } _apiServerHandle = null; }
+      resetSessionRecallCache();
       closeDriver();
       _driver = null;
       _cfg = null;
@@ -806,6 +856,80 @@ export default definePluginEntry({
       _recaller = null;
       _extractor = null;
     }, { name: "graph-memory-pro-cleanup" });
+
+    // ── v2.3.5 方案 A: agent_end 自动反馈采集 ──────────────────────
+    //
+    // 破除"反馈冷启动死循环"：无需手动调用 gm_feedback。
+    //
+    // 触发链路：
+    //   1. memory-core 调 corpusSupplement.search(query, agentSessionKey) → 记录召回节点到 SessionRecallCache
+    //   2. corpusSupplement.get(lookup, agentSessionKey) → 记录"展开查看"强使用信号
+    //   3. Agent 生成回复后 SDK 触发 agent_end({messages[]}, ctx={sessionId, sessionKey})
+    //   4. 本钩子从 messages 提取 lastUserQuery + lastAssistantReply，
+    //      从 SessionRecallCache.consume(sessionKey) 取召回节点，
+    //      自动调 _recaller.processFeedback(...) 完成判定（Tier 1 启发式零 LLM 成本）
+    //
+    // 安全特性：
+    //   - fire-and-forget，不阻塞会话；异常仅 warn
+    //   - 仅当存在召回缓存时触发，无召回则跳过（避免空判定）
+    //   - 可通过 cfg.autoFeedback.enabled 关闭
+    //   - get() 命中的节点合并到 usedNodeIds（强使用信号覆盖启发式判断）
+    api.registerHook("agent_end", async (event: any, ctx: any) => {
+      // 功能开关
+      if (_cfg?.autoFeedback?.enabled === false) return;
+      if (!_driver || !_recaller) return;
+
+      const sessionKey: string | undefined = ctx?.sessionKey ?? ctx?.sessionId;
+      if (!sessionKey) return;
+
+      // 消费该 session 的召回缓存（取完即清，避免重复采集）
+      const recallRecord = getSessionRecallCache().consume(sessionKey);
+      if (!recallRecord || recallRecord.nodeIds.length === 0) return;
+
+      // 从 messages[] 提取最后一轮 user query + assistant reply
+      const messages: any[] = Array.isArray(event?.messages) ? event.messages : [];
+      const { userQuery, assistantReply } = extractLastTurn(messages);
+      if (!assistantReply || !assistantReply.trim()) return;
+
+      try {
+        // 加载召回的节点（JudgeManager 需要 GmNode[] 做判定）
+        const recalledNodes = (await Promise.all(
+          recallRecord.nodeIds.map(id => findById(_driver!, id)),
+        )).filter(Boolean) as any[];
+
+        if (recalledNodes.length === 0) return;
+
+        // v2.3.5 方案 C: get() 展开的节点视为"确定被使用"，合并到判定后强制标记
+        // processFeedback 内部 JudgeManager 会判定 usedNodeIds，此处先跑判定，
+        // 再用 getNodeIds 补充（覆盖启发式的"未使用"结论）
+        const query = recallRecord.query || userQuery;
+        await _recaller.processFeedback(
+          query,
+          recalledNodes,
+          assistantReply,
+          ctx?.sessionId ?? sessionKey,
+        );
+
+        // get() 强使用信号：补充标记 get 命中的节点为 used（覆盖启发式误判）
+        if (recallRecord.getNodeIds.length > 0 && _recaller.getAssociationMatrix()?.isEnabled() && _embed) {
+          // 这些节点已被显式展开，直接喂给 M 矩阵更新作为正向信号
+          const getSet = new Set(recallRecord.getNodeIds);
+          const usedIds = recalledNodes.filter(n => getSet.has(n.id)).map(n => n.id);
+          const unusedIds = recalledNodes.filter(n => !getSet.has(n.id)).map(n => n.id);
+          if (usedIds.length > 0) {
+            try {
+              await (_recaller as any).updateAssociationMatrix(query, usedIds, unusedIds);
+            } catch { /* M 更新失败不影响主流程 */ }
+          }
+        }
+
+        if (process.env.GM_DEBUG) {
+          console.log(`[graph-memory-pro] auto-feedback collected: session=${sessionKey}, recalled=${recalledNodes.length}, getHits=${recallRecord.getNodeIds.length}`);
+        }
+      } catch (err: any) {
+        console.warn(`[graph-memory-pro] auto-feedback failed: ${err?.message ?? err}`);
+      }
+    }, { name: "graph-memory-pro-auto-feedback" });
 
     // ─────────────────────────────────────────────────────────────────
     // P0-1: 移除 before_prompt_build 钩子
@@ -991,6 +1115,14 @@ export default definePluginEntry({
         try {
           const limit = Math.min(params.maxResults ?? 5, 20);
           const nodes = await searchNodes(_driver, params.query, limit);
+          // v2.3.5 方案 A: 记录会话级召回，供 agent_end 自动反馈采集
+          if (params.agentSessionKey) {
+            getSessionRecallCache().recordRecall(
+              params.agentSessionKey,
+              params.query,
+              nodes.map(n => n.id),
+            );
+          }
           return nodes.map(n => ({
             corpus: "graph-memory-pro",
             path: n.id,
@@ -1025,6 +1157,10 @@ export default definePluginEntry({
         try {
           const n = await findById(_driver, params.lookup);
           if (!n) return null;
+          // v2.3.5 方案 C: get() 展开视为强使用信号，记录到 session 缓存
+          if (params.agentSessionKey) {
+            getSessionRecallCache().recordGet(params.agentSessionKey, n.id);
+          }
           return {
             corpus: "graph-memory-pro",
             path: n.id,
@@ -1249,6 +1385,64 @@ export default definePluginEntry({
           return { content: [{ type: "text", text }], details: { submitted: true } };
         } catch (err: any) {
           return { content: [{ type: "text", text: `Feedback failed: ${err.message}` }], details: {} };
+        }
+      },
+    });
+
+    // v2.3.5 B2: Bootstrap 反馈工具
+    // 用历史节点合成 warmup 反馈，快速突破冷启动死循环
+    api.registerTool({
+      name: "gm_bootstrap",
+      label: "Graph Memory Bootstrap Feedback",
+      description: "Bootstrap feedback by synthesizing warmup data from existing graph nodes. Breaks the cold-start deadlock when the graph has historical nodes but zero feedback. Uses each node's name as both query and reply so Tier 1 heuristic judge always marks it as 'used'. Run ONCE to exit cold start; do not call repeatedly.",
+      parameters: Type.Object({
+        maxNodes: Type.Optional(Type.Number({
+          description: "Max nodes to bootstrap (default 100, max 500)",
+          minimum: 10,
+          maximum: 500,
+        })),
+      }),
+      async execute(_callId: string, params: any) {
+        if (!_driver || !_recaller) {
+          return { content: [{ type: "text", text: "Graph Memory Pro not connected" }], details: {} };
+        }
+        try {
+          const maxNodes = Math.min(Math.max(params?.maxNodes ?? 100, 10), 500);
+          const { getTopNodes } = await import("./src/store/store.ts");
+          const nodes = await getTopNodes(_driver, maxNodes);
+          if (nodes.length === 0) {
+            return { content: [{ type: "text", text: "No nodes in graph to bootstrap" }], details: { bootstrapped: 0 } };
+          }
+
+          const jm = _recaller.getJudgeManager();
+          const before = jm?.getFeedbackCount() ?? 0;
+          const beforeCold = jm?.isColdStart() ?? true;
+
+          let bootstrapped = 0;
+          let failed = 0;
+          for (const node of nodes) {
+            try {
+              const reply = `${node.name} ${node.description ?? ""} ${node.content ?? ""}`.slice(0, 1000);
+              await _recaller.processFeedback(node.name, [node], reply, "bootstrap");
+              bootstrapped++;
+            } catch {
+              failed++;
+            }
+          }
+
+          const after = jm?.getFeedbackCount() ?? 0;
+          const afterCold = jm?.isColdStart() ?? true;
+          const lines = [
+            `Bootstrapped: ${bootstrapped}/${nodes.length} (failed: ${failed})`,
+            `Feedback count: ${before} → ${after}`,
+            `Cold start: ${beforeCold ? "yes" : "no"} → ${afterCold ? "yes" : "no (exited)"}`,
+            afterCold
+              ? `Still in cold start. Need ${jm?.getConfig().judgeWarmupFeedbacks ?? 20} total to exit.`
+              : `Cold start exited. Judge will now use Tier ${jm?.getConfig().tier ?? 1}.`,
+          ];
+          return { content: [{ type: "text", text: lines.join("\n") }], details: { bootstrapped, failed, feedbackCount: after } };
+        } catch (err: any) {
+          return { content: [{ type: "text", text: `Bootstrap failed: ${err.message}` }], details: {} };
         }
       },
     });

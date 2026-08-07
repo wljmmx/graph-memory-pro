@@ -279,9 +279,9 @@ describe("JudgeManager", () => {
       expect(jm.isColdStart()).toBe(false); // 3 >= 3
     });
 
-    it("默认阈值 50", () => {
+    it("默认阈值 20（v2.3.5 B1: 从 50 降至 20）", () => {
       const jm = new JudgeManager();
-      for (let i = 0; i < 49; i++) jm.incrementFeedback();
+      for (let i = 0; i < 19; i++) jm.incrementFeedback();
       expect(jm.isColdStart()).toBe(true);
       jm.incrementFeedback();
       expect(jm.isColdStart()).toBe(false);

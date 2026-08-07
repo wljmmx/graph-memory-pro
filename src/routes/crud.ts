@@ -75,6 +75,7 @@ export function getRoutes(): RouteHandler[] {
     { method: "DELETE", path: "/api/maintain/dirty-nodes", handler: handleClearDirty },
     { method: "POST", path: "/api/reembed", handler: handleReembed },
     { method: "POST", path: "/api/feedback", handler: handleFeedback },
+    { method: "POST", path: "/api/feedback/bootstrap", handler: handleFeedbackBootstrap },
     { method: "POST", path: "/api/benchmark", handler: handleBenchmark },
     { method: "POST", path: "/api/auto-tuner/tune", handler: handleAutoTunerTune },
     { method: "GET", path: "/api/metrics", handler: handleMetrics },
@@ -824,6 +825,16 @@ async function handleDoctor(): Promise<{ status: number; body: any }> {
     });
   }
 
+  // v2.3.5: 9. AutoFeedback 自动反馈采集状态
+  const autoFeedbackEnabled = _cfg?.autoFeedback?.enabled !== false;
+  checks.push({
+    name: "auto_feedback",
+    status: autoFeedbackEnabled ? "ok" : "warn",
+    detail: autoFeedbackEnabled
+      ? "enabled (agent_end hook auto-collects feedback; no manual gm_feedback needed)"
+      : "disabled (set autoFeedback.enabled=true, default true). Manual gm_feedback required.",
+  });
+
   // 汇总
   const errorCount = checks.filter(c => c.status === "error").length;
   const warnCount = checks.filter(c => c.status === "warn").length;
@@ -1031,6 +1042,69 @@ async function handleFeedback(params: any): Promise<{ status: number; body: any 
         recalledCount: recalledNodes.length,
         feedbackCount: jm?.getFeedbackCount() ?? 0,
         coldStart: jm?.isColdStart() ?? true,
+      },
+    };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+// ── v2.3.5 B2: Bootstrap 反馈（用历史节点合成 warmup 反馈） ──────────────────
+//
+// 场景：图谱已有大量历史节点（如 506 条经验），但零反馈数据，
+// 导致 JudgeManager / M 矩阵永久冷启动。
+//
+// 原理：对每个节点构造合成反馈：
+//   - query = node.name
+//   - recalledNodes = [node]
+//   - assistantReply = node.description + " " + node.name
+// Tier 1 启发式判定 node.name 出现在 reply 中 → 必然命中 → 计为 used
+// 一次性喂入 N 条，快速突破冷启动。
+//
+// 风险控制：
+//   - 仅在冷启动期使用（热启动后调用无意义）
+//   - 合成数据 matchedBy 会是 "cold-start"/"heuristic"（无法区分真实/合成）
+//   - 建议一次性使用，不要反复调用（会污染反馈统计）
+async function handleFeedbackBootstrap(params: any): Promise<{ status: number; body: any }> {
+  if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
+  if (!_recaller) return { status: 503, body: { error: "Recaller not initialized" } };
+  const maxNodes = Math.min(Math.max(safeParseInt(params?.maxNodes, 100, 500), 10), 500);
+  try {
+    const { getTopNodes } = await import("../store/store.ts");
+    const nodes = await getTopNodes(_driver, maxNodes);
+    if (nodes.length === 0) {
+      return { status: 200, body: { bootstrapped: 0, reason: "no nodes in graph" } };
+    }
+
+    const jm = _recaller.getJudgeManager();
+    const beforeCount = jm?.getFeedbackCount() ?? 0;
+    const beforeColdStart = jm?.isColdStart() ?? true;
+
+    let bootstrapped = 0;
+    let failed = 0;
+    for (const node of nodes) {
+      try {
+        // 合成反馈：节点名作为 query，description+name 作为 reply（启发式必然命中）
+        const query = node.name;
+        const reply = `${node.name} ${node.description ?? ""} ${node.content ?? ""}`.slice(0, 1000);
+        await _recaller.processFeedback(query, [node], reply, "bootstrap");
+        bootstrapped++;
+      } catch {
+        failed++;
+      }
+    }
+
+    return {
+      status: 200,
+      body: {
+        bootstrapped,
+        failed,
+        totalNodes: nodes.length,
+        feedbackCountBefore: beforeCount,
+        feedbackCountAfter: jm?.getFeedbackCount() ?? 0,
+        coldStartBefore: beforeColdStart,
+        coldStartAfter: jm?.isColdStart() ?? true,
+        hint: "Bootstrap uses synthetic feedback (node name as both query and reply). Use once to exit cold start; do not call repeatedly.",
       },
     };
   } catch (err: any) {
@@ -1359,6 +1433,19 @@ async function handleServiceStatus(): Promise<{ status: number; body: any }> {
     // 检查 LLM/Embedding
     services.push({ name: "llm", status: _llm ? "configured" : "not-configured" });
     services.push({ name: "embedding", status: _embed ? "configured" : "not-configured" });
+
+    // v2.3.5: 自动反馈采集状态 + session 缓存统计
+    const autoFeedbackEnabled = _cfg?.autoFeedback?.enabled !== false;
+    let sessionCacheSize = 0;
+    try {
+      const { getSessionRecallCache } = await import("../recaller/session-recall-cache.ts");
+      sessionCacheSize = getSessionRecallCache().size();
+    } catch { /* 模块未加载 */ }
+    services.push({
+      name: "auto-feedback",
+      status: autoFeedbackEnabled ? "enabled" : "disabled",
+      detail: { sessionCacheSize, trackGetExpansion: _cfg?.autoFeedback?.trackGetExpansion !== false },
+    });
 
     // 熔断器状态
     const { getAllCircuitBreakers } = await import("../engine/circuit-breaker.ts");

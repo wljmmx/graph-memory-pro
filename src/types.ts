@@ -271,6 +271,21 @@ export interface GmConfig {
     warmupFeedbacks?: number;
   };
 
+  /**
+   * v2.3.5 方案 A: 自动反馈采集配置
+   *
+   * 通过 agent_end 钩子自动采集反馈，破除手动 gm_feedback 的冷启动死循环。
+   * 默认启用（enabled=true）。关闭后回到纯手动模式。
+   */
+  autoFeedback?: {
+    /** 是否启用自动反馈采集（默认 true） */
+    enabled?: boolean;
+    /** 是否记录 get() 展开作为强使用信号（默认 true） */
+    trackGetExpansion?: boolean;
+    /** 单 session 最大召回缓存条数（默认 5） */
+    maxRecallRecordsPerSession?: number;
+  };
+
   /** MCP Server 配置（v2.2.0 新增，对外暴露 13 个 tools） */
   mcp?: {
     /** 是否启用 MCP server（默认 false） */
