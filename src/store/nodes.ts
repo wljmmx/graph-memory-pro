@@ -418,8 +418,10 @@ export async function graphWalk(
 export async function getNodeCount(driver: Driver): Promise<number> {
   const session = getSession(driver);
   try {
+    // v2.3.5 修复: status 过滤兼容 NULL（与 searchNodes 一致），
+    // 旧数据或导入数据可能没有 status 属性
     const result = await session.run(
-      "MATCH (n:Task|Skill|Event {status: 'active'}) RETURN count(n) AS c",
+      "MATCH (n:Task|Skill|Event) WHERE n.status = 'active' OR n.status IS NULL RETURN count(n) AS c",
     );
     return result.records[0]?.get("c")?.toNumber?.() ?? 0;
   } finally {
@@ -432,11 +434,16 @@ export async function getNodesByType(
   type: string,
   limit?: number,
 ): Promise<GmNode[]> {
+  // v2.3.5 修复: 用 typeToLabel 转换，避免 "TASK" 被直接用作 label
+  // （Neo4j label 大小写敏感，实际 label 是 "Task" 而非 "TASK"）
+  const label = typeToLabel(type);
   const session = getSession(driver);
   try {
+    // v2.3.5 修复: status 过滤兼容 NULL（与 searchNodes 一致），
+    // 旧数据或导入数据可能没有 status 属性
     const q = limit
-      ? `MATCH (n:${type} {status: 'active'}) RETURN n ORDER BY n.validatedCount DESC LIMIT toInteger($limit)`
-      : `MATCH (n:${type} {status: 'active'}) RETURN n ORDER BY n.validatedCount DESC`;
+      ? `MATCH (n:${label}) WHERE n.status = 'active' OR n.status IS NULL RETURN n ORDER BY n.validatedCount DESC LIMIT toInteger($limit)`
+      : `MATCH (n:${label}) WHERE n.status = 'active' OR n.status IS NULL RETURN n ORDER BY n.validatedCount DESC`;
     const result = await session.run(q, { limit: limit ?? 0 });
     return result.records.map((r) => recordToNode(r.get("n"))).filter((n): n is GmNode => n !== null);
   } finally {
@@ -450,8 +457,11 @@ export async function getTopNodes(
 ): Promise<GmNode[]> {
   const session = getSession(driver);
   try {
+    // v2.3.5 修复: status 过滤兼容 NULL（与 searchNodes 一致），
+    // 旧数据或导入数据可能没有 status 属性
     const result = await session.run(
-      `MATCH (n:Task|Skill|Event {status: 'active'})
+      `MATCH (n:Task|Skill|Event)
+       WHERE n.status = 'active' OR n.status IS NULL
        RETURN n
        ORDER BY n.pagerank DESC, n.validatedCount DESC
        LIMIT toInteger($limit)`,

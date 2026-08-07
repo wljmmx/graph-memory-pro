@@ -850,16 +850,27 @@ async function handleDoctor(): Promise<{ status: number; body: any }> {
 //
 // 返回进程级累计的 LLM token 用量，供成本监控。
 // 数据来源：src/store/usage.ts（内存累计，重启清零）
+//
+// v2.3.5: 补充说明字段，避免 "全为 0" 被误判为异常。
+// usage 为 0 的常见原因：
+//   1. 进程刚启动，尚未触发任何 LLM 调用（extractor/recall/judge/maintain）
+//   2. LLM 调用走了 api.runtime.llm 主会话路径，但主会话 provider 不返回 usage 字段
+//   3. 配置的 llm.baseURL 指向的 provider 不返回 usage 字段（部分 Ollama 版本）
 async function handleUsage(): Promise<{ status: number; body: any }> {
   try {
     const { getUsageStats } = await import("../store/usage.ts");
     const stats = getUsageStats();
+    const hasData = stats.total.calls > 0;
     return {
       status: 200,
       body: {
         version: VERSION,
         timestamp: new Date().toISOString(),
         ...stats,
+        // v2.3.5: 说明字段，便于 dashboard 展示
+        hint: hasData
+          ? undefined
+          : "No LLM calls recorded yet. Usage is in-memory and resets on restart. Calls are recorded when extractor/recall/judge/maintain services invoke LLM. If LLM is configured but returns no usage field, token counts may stay 0.",
       },
     };
   } catch (err: any) {
