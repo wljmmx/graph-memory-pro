@@ -22,6 +22,19 @@
 - **节点截断静默**：Tier 2 节点数超 `llmJudgeMaxNodes` 时新增 warn 日志（总数 / 上限 / 溢出数），不再静默截断。
 - **超时错误语义不清**：`withTimeout` / `withTimeoutSignal` 均传 `label`，错误信息明确（如 "Tier 2 LLM judge timed out after 8000ms"）。
 
+### Fixed — LLM Token 用量端点与按用途统计（B3）
+
+针对 dashboard 查询 LLM token 用量为空、`/api/usage` 端点在旧部署中返回 404 的问题，核实并修复实现与设计意图的偏差。
+
+- **端点核实**：`/api/usage` 端点自 v2.3.0 起即存在于 [src/routes/crud.ts](src/routes/crud.ts) 路由表（含 `handleUsage`）与 [src/server/http-server.ts](src/server/http-server.ts) 鉴权白名单。dashboard 返回 404 的根因是部署运行的构建产物早于 v2.3.0（版本号停留在 2.3.3 未与 changelog 同步）。本次随版本统一到 2.3.5 并重新构建 `dist/` 修复。
+- **purpose 硬编码 "unknown"**：[src/engine/llm.ts](src/engine/llm.ts) 两处 `recordUsage` 调用（config-llm / runtime 路径）原硬编码 `purpose: "unknown"`，注释声称"由上层调用方通过包装注入"但从未实现该包装，导致 `/api/usage` 的 `byPurpose` 维度始终只有 `unknown` 桶，dashboard 按用途分组视图无数据。现 `CompleteFn` 新增可选 `purpose` 参数（第 4 位，向后兼容默认 "unknown"），引擎层透传至 `recordUsage`。
+- **调用点透传 purpose**：[src/extractor/extract.ts](src/extractor/extract.ts)（extract）、[src/recaller/judge.ts](src/recaller/judge.ts)（judge）、[src/graph/community.ts](src/graph/community.ts)（community）、[src/evolution/auto-tuner.ts](src/evolution/auto-tuner.ts)（diagnose）均传入真实用途；benchmark 路径经 extractor 故记为 extract。
+- **文档补全**：[README.md](README.md) HTTP API 表补充 `/api/usage`、`/api/doctor`、`/api/config` 行，新增"LLM Token 用量"小节说明返回结构与 `byPurpose` 分组语义，Prometheus 指标列表补全 4 个 LLM 用量指标。
+
+### Changed — 版本号统一（B3）
+
+`version.ts` / `package.json` / `openclaw.plugin.json` / `package-lock.json` 由 **2.3.3 → 2.3.5**，与 CHANGELOG 记录的 v2.3.4（架构优化）/ v2.3.5（冷启动 + LLM 鲁棒性 + 用量修复）已落地代码对齐。旧部署因版本号滞后导致 `dist/` 未含 v2.3.0 起新增的 `/api/usage` 路由。
+
 ### Added — 集成测试
 
 - **TEST-1 smoke test 骨架**：新增 [test/smoke.test.ts](test/smoke.test.ts) + [docker-compose.smoke.yml](docker-compose.smoke.yml) + [vitest.smoke.config.ts](vitest.smoke.config.ts)，连接真实 Neo4j 验证 schema/写入/读取/向量索引/连接池计数。Neo4j 不可用时自动 skip，不影响主测试套件。通过 `npm run test:smoke` 运行。
@@ -31,6 +44,7 @@
 - 新增 `withTimeoutSignal` / `combineSignals` 单元测试 10 用例（正常完成 / signal 透传 / 超时 abort / 多信号联动 / 监听器清理）
 - 新增 `parseLlmJudgeJson` 单元测试 8 用例（纯 JSON / ```json 围栏 / 纯 ``` 围栏 / 前后文本 / 空输入 / 非 JSON）
 - 新增 judge Tier 2 signal 透传 + 超时 fallback 测试 2 用例
+- version.test 同步断言 2.3.5
 - 总测试数 486 → **506**
 
 ### Configuration Migration — 配置迁移（v2.3.4 → v2.3.5）

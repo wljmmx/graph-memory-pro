@@ -867,6 +867,9 @@ async function handleDoctor(): Promise<{ status: number; body: any }> {
 //   1. 进程刚启动，尚未触发任何 LLM 调用（extractor/recall/judge/maintain）
 //   2. LLM 调用走了 api.runtime.llm 主会话路径，但主会话 provider 不返回 usage 字段
 //   3. 配置的 llm.baseURL 指向的 provider 不返回 usage 字段（部分 Ollama 版本）
+//
+// v2.3.5 B3: byPurpose 维度现按真实用途分组（extract/judge/community/diagnose/...），
+// 旧版（≤2.3.4）一律记为 "unknown"。仅 /api/usage 端点 200 返回，不返回 404。
 async function handleUsage(): Promise<{ status: number; body: any }> {
   try {
     const { getUsageStats } = await import("../store/usage.ts");
