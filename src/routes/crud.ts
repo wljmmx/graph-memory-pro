@@ -14,6 +14,8 @@ import {
   getFeedbackCount,
   upsertNode,
   getAllCommunitySummaries, getCommunitySummary,
+  graphWalk, nodesByCommunityIds, communityRepresentatives,
+  getNodeFeedbackStats,
 } from "../store/store.ts";
 import { runMaintenance } from "../graph/maintenance.ts";
 import {
@@ -81,6 +83,19 @@ export function getRoutes(): RouteHandler[] {
     { method: "GET", path: "/api/doctor", handler: handleDoctor },
     { method: "GET", path: "/api/usage", handler: handleUsage },
     { method: "GET", path: "/api/config", handler: handleConfig },
+    // ── 可视化接口 ──
+    { method: "GET", path: "/api/graph/walk", handler: handleGraphWalk },
+    { method: "POST", path: "/api/graph/walk", handler: handleGraphWalkPost },
+    { method: "GET", path: "/api/nodes/:id/edges", handler: handleNodeEdges },
+    { method: "GET", path: "/api/nodes/:id/feedback-stats", handler: handleNodeFeedbackStats },
+    { method: "GET", path: "/api/communities/:id/nodes", handler: handleCommunityNodes },
+    { method: "GET", path: "/api/communities/:id/representatives", handler: handleCommunityRepresentatives },
+    { method: "GET", path: "/api/schema", handler: handleSchema },
+    // ── 运维接口 ──
+    { method: "POST", path: "/api/ops/circuit-breakers/reset", handler: handleResetCircuitBreakers },
+    { method: "DELETE", path: "/api/ops/cache", handler: handleClearCache },
+    { method: "POST", path: "/api/ops/reconnect", handler: handleReconnect },
+    { method: "GET", path: "/api/ops/services", handler: handleServiceStatus },
   ];
 }
 
@@ -982,4 +997,264 @@ async function handleConfig(): Promise<{ status: number; body: any }> {
   if (safe.apiServer) safe.apiServer.authToken = "***";
   if (safe.mcp) safe.mcp.authToken = "***";
   return { status: 200, body: { version: VERSION, config: safe } };
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  可视化接口
+// ═══════════════════════════════════════════════════════════════
+
+/** GET /api/graph/walk?seedIds=id1,id2&depth=2&maxNodes=200 — 子图遍历 */
+async function handleGraphWalk(params: { seedIds?: string; depth?: string; maxNodes?: string }): Promise<{ status: number; body: any }> {
+  if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
+  const seedIdsStr = params.seedIds;
+  if (!seedIdsStr) return { status: 400, body: { error: "seedIds is required (comma-separated)" } };
+  const seedIds = seedIdsStr.split(",").map(s => s.trim()).filter(Boolean);
+  if (seedIds.length === 0) return { status: 400, body: { error: "seedIds must contain at least one valid ID" } };
+  const depth = safeParseInt(params.depth, 2, 5);
+  const maxNodes = safeParseInt(params.maxNodes, 200, 1000);
+  try {
+    const result = await graphWalk(_driver, seedIds, depth, maxNodes);
+    return { status: 200, body: result };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+/** POST /api/graph/walk — 子图遍历（POST 版，适合 seedIds 较多时） */
+async function handleGraphWalkPost(params: any): Promise<{ status: number; body: any }> {
+  if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
+  const seedIds: string[] = Array.isArray(params?.seedIds) ? params.seedIds : [];
+  if (seedIds.length === 0) return { status: 400, body: { error: "seedIds must be a non-empty array" } };
+  const depth = safeParseInt(params?.depth?.toString(), 2, 5);
+  const maxNodes = safeParseInt(params?.maxNodes?.toString(), 200, 1000);
+  try {
+    const result = await graphWalk(_driver, seedIds, depth, maxNodes);
+    return { status: 200, body: result };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+/** GET /api/nodes/:id/edges — 获取节点的所有关联边 */
+async function handleNodeEdges(params: { id: string }): Promise<{ status: number; body: any }> {
+  if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
+  try {
+    const edges = await getEdgesForNodes(_driver, [params.id]);
+    return { status: 200, body: { nodeId: params.id, edges } };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+/** GET /api/nodes/:id/feedback-stats — 节点的反馈统计 */
+async function handleNodeFeedbackStats(params: { id: string }): Promise<{ status: number; body: any }> {
+  if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
+  try {
+    const stats = await getNodeFeedbackStats(_driver, params.id);
+    return { status: 200, body: { nodeId: params.id, ...stats } };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+/** GET /api/communities/:id/nodes?limit=50 — 社区内节点列表 */
+async function handleCommunityNodes(params: { id: string; limit?: string }): Promise<{ status: number; body: any }> {
+  if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
+  const limit = safeParseInt(params.limit, 50, 500);
+  try {
+    const nodes = await nodesByCommunityIds(_driver, [params.id], limit);
+    return { status: 200, body: { communityId: params.id, count: nodes.length, nodes } };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+/** GET /api/communities/:id/representatives — 社区代表节点 */
+async function handleCommunityRepresentatives(params: { id: string }): Promise<{ status: number; body: any }> {
+  if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
+  try {
+    const nodes = await communityRepresentatives(_driver, [params.id]);
+    return { status: 200, body: { communityId: params.id, representatives: nodes } };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+/** GET /api/schema — 图谱 schema 自省（节点类型 + 边类型 + 索引） */
+async function handleSchema(): Promise<{ status: number; body: any }> {
+  if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
+  try {
+    // 查询节点标签和计数
+    const { getSession } = await import("../store/db.ts");
+    const session = getSession(_driver);
+    try {
+      const labelResult = await session.run(
+        `CALL db.labels() YIELD label
+         RETURN label`,
+      );
+      const nodeTypes = await Promise.all(labelResult.records.map(async (rec: any) => {
+        const label = rec.get("label");
+        const countResult = await session.run(`MATCH (n:${label}) RETURN count(n) AS cnt`);
+        const count = countResult.records[0]?.get("cnt")?.toNumber?.() ?? 0;
+        return { label, count };
+      }));
+
+      const relResult = await session.run(
+        `CALL db.relationshipTypes() YIELD relationshipType
+         RETURN relationshipType`,
+      );
+      const edgeTypes = await Promise.all(relResult.records.map(async (rec: any) => {
+        const type = rec.get("relationshipType");
+        const countResult = await session.run(`MATCH ()-[r:${type}]->() RETURN count(r) AS cnt`);
+        const count = countResult.records[0]?.get("cnt")?.toNumber?.() ?? 0;
+        return { type, count };
+      }));
+
+      return {
+        status: 200,
+        body: {
+          nodeTypes: nodeTypes.filter(n => !n.label.startsWith("_")),
+          edgeTypes: edgeTypes.filter(e => !e.type.startsWith("_")),
+          indexingModels: _cfg?.embedding?.model ?? null,
+          vectorDimension: _cfg?.embedding?.dimensions ?? null,
+        },
+      };
+    } finally {
+      await session.close();
+    }
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  运维接口
+// ═══════════════════════════════════════════════════════════════
+
+/** POST /api/ops/circuit-breakers/reset — 重置所有熔断器 */
+async function handleResetCircuitBreakers(): Promise<{ status: number; body: any }> {
+  try {
+    const { getAllCircuitBreakers, resetAllCircuitBreakers } = await import("../engine/circuit-breaker.ts");
+    const before = Array.from(getAllCircuitBreakers().entries()).map(([name, b]) => ({
+      name, state: b.getState(), failureCount: b.getStatus().failureCount,
+    }));
+    resetAllCircuitBreakers();
+    return {
+      status: 200,
+      body: {
+        message: "all circuit breakers reset",
+        resetCount: before.length,
+        previousStates: before,
+      },
+    };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+/** DELETE /api/ops/cache — 清空查询缓存 */
+async function handleClearCache(): Promise<{ status: number; body: any }> {
+  try {
+    let cleared = 0;
+    if (_recaller) {
+      const cache = _recaller.getQueryCache();
+      const stats = cache.getStats();
+      cleared = stats.size;
+      cache.clear();
+    }
+    const { resetRecallTiming } = await import("../recaller/recall.ts");
+    resetRecallTiming();
+    return {
+      status: 200,
+      body: {
+        message: "cache cleared",
+        entriesRemoved: cleared,
+        recallTimingReset: true,
+      },
+    };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+/** POST /api/ops/reconnect — 手动触发 Neo4j 重连 */
+async function handleReconnect(): Promise<{ status: number; body: any }> {
+  if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
+  try {
+    const { verifyWithRetry } = await import("../store/db.ts");
+    const ok = await verifyWithRetry(_driver);
+    const { getPoolMetrics } = await import("../store/db.ts");
+    const pool = getPoolMetrics();
+    return {
+      status: ok ? 200 : 503,
+      body: {
+        connected: ok,
+        pool: pool,
+      },
+    };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+/** GET /api/ops/services — 后台服务状态 */
+async function handleServiceStatus(): Promise<{ status: number; body: any }> {
+  // 从 index.ts 模块级变量推断服务状态
+  // 这些变量在 index.ts 中声明，此处通过动态 import 读取
+  try {
+    const services: Array<{ name: string; status: string; detail?: any }> = [];
+
+    // API server 本身正在响应请求，即为 running
+    services.push({
+      name: "api-server",
+      status: "running",
+    });
+
+    // 检查 driver 状态
+    if (_driver) {
+      try {
+        await _driver.verifyConnectivity();
+        services.push({ name: "neo4j-driver", status: "connected" });
+      } catch {
+        services.push({ name: "neo4j-driver", status: "disconnected" });
+      }
+    } else {
+      services.push({ name: "neo4j-driver", status: "not-initialized" });
+    }
+
+    // 检查 recaller
+    services.push({
+      name: "recaller",
+      status: _recaller ? "initialized" : "not-initialized",
+    });
+
+    // 检查 LLM/Embedding
+    services.push({ name: "llm", status: _llm ? "configured" : "not-configured" });
+    services.push({ name: "embedding", status: _embed ? "configured" : "not-configured" });
+
+    // 熔断器状态
+    const { getAllCircuitBreakers } = await import("../engine/circuit-breaker.ts");
+    const breakers = Array.from(getAllCircuitBreakers().entries()).map(([name, b]) => ({
+      name,
+      state: b.getState(),
+      failureCount: b.getStatus().failureCount,
+    }));
+    services.push({ name: "circuit-breakers", status: "ok", detail: breakers });
+
+    // 连接池
+    const { getPoolMetrics } = await import("../store/db.ts");
+    const pool = getPoolMetrics();
+    services.push({ name: "connection-pool", status: "ok", detail: pool });
+
+    return {
+      status: 200,
+      body: {
+        version: VERSION,
+        timestamp: new Date().toISOString(),
+        services,
+      },
+    };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
 }
