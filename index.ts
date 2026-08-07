@@ -26,7 +26,7 @@ import type { CompleteFn } from "./src/engine/llm.ts";
 import type { EmbedFn } from "./src/engine/embed.ts";
 import { createCompleteFn, createRuntimeCompleteFn } from "./src/engine/llm.ts";
 import { createEmbedFn } from "./src/engine/embed.ts";
-import { initDriver, closeDriver, verifyWithRetry, getDriver, getConfig } from "./src/store/db.ts";
+import { initDriver, closeDriver, verifyWithRetry, getDriver, getConfig, setDriver as setDbDriver } from "./src/store/db.ts";
 import { ensureSchema, getNodeCount, getEdgeCount, searchNodes, upsertNode, findById } from "./src/store/store.ts";
 import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
@@ -95,93 +95,146 @@ async function getOrCreateDriver(cfg: GmConfig, logger: any): Promise<Driver | n
 // 也可能被 Gateway 作为插件加载。无论哪种情况，都需要在 Driver 就绪后
 // 自动启动独立 HTTP API 服务器。
 //
-// 策略：先密集轮询 30 秒（2s 间隔），若仍未就绪则降级为 10s 间隔持续重试，
-// 确保 driver 在 gateway_start 之后初始化时也能最终启动。
+// 策略（三阶段）：
+//   1. 密集轮询 30 秒（2s 间隔）— 等待 register() / gateway_start 设置 driver
+//   2. 自驱动初始化 — 轮询失败后尝试用环境变量/默认配置自建 driver
+//   3. 慢速重试（10s 间隔）— 持续重试直到 driver 可用
 
-let _autoStartRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let _autoStartRetryTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * 尝试用环境变量或默认配置自建 Neo4j driver。
+ * 环境变量优先级：NEO4J_URI > GRAPH_MEMORY_NEO4J_URI > bolt://localhost:37687
+ */
+async function trySelfInitDriver(): Promise<Driver | null> {
+  const uri = process.env.NEO4J_URI || process.env.GRAPH_MEMORY_NEO4J_URI || "bolt://localhost:37687";
+  const user = process.env.NEO4J_USER || "neo4j";
+  const password = process.env.NEO4J_PASSWORD || "";
+
+  try {
+    console.log(`[graph-memory-pro] self-init: connecting to ${uri}...`);
+    const d = initDriver({ uri, user, password });
+    const ok = await verifyWithRetry(d);
+    if (ok) {
+      console.log(`[graph-memory-pro] self-init: connected to ${uri}`);
+      return d;
+    }
+    console.warn(`[graph-memory-pro] self-init: connection failed to ${uri}`);
+    closeDriver();
+    return null;
+  } catch (err) {
+    console.warn(`[graph-memory-pro] self-init: error: ${err}`);
+    closeDriver();
+    return null;
+  }
+}
+
+/**
+ * 用已就绪的 driver 启动 API 服务器，并同步 index.ts 模块级 _driver。
+ */
+async function startApiServerFromDriver(driver: Driver): Promise<void> {
+  // 同步 index.ts 的 _driver（供 tools / services 使用）
+  if (!_driver) {
+    _driver = driver;
+  }
+
+  try {
+    const neo4jCfg = getConfig();
+    const cfg: GmConfig = {
+      neo4j: neo4jCfg ?? { uri: "bolt://localhost:37687", user: "neo4j", password: "" },
+      compactTurnCount: 6,
+      recallMaxNodes: 6,
+      recallMaxDepth: 2,
+      freshTailCount: 10,
+      dedupThreshold: 0.90,
+      pagerankDamping: 0.85,
+      pagerankIterations: 20,
+      apiServer: { enabled: true, port: 7850, host: "127.0.0.1" },
+    };
+
+    const { startApiServer } = await import("./src/server/http-server.ts");
+    const logger = { info: console.log, error: console.error, warn: console.warn };
+    _apiServerHandle = await startApiServer(
+      driver, cfg,
+      { enabled: true, port: 7850, host: "127.0.0.1" },
+      logger,
+    );
+    console.log("[graph-memory-pro] API server started (module-level)");
+  } catch (err) {
+    console.error(`[graph-memory-pro] API server start failed: ${err}`);
+  }
+}
 
 async function autoStartApiServer(): Promise<void> {
   if (_apiServerAutoStarted) return;
 
   const FAST_ATTEMPTS = 15;
   const FAST_POLL_MS = 2000;
-  const SLOW_POLL_MS = 10000;
+  const SLOW_POLL_MS = 10_000;
 
+  console.log("[graph-memory-pro] auto-start: polling for driver (30s fast phase)...");
+
+  // 阶段 1：快速轮询 — 等待 register()/gateway_start 设置 driver
   for (let i = 0; i < FAST_ATTEMPTS; i++) {
     const driver = getDriver();
     if (driver) {
       _apiServerAutoStarted = true;
-      try {
-        const neo4jCfg = getConfig();
-        const cfg: GmConfig = {
-          neo4j: neo4jCfg ?? { uri: "bolt://localhost:37687", user: "neo4j", password: "" },
-          compactTurnCount: 6,
-          recallMaxNodes: 6,
-          recallMaxDepth: 2,
-          freshTailCount: 10,
-          dedupThreshold: 0.90,
-          pagerankDamping: 0.85,
-          pagerankIterations: 20,
-          apiServer: { enabled: true, port: 7850, host: "127.0.0.1" },
-        };
-
-        const { startApiServer } = await import("./src/server/http-server.ts");
-        const logger = { info: console.log, error: console.error, warn: console.warn };
-        _apiServerHandle = await startApiServer(
-          driver, cfg,
-          { enabled: true, port: 7850, host: "127.0.0.1" },
-          logger,
-        );
-        console.log("[graph-memory-pro] API server auto-started (module-level)");
-        return;
-      } catch (err) {
-        console.error(`[graph-memory-pro] API server auto-start failed: ${err}`);
-      }
+      await startApiServerFromDriver(driver);
       return;
     }
     await new Promise(r => setTimeout(r, FAST_POLL_MS));
   }
 
-  // 快速轮询未就绪，降级为慢速持续重试（driver 可能在 gateway_start 之后才初始化）
-  console.warn("[graph-memory-pro] API server auto-start: driver not ready after 30s, switching to slow retry (every 10s)");
+  // 阶段 2：自驱动初始化 — 轮询失败，尝试自建 driver
+  console.warn("[graph-memory-pro] auto-start: driver not ready after 30s, trying self-init...");
+  const selfDriver = await trySelfInitDriver();
+  if (selfDriver) {
+    _apiServerAutoStarted = true;
+    await startApiServerFromDriver(selfDriver);
+    return;
+  }
+
+  // 阶段 3：慢速重试 — 自建失败，持续等待外部 driver 就绪
+  console.warn("[graph-memory-pro] auto-start: self-init failed, switching to slow retry (every 10s)");
   _autoStartRetryTimer = setInterval(async () => {
     if (_apiServerAutoStarted) {
       if (_autoStartRetryTimer) { clearInterval(_autoStartRetryTimer); _autoStartRetryTimer = null; }
       return;
     }
+
+    // 检查外部 driver 是否已就绪（register() 延迟调用或 graph-adapter 调用了 setDriver）
     const driver = getDriver();
     if (driver) {
       _apiServerAutoStarted = true;
       if (_autoStartRetryTimer) { clearInterval(_autoStartRetryTimer); _autoStartRetryTimer = null; }
-      try {
-        const neo4jCfg = getConfig();
-        const cfg: GmConfig = {
-          neo4j: neo4jCfg ?? { uri: "bolt://localhost:37687", user: "neo4j", password: "" },
-          compactTurnCount: 6,
-          recallMaxNodes: 6,
-          recallMaxDepth: 2,
-          freshTailCount: 10,
-          dedupThreshold: 0.90,
-          pagerankDamping: 0.85,
-          pagerankIterations: 20,
-          apiServer: { enabled: true, port: 7850, host: "127.0.0.1" },
-        };
-        const { startApiServer } = await import("./src/server/http-server.ts");
-        const logger = { info: console.log, error: console.error, warn: console.warn };
-        _apiServerHandle = await startApiServer(
-          driver, cfg,
-          { enabled: true, port: 7850, host: "127.0.0.1" },
-          logger,
-        );
-        console.warn("[graph-memory-pro] API server auto-started (module-level, slow retry)");
-      } catch (err) {
-        console.error(`[graph-memory-pro] API server auto-start failed (slow retry): ${err}`);
-      }
+      await startApiServerFromDriver(driver);
+      return;
+    }
+
+    // 再次尝试自建 driver（Neo4j 可能刚启动）
+    const selfDriverRetry = await trySelfInitDriver();
+    if (selfDriverRetry) {
+      _apiServerAutoStarted = true;
+      if (_autoStartRetryTimer) { clearInterval(_autoStartRetryTimer); _autoStartRetryTimer = null; }
+      await startApiServerFromDriver(selfDriverRetry);
     }
   }, SLOW_POLL_MS);
 }
 
+/**
+ * 供外部调用者（如 graph-adapter）注册已创建的 driver。
+ * 设置后，autoStartApiServer 会检测到并启动 API 服务器。
+ */
+export function registerExternalDriver(driver: Driver): void {
+  setDbDriver(driver);
+  if (!_driver) {
+    _driver = driver;
+  }
+  console.log("[graph-memory-pro] external driver registered via registerExternalDriver()");
+}
+
 // 在模块加载时触发自动启动（不阻塞模块导入）
+console.log("[graph-memory-pro] module loaded, auto-start scheduled");
 autoStartApiServer();
 
 // v2.3.4 ARCH-1: extractInBackground 已拆分到 src/services/extract-service.ts
@@ -378,15 +431,18 @@ export default definePluginEntry({
     })),
   }) as any),
   register(api: any) {
+    console.log("[graph-memory-pro] register() called by Gateway");
     const logger = api.logger ?? console;
     // v2.2.0 P2-1：把 SDK logger 注入到结构化日志模块
     setExternalLogger(api.logger ?? null);
 
     // ── Gateway 启动时初始化 ──────────────────────
     api.registerHook("gateway_start", async (_event: any) => {
+      console.log("[graph-memory-pro] gateway_start hook fired");
       // P0-2: 配置优先从 SDK 注入，移除 fs.readFileSync
       // SDK 合规：api.pluginConfig 是插件配置的正确来源（InternalHookEvent 不含 config 字段）
       const eventCfg = api.pluginConfig ?? api.config;
+      console.log(`[graph-memory-pro] config check: neo4j.uri=${eventCfg?.neo4j?.uri ? "present" : "missing"}`);
       if (!eventCfg?.neo4j?.uri) {
         logger?.warn?.("[graph-memory-pro] No Neo4j config — plugin skipped");
         return;
@@ -1083,7 +1139,8 @@ export default definePluginEntry({
 export { ensureSchema, searchNodes, getEdgesForNodes, getTopNodes, getNodeCount, getEdgeCount } from "./src/store/store.js";
 export { upsertNode, upsertEdge, mergeNodes, findById } from "./src/store/store.js";
 export { Recaller } from "./src/recaller/recall.js";
-export { getDriver } from "./src/store/db.js";
+export { getDriver, setDriver } from "./src/store/db.js";
+// registerExternalDriver 已在模块级定义并导出（见上方）
 export { runMaintenance } from "./src/graph/maintenance.js";
 export { Extractor, extractTriplets } from "./src/extractor/extract.ts";
 
