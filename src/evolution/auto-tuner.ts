@@ -290,6 +290,10 @@ export class AutoTuner {
     this.currentAction = fullClamped;
     const isImprovement = this.bestMetrics === null || currentMetrics.p1 > this.bestMetrics.p1;
 
+    // 热应用到 Recaller：将调优后的参数直接写入运行时配置，无需重启
+    const appliedCfg = applyActionSpace(currentCfg, this.currentAction);
+    recaller.updateConfig(appliedCfg);
+
     const snapshot: ConfigSnapshot = {
       version: this.snapshots.length + 1,
       timestamp: Date.now(),

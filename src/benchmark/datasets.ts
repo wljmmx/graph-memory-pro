@@ -172,6 +172,8 @@ function mapLongMemEvalCategory(raw: string): string {
  * 当 LoCoMo/LongMemEval 数据未下载时，使用此内置数据集进行快速验证
  */
 export function getBuiltinSampleDataset(): BenchmarkDataset {
+  // 节点 name 同时作为 expectedNodeIds，建图后 upsertNode 以 name 为 id 之一
+  // 这样 evaluateCase 能通过 expectedNodeIds 匹配召回结果
   const cases: BenchmarkCase[] = [
     {
       id: "sample-1",
@@ -179,6 +181,7 @@ export function getBuiltinSampleDataset(): BenchmarkDataset {
       category: "单跳",
       query: "什么是 Neo4j？",
       expectedAnswer: "Neo4j 是图数据库",
+      expectedNodeIds: ["Neo4j"],
       conversation: [
         { role: "user", content: "Neo4j 是什么" },
         { role: "assistant", content: "Neo4j 是一个图数据库" },
@@ -190,6 +193,7 @@ export function getBuiltinSampleDataset(): BenchmarkDataset {
       category: "多跳",
       query: "graph-memory-pro 用了什么图算法？",
       expectedAnswer: "PageRank Label Propagation",
+      expectedNodeIds: ["PageRank", "Label Propagation"],
       conversation: [
         { role: "user", content: "graph-memory-pro 的图算法" },
         { role: "assistant", content: "使用 PageRank 和 Label Propagation" },
@@ -201,6 +205,7 @@ export function getBuiltinSampleDataset(): BenchmarkDataset {
       category: "时序",
       query: "v2.1.2 新增了哪些能力？",
       expectedAnswer: "bi-temporal 状态追踪 过时检测",
+      expectedNodeIds: ["bi-temporal", "状态追踪", "过时检测"],
       conversation: [
         { role: "user", content: "v2.1.2 版本" },
         { role: "assistant", content: "v2.1.2 新增 bi-temporal、状态追踪、过时检测" },
@@ -212,6 +217,7 @@ export function getBuiltinSampleDataset(): BenchmarkDataset {
       category: "开放域",
       query: "如何配置召回参数？",
       expectedAnswer: "recallMaxNodes recallMaxDepth",
+      expectedNodeIds: ["recallMaxNodes", "recallMaxDepth"],
       conversation: [
         { role: "user", content: "召回配置" },
         { role: "assistant", content: "通过 recallMaxNodes 和 recallMaxDepth 配置" },
@@ -223,6 +229,7 @@ export function getBuiltinSampleDataset(): BenchmarkDataset {
       category: "单跳",
       query: "社区检测的默认迭代次数？",
       expectedAnswer: "50",
+      expectedNodeIds: ["社区检测"],
       conversation: [
         { role: "user", content: "社区检测迭代" },
         { role: "assistant", content: "默认 50 次" },
