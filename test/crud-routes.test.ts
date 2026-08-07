@@ -514,7 +514,7 @@ describe("handleMetrics", () => {
 // ═══════════════════════════════════════════════════════════════
 
 describe("handleAutoTunerState", () => {
-  it("无持久化状态文件时返回 available=false", async () => {
+  it("未启用 autoTuner 时返回 available=false 且 reason 说明 disabled", async () => {
     // 用空 HOME 避免 readFile 命中真实文件
     const origHome = process.env.HOME;
     process.env.HOME = "/nonexistent-path-xyz";
@@ -526,7 +526,33 @@ describe("handleAutoTunerState", () => {
 
     expect(result.status).toBe(200);
     expect(result.body.available).toBe(false);
-    expect(result.body.reason).toContain("no persisted state");
+    expect(result.body.enabled).toBe(false);
+    // v2.3.5: 未启用时明确提示 disabled
+    expect(result.body.reason).toContain("disabled");
+
+    process.env.HOME = origHome;
+  });
+
+  it("已启用 autoTuner 但无持久化状态时返回 available=false 且 reason 说明 enabled-but-not-run", async () => {
+    const origHome = process.env.HOME;
+    process.env.HOME = "/nonexistent-path-xyz";
+    const driver = mockDriver() as any;
+    const cfgWithAutoTuner: GmConfig = {
+      ...baseConfig,
+      autoTuner: { enabled: true, maxRounds: 10, regressionThreshold: 0.02, stagnationThreshold: 5, benchmarkMaxCases: 50, llmDiagnosis: true, warmupFeedbacks: 100 },
+    };
+    initRoutes(driver, cfgWithAutoTuner);
+
+    const handler = findHandler("/api/auto-tuner/state");
+    const result = await handler({});
+
+    expect(result.status).toBe(200);
+    expect(result.body.available).toBe(false);
+    expect(result.body.enabled).toBe(true);
+    // v2.3.5: 已启用但未运行时明确提示 on-demand
+    expect(result.body.reason).toContain("enabled but no tuning");
+    expect(result.body.reason).toContain("on-demand");
+    expect(result.body.triggerHint).toBeTruthy();
 
     process.env.HOME = origHome;
   });
@@ -552,7 +578,7 @@ describe("handleAutoTunerState", () => {
 // ═══════════════════════════════════════════════════════════════
 
 describe("handleAssociationMatrixState", () => {
-  it("无 recaller → available=false", async () => {
+  it("未启用 associationMatrix → available=false 且 reason 说明 disabled", async () => {
     const driver = mockDriver() as any;
     initRoutes(driver, baseConfig);
 
@@ -561,7 +587,27 @@ describe("handleAssociationMatrixState", () => {
 
     expect(result.status).toBe(200);
     expect(result.body.available).toBe(false);
-    expect(result.body.reason).toContain("association matrix not initialized");
+    expect(result.body.enabled).toBe(false);
+    // v2.3.5: 未启用时明确提示 disabled
+    expect(result.body.reason).toContain("disabled");
+  });
+
+  it("已启用 associationMatrix 但无 recaller → available=false 且 reason 说明 not injected", async () => {
+    const driver = mockDriver() as any;
+    const cfgWithAm: GmConfig = {
+      ...baseConfig,
+      associationMatrix: { enabled: true, learningRate: 0.01, momentum: 0.9, adamBeta1: 0.9, adamBeta2: 0.999, warmupFeedbacks: 100 },
+    };
+    initRoutes(driver, cfgWithAm);
+
+    const handler = findHandler("/api/association-matrix/state");
+    const result = await handler({});
+
+    expect(result.status).toBe(200);
+    expect(result.body.available).toBe(false);
+    expect(result.body.enabled).toBe(true);
+    // v2.3.5: 已启用但未注入时明确提示 not injected
+    expect(result.body.reason).toContain("not injected");
   });
 
   it("配置中 associationMatrix.enabled 未设置时 enabled=false", async () => {

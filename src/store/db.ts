@@ -7,18 +7,27 @@ import type { Neo4jConfig } from "../types.ts";
 
 const RETRY_DELAYS = [1000, 3000, 5000];
 
+// v2.3.5: 默认值常量（与 neo4j-driver 默认一致）
+const DEFAULT_MAX_CONNECTION_POOL_SIZE = 50;
+const DEFAULT_CONNECTION_ACQUISITION_TIMEOUT = 10_000;
+
 let _driver: Driver | null = null;
 let _config: Neo4jConfig | null = null;
+// v2.3.5: 记录实际生效的 maxPoolSize，供 getPoolMetrics 返回真实值（而非硬编码 50）
+let _effectiveMaxPoolSize = DEFAULT_MAX_CONNECTION_POOL_SIZE;
 
 // v2.3.2 阶段三: 应用层 Session 计数 — 跟踪在途会话数（不等于 driver 内部活跃连接，但可反映并发压力）
 let _activeSessions = 0;
 let _totalSessionsCreated = 0;
 
 export function createDriver(cfg: Neo4jConfig): Driver {
+  const maxPoolSize = cfg.maxConnectionPoolSize ?? DEFAULT_MAX_CONNECTION_POOL_SIZE;
+  const acquisitionTimeout = cfg.connectionAcquisitionTimeout ?? DEFAULT_CONNECTION_ACQUISITION_TIMEOUT;
+  _effectiveMaxPoolSize = maxPoolSize;
   const d = neo4j.driver(cfg.uri, auth.basic(cfg.user, cfg.password), {
     maxConnectionLifetime: 3 * 60 * 60 * 1000, // 3h
-    maxConnectionPoolSize: 50,
-    connectionAcquisitionTimeout: 10_000,
+    maxConnectionPoolSize: maxPoolSize,
+    connectionAcquisitionTimeout: acquisitionTimeout,
     // logging removed to avoid Neo4j ESM bundling issue
   });
   return d;
@@ -44,6 +53,7 @@ export function closeDriver(): void {
     const oldDriver = _driver;
     _driver = null;
     _config = null;
+    _effectiveMaxPoolSize = DEFAULT_MAX_CONNECTION_POOL_SIZE;
     // 异步关闭旧 driver，不阻塞当前调用
     oldDriver.close().catch(() => {
       // ignore close errors
@@ -84,6 +94,9 @@ export function getSession(driver: Driver): Session {
  *
  * 组合应用层计数 + driver 内部反射（防御性，v6 API 可能变化）。
  * 反射失败时仅返回应用层计数，不抛错。
+ *
+ * v2.3.5: maxPoolSize 改为返回 createDriver 实际生效的配置值，
+ *         不再硬编码 50（用户可在 neo4j.maxConnectionPoolSize 中配置）。
  */
 export interface PoolMetrics {
   appActiveSessions: number;
@@ -96,7 +109,7 @@ export function getPoolMetrics(): PoolMetrics {
   return {
     appActiveSessions: _activeSessions,
     appTotalSessionsCreated: _totalSessionsCreated,
-    maxPoolSize: 50,
+    maxPoolSize: _effectiveMaxPoolSize,
     // driver 内部 pool 反射读取（防御性，v6 内部 API 不稳定）
     // 失败返回 null，仅用应用层计数兜底
     driverActiveConnections: tryGetDriverActiveConnections(),

@@ -52,6 +52,18 @@
           "password": {
             "type": "string",
             "default": ""
+          },
+          "maxConnectionPoolSize": {
+            "type": "integer",
+            "default": 50,
+            "minimum": 1,
+            "description": "v2.3.5: Neo4j driver max connection pool size (affects connection-pool metrics)"
+          },
+          "connectionAcquisitionTimeout": {
+            "type": "integer",
+            "default": 10000,
+            "minimum": 1000,
+            "description": "v2.3.5: Connection acquisition timeout in ms"
           }
         },
         "required": [

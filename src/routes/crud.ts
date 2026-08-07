@@ -490,8 +490,16 @@ async function handleMetrics(): Promise<{ status: number; body: string }> {
 //
 // 返回持久化的 AutoTuner 状态（snapshots / currentAction / tuneRound）。
 // 数据来源：~/.openclaw/graph-memory-pro/auto-tuner-state.json
+//
+// v2.3.5: 明确区分三种状态：
+//   - enabled=false: 配置未启用 autoTuner
+//   - enabled=true + no state file: 已启用但尚未运行过调优（需手动触发 gm_tune）
+//   - enabled=true + state file: 已启用且已运行过调优
+// AutoTuner 是按需触发的（通过 gm_tune 工具或 POST /api/auto-tuner/tune），
+// 不是后台常驻服务，因此 "enabled=true 但无 state" 是正常的初始状态。
 async function handleAutoTunerState(): Promise<{ status: number; body: any }> {
   try {
+    const enabled = _cfg?.autoTuner?.enabled === true;
     const { readFile } = await import("node:fs/promises");
     const { join } = await import("node:path");
     const statePath = join(
@@ -499,15 +507,29 @@ async function handleAutoTunerState(): Promise<{ status: number; body: any }> {
       ".openclaw", "graph-memory-pro", "auto-tuner-state.json",
     );
     let raw = "";
+    let hasState = false;
     try {
       raw = await readFile(statePath, "utf-8");
+      hasState = !!(raw && raw.trim());
     } catch {
+      hasState = false;
+    }
+
+    if (!hasState) {
       return {
         status: 200,
         body: {
-          enabled: _cfg?.autoTuner?.enabled ?? false,
+          enabled,
           available: false,
-          reason: "no persisted state file (run gm_tune first)",
+          // v2.3.5: 根据配置状态给出更准确的说明
+          reason: enabled
+            ? "autoTuner enabled but no tuning has been run yet. Trigger via gm_tune tool or POST /api/auto-tuner/tune (on-demand, not a background service)."
+            : "autoTuner disabled. Set autoTuner.enabled=true in config to enable.",
+          config: _cfg?.autoTuner ?? null,
+          // v2.3.5: 补充触发方式说明，便于 dashboard 引导用户
+          triggerHint: enabled
+            ? "Call gm_tune tool or POST /api/auto-tuner/tune to run a tune cycle."
+            : null,
         },
       };
     }
@@ -515,7 +537,7 @@ async function handleAutoTunerState(): Promise<{ status: number; body: any }> {
     return {
       status: 200,
       body: {
-        enabled: _cfg?.autoTuner?.enabled ?? false,
+        enabled,
         available: true,
         config: _cfg?.autoTuner ?? null,
         state: parsed,
@@ -529,20 +551,36 @@ async function handleAutoTunerState(): Promise<{ status: number; body: any }> {
 // ── v2.2.0 P2-4: 关联矩阵 M 状态查询 ───────────────────────────
 //
 // 返回内存中的 AssociationMatrix 统计信息（dim / t / applied / rejected / history）。
+//
+// v2.3.5: 补充冷启动状态和数据来源说明，避免 "已启用但无数据" 被误判为异常。
+// 关联矩阵 M 初始化为单位矩阵（M=I，transform 直接返回原 vec），需要满足：
+//   1. 累计反馈数 >= warmupFeedbacks（默认 100）才退出冷启动期
+//   2. 在召回过程中通过 gm_feedback / POST /api/feedback 提供反馈信号
+//   3. updateWithMarginalUtility() 根据反馈信号更新 M
+// 因此 "updatesApplied=0, historySize=0" 是启用初期的正常状态。
 async function handleAssociationMatrixState(): Promise<{ status: number; body: any }> {
+  const enabled = _cfg?.associationMatrix?.enabled === true;
   const am = _recaller?.getAssociationMatrix();
   if (!am) {
     return {
       status: 200,
       body: {
-        enabled: _cfg?.associationMatrix?.enabled ?? false,
+        enabled,
         available: false,
-        reason: "association matrix not initialized (set associationMatrix.enabled=true)",
+        reason: enabled
+          ? "associationMatrix.enabled=true but matrix not injected into Recaller. Possible causes: self-init path didn't complete, or gateway_start re-injection failed."
+          : "association matrix disabled. Set associationMatrix.enabled=true in config.",
+        config: _cfg?.associationMatrix ?? null,
       },
     };
   }
   try {
     const stats = am.getStats();
+    const warmupFeedbacks = _cfg?.associationMatrix?.warmupFeedbacks ?? _cfg?.warmup?.warmupFeedbacks ?? 100;
+    const judgeManager = _recaller?.getJudgeManager();
+    const feedbackCount = judgeManager?.getFeedbackCount?.() ?? 0;
+    const isColdStart = stats.t === 0 && feedbackCount < warmupFeedbacks;
+
     return {
       status: 200,
       body: {
@@ -550,6 +588,15 @@ async function handleAssociationMatrixState(): Promise<{ status: number; body: a
         available: true,
         config: _cfg?.associationMatrix ?? null,
         stats,
+        // v2.3.5: 补充冷启动 + 数据来源说明
+        coldStart: isColdStart,
+        feedbackCount,
+        warmupFeedbacks,
+        hint: isColdStart
+          ? `Cold start period: need ${warmupFeedbacks} feedbacks to exit (current=${feedbackCount}). M is identity matrix until then. Provide feedback via gm_feedback / POST /api/feedback.`
+          : (stats.updatesApplied === 0
+            ? "Warmup passed but no M updates applied yet. Updates happen during recall when feedback signals are provided."
+            : "Active learning in progress."),
       },
     };
   } catch (err: any) {
@@ -695,8 +742,19 @@ async function handleDoctor(): Promise<{ status: number; body: any }> {
   }
 
   // 5. 反馈系统状态（JudgeManager 冷启动）
+  // v2.3.5: 若 judge 已启用但 _recaller 未初始化，明确报 error 而非静默跳过
+  const judgeEnabled = _cfg?.judge?.enabled !== false;
   const jm = _recaller?.getJudgeManager();
-  if (jm) {
+  if (!jm) {
+    if (judgeEnabled) {
+      checks.push({
+        name: "judge",
+        status: "error",
+        detail: "judge.enabled but JudgeManager not initialized (Recaller missing or not injected)",
+        hint: "Check gateway_start re-injection logs; ensure initRoutes() was called with recaller.",
+      });
+    }
+  } else {
     const coldStart = jm.isColdStart();
     const feedbackCount = jm.getFeedbackCount();
     checks.push({
@@ -704,6 +762,65 @@ async function handleDoctor(): Promise<{ status: number; body: any }> {
       status: coldStart ? "warn" : "ok",
       detail: `feedbackCount=${feedbackCount}, coldStart=${coldStart}`,
       hint: coldStart ? `Need ${_cfg?.judge?.judgeWarmupFeedbacks ?? 50} feedbacks to exit cold start` : undefined,
+    });
+  }
+
+  // v2.3.5: 6. Recaller 整体状态（doctor 之前不检查，导致 recaller 未初始化时无任何提示）
+  if (_recaller) {
+    checks.push({ name: "recaller", status: "ok", detail: "Recaller initialized" });
+  } else {
+    checks.push({
+      name: "recaller",
+      status: "error",
+      detail: "Recaller not initialized",
+      hint: "Check gateway_start hook or self-init path; ensure Recaller construction succeeded.",
+    });
+  }
+
+  // v2.3.5: 7. AssociationMatrix 状态
+  if (_cfg?.associationMatrix?.enabled === true) {
+    const am = _recaller?.getAssociationMatrix();
+    if (!am) {
+      checks.push({
+        name: "association_matrix",
+        status: "error",
+        detail: "associationMatrix.enabled=true but matrix not injected into Recaller",
+        hint: "Check Recaller.setAssociationMatrix() call in gateway_start / startApiServerFromDriver.",
+      });
+    } else {
+      const stats = am.getStats();
+      const warmupFb = _cfg.associationMatrix.warmupFeedbacks ?? _cfg.warmup?.warmupFeedbacks ?? 100;
+      const feedbackCount = jm?.getFeedbackCount() ?? 0;
+      const isColdStart = feedbackCount < warmupFb;
+      checks.push({
+        name: "association_matrix",
+        status: isColdStart ? "warn" : "ok",
+        detail: `dim=${stats.dim}, t=${stats.t}, updatesApplied=${stats.updatesApplied}, updatesRejected=${stats.updatesRejected}, historySize=${stats.historySize}, feedbackCount=${feedbackCount}/${warmupFb}`,
+        hint: isColdStart
+          ? `Cold start: need ${warmupFb} feedbacks (current=${feedbackCount}). M=identity until warmup.`
+          : undefined,
+      });
+    }
+  } else {
+    checks.push({
+      name: "association_matrix",
+      status: "warn",
+      detail: "associationMatrix disabled (set associationMatrix.enabled=true to enable)",
+    });
+  }
+
+  // v2.3.5: 8. AutoTuner 配置状态（仅报告配置，不触发实际调优）
+  if (_cfg?.autoTuner?.enabled === true) {
+    checks.push({
+      name: "auto_tuner",
+      status: "ok",
+      detail: `enabled, maxRounds=${_cfg.autoTuner.maxRounds ?? 10}, llmDiagnosis=${_cfg.autoTuner.llmDiagnosis ?? true} (on-demand: trigger via gm_tune)`,
+    });
+  } else {
+    checks.push({
+      name: "auto_tuner",
+      status: "warn",
+      detail: "autoTuner disabled (set autoTuner.enabled=true to enable on-demand tuning)",
     });
   }
 

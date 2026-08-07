@@ -6,6 +6,10 @@ export interface Neo4jConfig {
   uri: string;
   user: string;
   password: string;
+  /** v2.3.5: 最大连接池大小（默认 50，与 neo4j-driver 默认一致） */
+  maxConnectionPoolSize?: number;
+  /** v2.3.5: 连接获取超时（毫秒，默认 10000） */
+  connectionAcquisitionTimeout?: number;
 }
 
 export interface LlmConfig {
