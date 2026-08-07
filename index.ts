@@ -863,17 +863,25 @@ export default definePluginEntry({
     //
     // 触发链路：
     //   1. memory-core 调 corpusSupplement.search(query, agentSessionKey) → 记录召回节点到 SessionRecallCache
-    //   2. corpusSupplement.get(lookup, agentSessionKey) → 记录"展开查看"强使用信号
+    //   2. corpusSupplement.get(lookup, agentSessionKey) → 记录"展开查看"强使用信号（方案 C 采集）
     //   3. Agent 生成回复后 SDK 触发 agent_end({messages[]}, ctx={sessionId, sessionKey})
     //   4. 本钩子从 messages 提取 lastUserQuery + lastAssistantReply，
     //      从 SessionRecallCache.consume(sessionKey) 取召回节点，
     //      自动调 _recaller.processFeedback(...) 完成判定（Tier 1 启发式零 LLM 成本）
     //
+    // 设计说明（v2.3.5 修订）：
+    //   - get() 展开信号仅"采集"不"事后覆盖"
+    //   - processFeedback 内部统一执行：judge 判定 → upsertFeedback → incrementFeedback → updateAssociationMatrix
+    //   - 不在钩子内重复调用 updateAssociationMatrix，避免：
+    //     * M 矩阵同一次反馈被更新两次（计数错位）
+    //     * DB 反馈记录（启发式判定）与 M 训练数据（get 信号覆盖）不一致
+    //   - get() 信号已在 SessionRecallCache 中保留，未来 JudgeManager.judge() 扩展签名后
+    //     可在判定阶段整合（作为"已知 used"传入），实现单一数据流
+    //
     // 安全特性：
     //   - fire-and-forget，不阻塞会话；异常仅 warn
     //   - 仅当存在召回缓存时触发，无召回则跳过（避免空判定）
     //   - 可通过 cfg.autoFeedback.enabled 关闭
-    //   - get() 命中的节点合并到 usedNodeIds（强使用信号覆盖启发式判断）
     api.registerHook("agent_end", async (event: any, ctx: any) => {
       // 功能开关
       if (_cfg?.autoFeedback?.enabled === false) return;
@@ -899,9 +907,10 @@ export default definePluginEntry({
 
         if (recalledNodes.length === 0) return;
 
-        // v2.3.5 方案 C: get() 展开的节点视为"确定被使用"，合并到判定后强制标记
-        // processFeedback 内部 JudgeManager 会判定 usedNodeIds，此处先跑判定，
-        // 再用 getNodeIds 补充（覆盖启发式的"未使用"结论）
+        // 统一调用 processFeedback，内部完整执行：
+        //   judge 判定 → upsertFeedback → incrementFeedback → updateAssociationMatrix
+        // get() 展开信号已记录在 SessionRecallCache 中（供未来 JudgeManager 扩展使用），
+        // 此处不重复调用 M 更新，保证 DB 反馈记录与 M 训练数据一致。
         const query = recallRecord.query || userQuery;
         await _recaller.processFeedback(
           query,
@@ -909,19 +918,6 @@ export default definePluginEntry({
           assistantReply,
           ctx?.sessionId ?? sessionKey,
         );
-
-        // get() 强使用信号：补充标记 get 命中的节点为 used（覆盖启发式误判）
-        if (recallRecord.getNodeIds.length > 0 && _recaller.getAssociationMatrix()?.isEnabled() && _embed) {
-          // 这些节点已被显式展开，直接喂给 M 矩阵更新作为正向信号
-          const getSet = new Set(recallRecord.getNodeIds);
-          const usedIds = recalledNodes.filter(n => getSet.has(n.id)).map(n => n.id);
-          const unusedIds = recalledNodes.filter(n => !getSet.has(n.id)).map(n => n.id);
-          if (usedIds.length > 0) {
-            try {
-              await (_recaller as any).updateAssociationMatrix(query, usedIds, unusedIds);
-            } catch { /* M 更新失败不影响主流程 */ }
-          }
-        }
 
         if (process.env.GM_DEBUG) {
           console.log(`[graph-memory-pro] auto-feedback collected: session=${sessionKey}, recalled=${recalledNodes.length}, getHits=${recallRecord.getNodeIds.length}`);
