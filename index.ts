@@ -106,23 +106,136 @@ async function getOrCreateDriver(cfg: GmConfig, logger: any): Promise<Driver | n
 let _autoStartRetryTimer: ReturnType<typeof setInterval> | null = null;
 
 /**
- * 尝试用环境变量或默认配置自建 Neo4j driver。
- * 环境变量优先级：NEO4J_URI > GRAPH_MEMORY_NEO4J_URI > bolt://localhost:37687
+ * 从 openclaw.json 读取 graph-memory-pro 插件配置中的 neo4j 连接信息。
+ *
+ * 配置查找路径（优先级从高到低）：
+ *   1. 环境变量 NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD
+ *   2. ~/.openclaw/openclaw.json → plugins.entries["graph-memory-pro"].config.neo4j
+ *   3. ~/.openclaw/openclaw.json → plugins.entries["graph-memory-pro"].config.neo4j (兼容)
+ *
+ * 不再使用硬编码的 bolt://localhost:37687 作为默认值。
+ */
+async function readNeo4jConfigFromFile(): Promise<{ uri: string; user: string; password: string } | null> {
+  // 1. 环境变量优先
+  if (process.env.NEO4J_URI) {
+    return {
+      uri: process.env.NEO4J_URI,
+      user: process.env.NEO4J_USER || "neo4j",
+      password: process.env.NEO4J_PASSWORD || "",
+    };
+  }
+
+  // 2. 读取 openclaw.json
+  try {
+    const { readFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const os = await import("node:os");
+    const home = process.env.HOME || process.env.USERPROFILE || os.default.homedir();
+    const configPath = join(home, ".openclaw", "openclaw.json");
+    const raw = await readFile(configPath, "utf-8");
+    const config = JSON.parse(raw);
+
+    // 查找 graph-memory-pro 插件配置
+    const entries = config?.plugins?.entries;
+    if (entries) {
+      // entries 可能是数组或对象
+      let pluginEntry = null;
+      if (Array.isArray(entries)) {
+        pluginEntry = entries.find((e: any) =>
+          e?.id === "graph-memory-pro" || e?.name === "graph-memory-pro",
+        );
+      } else if (typeof entries === "object") {
+        pluginEntry = entries["graph-memory-pro"] ?? entries["graph_memory_pro"];
+      }
+
+      const neo4j = pluginEntry?.config?.neo4j ?? pluginEntry?.neo4j;
+      if (neo4j?.uri) {
+        console.log(`[graph-memory-pro] config loaded from openclaw.json: neo4j.uri=${neo4j.uri}`);
+        return {
+          uri: neo4j.uri,
+          user: neo4j.user || "neo4j",
+          password: neo4j.password || "",
+        };
+      }
+    }
+
+    console.warn("[graph-memory-pro] no neo4j config found in openclaw.json");
+    return null;
+  } catch (err: any) {
+    if (err?.code === "ENOENT") {
+      console.warn("[graph-memory-pro] openclaw.json not found, cannot self-init driver");
+    } else {
+      console.warn(`[graph-memory-pro] failed to read openclaw.json: ${err?.message ?? err}`);
+    }
+    return null;
+  }
+}
+
+/**
+ * 从 openclaw.json 读取 graph-memory-pro 的完整插件配置。
+ * 用于 self-init 模式下启动 API 服务器时获取完整配置（embedding/llm/judge 等）。
+ */
+async function readFullConfigFromFile(): Promise<GmConfig | null> {
+  try {
+    const { readFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const os = await import("node:os");
+    const home = process.env.HOME || process.env.USERPROFILE || os.default.homedir();
+    const configPath = join(home, ".openclaw", "openclaw.json");
+    const raw = await readFile(configPath, "utf-8");
+    const config = JSON.parse(raw);
+
+    const entries = config?.plugins?.entries;
+    let pluginConfig = null;
+    if (Array.isArray(entries)) {
+      const entry = entries.find((e: any) =>
+        e?.id === "graph-memory-pro" || e?.name === "graph-memory-pro",
+      );
+      pluginConfig = entry?.config ?? entry;
+    } else if (typeof entries === "object") {
+      pluginConfig = entries["graph-memory-pro"]?.config ?? entries["graph-memory-pro"];
+    }
+
+    if (pluginConfig?.neo4j?.uri) {
+      // 填充默认值
+      return {
+        ...pluginConfig,
+        compactTurnCount: pluginConfig.compactTurnCount ?? 6,
+        recallMaxNodes: pluginConfig.recallMaxNodes ?? 6,
+        recallMaxDepth: pluginConfig.recallMaxDepth ?? 2,
+        freshTailCount: pluginConfig.freshTailCount ?? 10,
+        dedupThreshold: pluginConfig.dedupThreshold ?? 0.90,
+        pagerankDamping: pluginConfig.pagerankDamping ?? 0.85,
+        pagerankIterations: pluginConfig.pagerankIterations ?? 20,
+        apiServer: pluginConfig.apiServer ?? { enabled: true, port: 7850, host: "127.0.0.1" },
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 尝试从 openclaw.json 配置自建 Neo4j driver。
+ * 不再使用硬编码默认值，必须从配置文件或环境变量获取连接信息。
  */
 async function trySelfInitDriver(): Promise<Driver | null> {
-  const uri = process.env.NEO4J_URI || process.env.GRAPH_MEMORY_NEO4J_URI || "bolt://localhost:37687";
-  const user = process.env.NEO4J_USER || "neo4j";
-  const password = process.env.NEO4J_PASSWORD || "";
+  const neo4jCfg = await readNeo4jConfigFromFile();
+  if (!neo4jCfg) {
+    console.warn("[graph-memory-pro] self-init: no neo4j config available, skipping");
+    return null;
+  }
 
   try {
-    console.log(`[graph-memory-pro] self-init: connecting to ${uri}...`);
-    const d = initDriver({ uri, user, password });
+    console.log(`[graph-memory-pro] self-init: connecting to ${neo4jCfg.uri}...`);
+    const d = initDriver(neo4jCfg);
     const ok = await verifyWithRetry(d);
     if (ok) {
-      console.log(`[graph-memory-pro] self-init: connected to ${uri}`);
+      console.log(`[graph-memory-pro] self-init: connected to ${neo4jCfg.uri}`);
       return d;
     }
-    console.warn(`[graph-memory-pro] self-init: connection failed to ${uri}`);
+    console.warn(`[graph-memory-pro] self-init: connection failed to ${neo4jCfg.uri}`);
     closeDriver();
     return null;
   } catch (err) {
@@ -143,18 +256,43 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
   _apiServerDriver = driver;
 
   try {
+    // 配置优先级：getConfig()（已初始化）> 从 openclaw.json 读取
     const neo4jCfg = getConfig();
-    const cfg: GmConfig = {
-      neo4j: neo4jCfg ?? { uri: "bolt://localhost:37687", user: "neo4j", password: "" },
-      compactTurnCount: 6,
-      recallMaxNodes: 6,
-      recallMaxDepth: 2,
-      freshTailCount: 10,
-      dedupThreshold: 0.90,
-      pagerankDamping: 0.85,
-      pagerankIterations: 20,
-      apiServer: { enabled: true, port: 7850, host: "127.0.0.1" },
-    };
+    let cfg: GmConfig;
+
+    if (neo4jCfg) {
+      // db.ts 已有配置（gateway_start 或之前的 self-init 设置过）
+      cfg = {
+        neo4j: neo4jCfg,
+        compactTurnCount: 6,
+        recallMaxNodes: 6,
+        recallMaxDepth: 2,
+        freshTailCount: 10,
+        dedupThreshold: 0.90,
+        pagerankDamping: 0.85,
+        pagerankIterations: 20,
+        apiServer: { enabled: true, port: 7850, host: "127.0.0.1" },
+      };
+    } else {
+      // 从 openclaw.json 读取完整插件配置
+      const fullCfg = await readFullConfigFromFile();
+      if (fullCfg) {
+        cfg = fullCfg;
+      } else {
+        console.warn("[graph-memory-pro] no config available for API server, using minimal defaults");
+        cfg = {
+          neo4j: { uri: "", user: "neo4j", password: "" },
+          compactTurnCount: 6,
+          recallMaxNodes: 6,
+          recallMaxDepth: 2,
+          freshTailCount: 10,
+          dedupThreshold: 0.90,
+          pagerankDamping: 0.85,
+          pagerankIterations: 20,
+          apiServer: { enabled: true, port: 7850, host: "127.0.0.1" },
+        };
+      }
+    }
 
     const { startApiServer } = await import("./src/server/http-server.ts");
     const logger = { info: console.log, error: console.error, warn: console.warn };
