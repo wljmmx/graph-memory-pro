@@ -12,6 +12,8 @@ import {
   findById, searchNodes, getTopNodes, getNodesByType,
   getNodeCount, getEdgeCount, getEdgesForNodes,
   getFeedbackCount,
+  upsertNode,
+  getAllCommunitySummaries, getCommunitySummary,
 } from "../store/store.ts";
 import { runMaintenance } from "../graph/maintenance.ts";
 import {
@@ -44,7 +46,7 @@ export function initRoutes(
 }
 
 interface RouteHandler {
-  method: "GET" | "POST" | "DELETE";
+  method: "GET" | "POST" | "PUT" | "DELETE";
   path: string;
   handler: (params: any) => Promise<{ status: number; body: any }>;
 }
@@ -53,28 +55,32 @@ export function getRoutes(): RouteHandler[] {
   return [
     { method: "GET", path: "/api/status", handler: handleStatus },
     { method: "GET", path: "/api/stats", handler: handleStats },
-    { method: "GET", path: "/api/health", handler: handleHealth }, // v2.1.2 G-5
+    { method: "GET", path: "/api/health", handler: handleHealth },
     { method: "GET", path: "/api/nodes/:id", handler: handleGetNode },
+    { method: "POST", path: "/api/nodes", handler: handleCreateNode },
+    { method: "PUT", path: "/api/nodes/:id", handler: handleUpdateNode },
     { method: "GET", path: "/api/search", handler: handleSearch },
+    { method: "POST", path: "/api/recall", handler: handleRecall },
     { method: "GET", path: "/api/top", handler: handleTop },
     { method: "GET", path: "/api/nodes-by-type/:type", handler: handleNodesByType },
+    { method: "GET", path: "/api/communities", handler: handleGetCommunities },
+    { method: "GET", path: "/api/communities/:id/summary", handler: handleGetCommunitySummary },
     { method: "POST", path: "/api/maintain", handler: handleMaintain },
-    { method: "POST", path: "/api/staleness/refresh", handler: handleRefreshStaleness }, // v2.1.2 S-14
-    // v2.2.0 P4: 增量维护
+    { method: "POST", path: "/api/staleness/refresh", handler: handleRefreshStaleness },
     { method: "POST", path: "/api/maintain/incremental", handler: handleIncrementalMaintain },
     { method: "POST", path: "/api/maintain/mark-dirty", handler: handleMarkDirty },
     { method: "GET", path: "/api/maintain/dirty-nodes", handler: handleGetDirtyNodes },
     { method: "DELETE", path: "/api/maintain/dirty-nodes", handler: handleClearDirty },
-    // v2.2.0 P2-2: Prometheus 指标导出
+    { method: "POST", path: "/api/reembed", handler: handleReembed },
+    { method: "POST", path: "/api/feedback", handler: handleFeedback },
+    { method: "POST", path: "/api/benchmark", handler: handleBenchmark },
+    { method: "POST", path: "/api/auto-tuner/tune", handler: handleAutoTunerTune },
     { method: "GET", path: "/api/metrics", handler: handleMetrics },
-    // v2.2.0 P2-3: AutoTuner 状态查询
     { method: "GET", path: "/api/auto-tuner/state", handler: handleAutoTunerState },
-    // v2.2.0 P2-4: 关联矩阵 M 状态查询
     { method: "GET", path: "/api/association-matrix/state", handler: handleAssociationMatrixState },
-    // v2.3.0: 配置自检 — 验证 Neo4j/LLM/Embedding 连通性
     { method: "GET", path: "/api/doctor", handler: handleDoctor },
-    // v2.3.0: LLM token 用量查询
     { method: "GET", path: "/api/usage", handler: handleUsage },
+    { method: "GET", path: "/api/config", handler: handleConfig },
   ];
 }
 
@@ -727,4 +733,253 @@ async function handleUsage(): Promise<{ status: number; body: any }> {
   } catch (err: any) {
     return { status: 500, body: { error: err.message } };
   }
+}
+
+// ── 节点 CRUD ───────────────────────────────────────────────
+
+/** POST /api/nodes — 创建/更新节点 */
+async function handleCreateNode(params: any): Promise<{ status: number; body: any }> {
+  if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
+  const { type, name, description, content } = params ?? {};
+  if (!type || !name) {
+    return { status: 400, body: { error: "type and name are required" } };
+  }
+  const nodeType = String(type).toUpperCase();
+  if (!["TASK", "SKILL", "EVENT"].includes(nodeType)) {
+    return { status: 400, body: { error: `Invalid type: ${type}. Must be TASK, SKILL, or EVENT` } };
+  }
+  try {
+    const now = Date.now();
+    const id = params.id ?? `api-${now}-${Math.random().toString(36).slice(2, 8)}`;
+    await upsertNode(_driver, {
+      id,
+      type: nodeType as any,
+      name: String(name),
+      description: String(description ?? ""),
+      content: String(content ?? ""),
+      status: "active",
+      communityId: undefined,
+      pagerank: 0,
+      validatedCount: 0,
+      createdAt: now,
+      updatedAt: now,
+      embeddingModel: _cfg?.embedding?.model,
+    });
+    return { status: 201, body: { id, message: "node created" } };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+/** PUT /api/nodes/:id — 更新节点 */
+async function handleUpdateNode(params: any): Promise<{ status: number; body: any }> {
+  if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
+  const { id } = params ?? {};
+  if (!id) return { status: 400, body: { error: "id is required" } };
+  try {
+    const existing = await findById(_driver, id);
+    if (!existing) return { status: 404, body: { error: "Node not found" } };
+    const now = Date.now();
+    await upsertNode(_driver, {
+      ...existing,
+      name: params.name ?? existing.name,
+      description: params.description ?? existing.description,
+      content: params.content ?? existing.content,
+      status: params.status ?? existing.status,
+      updatedAt: now,
+      embeddingModel: _cfg?.embedding?.model,
+    });
+    return { status: 200, body: { id, message: "node updated" } };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+// ── Recall 查询 ─────────────────────────────────────────────
+
+/** POST /api/recall — 图谱召回查询 */
+async function handleRecall(params: any): Promise<{ status: number; body: any }> {
+  if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
+  const query = params?.query;
+  if (!query || !String(query).trim()) {
+    return { status: 400, body: { error: "query is required" } };
+  }
+  if (!_recaller) {
+    return { status: 503, body: { error: "Recaller not initialized" } };
+  }
+  try {
+    const result = await _recaller.recall(String(query));
+    return { status: 200, body: result };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+// ── 社区查询 ────────────────────────────────────────────────
+
+/** GET /api/communities — 所有社区摘要列表 */
+async function handleGetCommunities(): Promise<{ status: number; body: any }> {
+  if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
+  try {
+    const summaries = await getAllCommunitySummaries(_driver);
+    const list = Array.from(summaries.values());
+    return { status: 200, body: { count: list.length, summaries: list } };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+/** GET /api/communities/:id/summary — 指定社区摘要 */
+async function handleGetCommunitySummary(params: { id: string }): Promise<{ status: number; body: any }> {
+  if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
+  try {
+    const summary = await getCommunitySummary(_driver, params.id);
+    if (!summary) return { status: 404, body: { error: "Community not found" } };
+    return { status: 200, body: summary };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+// ── Re-embed 触发 ───────────────────────────────────────────
+
+/** POST /api/reembed — 批量重新向量化 */
+async function handleReembed(params: any): Promise<{ status: number; body: any }> {
+  if (!_driver || !_cfg) return { status: 503, body: { error: "Neo4j not connected" } };
+  if (!_embed) return { status: 503, body: { error: "Embedding engine not configured" } };
+  try {
+    const { reEmbedNodes } = await import("../graph/reembed.ts");
+    const batchSize = params?.batchSize ?? 50;
+    const result = await reEmbedNodes(_driver, _embed, batchSize, _cfg.embedding?.model);
+    return { status: 200, body: result };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+// ── 反馈提交 ────────────────────────────────────────────────
+
+/** POST /api/feedback — 提交召回反馈 */
+async function handleFeedback(params: any): Promise<{ status: number; body: any }> {
+  if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
+  const { query, recalledNodeIds, assistantReply, sessionId } = params ?? {};
+  if (!query) return { status: 400, body: { error: "query is required" } };
+  if (!_recaller) return { status: 503, body: { error: "Recaller not initialized" } };
+  try {
+    const ids: string[] = Array.isArray(recalledNodeIds) ? recalledNodeIds : [];
+    const recalledNodes = (await Promise.all(
+      ids.map(async (id: string) => {
+        try { return await findById(_driver!, id); } catch { return null; }
+      }),
+    )).filter(Boolean) as any[];
+
+    await _recaller.processFeedback(
+      String(query),
+      recalledNodes,
+      String(assistantReply ?? ""),
+      sessionId,
+    );
+
+    const jm = _recaller.getJudgeManager();
+    return {
+      status: 200,
+      body: {
+        submitted: true,
+        recalledCount: recalledNodes.length,
+        feedbackCount: jm?.getFeedbackCount() ?? 0,
+        coldStart: jm?.isColdStart() ?? true,
+      },
+    };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+// ── Benchmark 触发 ──────────────────────────────────────────
+
+/** POST /api/benchmark — 运行评测 */
+async function handleBenchmark(params: any): Promise<{ status: number; body: any }> {
+  if (!_recaller || !_cfg) return { status: 503, body: { error: "Plugin not fully initialized" } };
+  try {
+    const { runBenchmark, formatAggregateReport } = await import("../benchmark/runner.ts");
+    const result = await runBenchmark(_recaller, _driver, _cfg, {
+      datasets: params?.datasets ?? "all",
+      maxCases: params?.maxCases ?? _cfg.benchmark?.maxCases ?? 0,
+      buildGraph: params?.buildGraph ?? _cfg.benchmark?.buildGraph ?? true,
+      caseTimeoutMs: _cfg.benchmark?.caseTimeoutMs ?? 30_000,
+      dataDir: _cfg.benchmark?.dataDir,
+      llm: _llm ?? undefined,
+      embedFn: _embed ?? undefined,
+    });
+    return {
+      status: 200,
+      body: { report: formatAggregateReport(result), aggregate: result.aggregate },
+    };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+// ── AutoTuner 触发 ──────────────────────────────────────────
+
+/** POST /api/auto-tuner/tune — 触发一次自动调优 */
+async function handleAutoTunerTune(params: any): Promise<{ status: number; body: any }> {
+  if (!_recaller || !_cfg) return { status: 503, body: { error: "Plugin not fully initialized" } };
+  if (_cfg.autoTuner?.enabled !== true) {
+    return { status: 400, body: { error: "AutoTuner disabled. Set autoTuner.enabled=true in config." } };
+  }
+  try {
+    const { AutoTuner } = await import("../evolution/auto-tuner.ts");
+    const { readFile, writeFile, mkdir } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const statePath = join(
+      process.env.HOME || process.env.USERPROFILE || ".",
+      ".openclaw", "graph-memory-pro", "auto-tuner-state.json",
+    );
+    const tuner = new AutoTuner(_cfg.autoTuner, _llm ?? undefined);
+    tuner.setInitialAction(_cfg);
+    try {
+      const saved = await readFile(statePath, "utf-8");
+      if (saved && saved.trim()) tuner.deserialize(saved);
+    } catch { /* 首次运行无状态文件 */ }
+
+    const rounds = Math.max(1, Math.min(params?.rounds ?? 1, _cfg.autoTuner?.maxRounds ?? 10));
+    const results: any[] = [];
+    for (let i = 0; i < rounds; i++) {
+      const r = await tuner.runTuneCycle(_recaller, _driver, _cfg);
+      results.push(r);
+      if (!r.applied) break;
+    }
+    try {
+      await mkdir(join(statePath, "..").replace(/\/[^/]+$/, ""), { recursive: true }).catch(() => {});
+      await writeFile(statePath, tuner.serialize()).catch(() => {});
+    } catch { /* 持久化失败不影响调优结果 */ }
+
+    return {
+      status: 200,
+      body: {
+        rounds: results,
+        finalAction: tuner.getCurrentAction(),
+        totalRounds: tuner.getTuneRound(),
+        snapshots: tuner.getSnapshots().length,
+      },
+    };
+  } catch (err: any) {
+    return { status: 500, body: { error: err.message } };
+  }
+}
+
+// ── 配置查询 ────────────────────────────────────────────────
+
+/** GET /api/config — 返回当前运行配置（脱敏，不返回密码/token） */
+async function handleConfig(): Promise<{ status: number; body: any }> {
+  if (!_cfg) return { status: 503, body: { error: "Plugin not initialized" } };
+  // 脱敏：移除密码和 token
+  const safe = JSON.parse(JSON.stringify(_cfg));
+  if (safe.neo4j) safe.neo4j.password = "***";
+  if (safe.llm) safe.llm.apiKey = "***";
+  if (safe.embedding) safe.embedding.apiKey = "***";
+  if (safe.apiServer) safe.apiServer.authToken = "***";
+  if (safe.mcp) safe.mcp.authToken = "***";
+  return { status: 200, body: { version: VERSION, config: safe } };
 }
