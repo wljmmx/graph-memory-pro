@@ -21,7 +21,7 @@
 import type { GmNode } from "../types.ts";
 import type { CompleteFn } from "../engine/llm.ts";
 import { createLogger } from "../logger.ts";
-import { withTimeout } from "../utils.ts";
+import { withTimeoutSignal } from "../utils.ts";
 
 const log = createLogger("judge");
 
@@ -183,20 +183,29 @@ export class LlmJudgeStrategy implements JudgeStrategy {
 
   async judge(nodes: GmNode[], reply: string): Promise<JudgeResult> {
     // 节点过多 → 截断（仅判定前 maxNodes 个）
-    const targetNodes = nodes.length > this.maxNodes ? nodes.slice(0, this.maxNodes) : nodes;
+    const truncated = nodes.length > this.maxNodes;
+    const targetNodes = truncated ? nodes.slice(0, this.maxNodes) : nodes;
     if (targetNodes.length === 0) {
       return { usedNodeIds: [], unusedNodeIds: [], matchedBy: "llm", coldStart: false, effectiveTier: 2 };
+    }
+    if (truncated) {
+      log.warn(`Tier 2 LLM judge: nodes truncated (in=${nodes.length}, max=${this.maxNodes}), overflow will use heuristic`, {
+        totalNodes: nodes.length,
+        maxNodes: this.maxNodes,
+        overflowCount: nodes.length - this.maxNodes,
+      });
     }
 
     try {
       const prompt = buildLlmJudgePrompt(targetNodes, reply);
-      const response = await withTimeout(this.llm(prompt, "判断召回节点是否被使用"), this.timeoutMs);
-      const cleaned = ((response ?? "") as string)
-        .trim()
-        .replace(/```json\s*/i, "")
-        .replace(/```\s*$/g, "")
-        .trim();
-      const parsed = JSON.parse(cleaned);
+      // v2.3.5 B2: 使用 withTimeoutSignal 将 AbortSignal 透传到底层 fetch，
+      // 超时后取消底层请求，避免 orphan request 继续占用 LLM 配额 / 信号量槽位。
+      const response = await withTimeoutSignal(
+        (signal) => this.llm(prompt, "判断召回节点是否被使用", signal),
+        this.timeoutMs,
+        "Tier 2 LLM judge",
+      );
+      const parsed = parseLlmJudgeJson(response);
       const usedSet = new Set<string>((parsed.used ?? []).filter((x: any) => typeof x === "string"));
 
       const usedNodeIds: string[] = [];
@@ -206,7 +215,7 @@ export class LlmJudgeStrategy implements JudgeStrategy {
         else unusedNodeIds.push(n.id);
       }
       // 未参与 LLM 判定的节点（被截断的）→ 走启发式快速判断
-      if (nodes.length > this.maxNodes) {
+      if (truncated) {
         const overflow = nodes.slice(this.maxNodes);
         const overflowResult = await this.fallback.judge(overflow, reply);
         usedNodeIds.push(...overflowResult.usedNodeIds);
@@ -227,6 +236,54 @@ export class LlmJudgeStrategy implements JudgeStrategy {
       return { ...result, effectiveTier: 1 };
     }
   }
+}
+
+/**
+ * v2.3.5: 鲁棒的 LLM JSON 解析
+ *
+ * 处理多种常见 LLM 输出格式：
+ *   1. 纯 JSON: {"used": [...], "reasoning": "..."}
+ *   2. ```json ... ``` 围栏
+ *   3. 纯 ``` ... ``` 围栏（无语言标签）
+ *   4. JSON 前后包含解释性文本（"结果如下：\n```json\n{...}\n```\n仅供参考"）
+ *   5. 多个 JSON 片段时取第一个完整对象
+ *
+ * 解析失败时抛错（由调用方 fallback 到 Tier 1）。
+ */
+export function parseLlmJudgeJson(response: string | null | undefined): { used?: unknown[]; reasoning?: string } {
+  const raw = (response ?? "").trim();
+  if (!raw) throw new Error("empty LLM response");
+
+  // 1. 直接尝试解析（最理想情况：纯 JSON）
+  try {
+    return JSON.parse(raw);
+  } catch {
+    // 继续下面的清理流程
+  }
+
+  // 2. 去除 markdown 围栏（```json 或 ``` 开头，``` 结尾）
+  const cleaned = raw
+    .replace(/```(?:json|JSON)?\s*/g, "")
+    .replace(/```\s*/g, "")
+    .trim();
+
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    // 继续下面的兜底提取
+  }
+
+  // 3. 兜底：提取首个完整 {...} 对象（处理 JSON 前后有解释性文本的情况）
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  if (match) {
+    try {
+      return JSON.parse(match[0]);
+    } catch {
+      // 继续抛错
+    }
+  }
+
+  throw new Error(`failed to parse LLM judge JSON: ${raw.slice(0, 200)}`);
 }
 
 // ── Tier 3: 自定义策略容器 ──────────────────────────────────────

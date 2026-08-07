@@ -6,9 +6,16 @@
  */
 
 import type { LlmConfig } from "../types.ts";
+import { combineSignals } from "../utils.ts";
 
-/** LLM 补全函数签名 */
-export type CompleteFn = (system: string, user: string) => Promise<string>;
+/**
+ * LLM 补全函数签名
+ *
+ * v2.3.5 B2: 新增可选 signal 参数，调用方可传入 AbortSignal 以便在外部
+ * 超时（如 judge 的 8s 超时）触发时取消底层 fetch，避免 orphan request。
+ * 不传 signal 时引擎仍会应用 30s 内部安全超时。
+ */
+export type CompleteFn = (system: string, user: string, signal?: AbortSignal) => Promise<string>;
 
 /** 重试延迟 */
 const RETRY_DELAYS = [2000, 5000, 10_000];
@@ -107,7 +114,7 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
   const maxConcurrency = config.maxConcurrency ?? DEFAULT_LLM_MAX_CONCURRENCY;
   const semaphore = getSemaphore(baseURL, model, maxConcurrency);
 
-  return async function complete(system: string, user: string): Promise<string> {
+  return async function complete(system: string, user: string, signal?: AbortSignal): Promise<string> {
     const lastErr: Error[] = [];
     const delays = [...RETRY_DELAYS];
 
@@ -118,6 +125,11 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
       try {
         let response: Response;
         let apiFormat: 'openai' | 'ollama';
+
+        // v2.3.5 B2: 合并外部 signal（调用方超时）与 30s 内部安全超时。
+        // 每次重试重新计算，确保每次 attempt 有独立的 30s 预算。
+        // 任一信号 abort 即取消底层 fetch，避免 orphan request。
+        const requestSignal = combineSignals(signal, AbortSignal.timeout(30_000));
 
         if (isOllamaNative) {
           // Ollama 原生 /api/chat 端点：keep_alive 完整支持
@@ -138,7 +150,7 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
               },
               keep_alive: keepAlive,
             }),
-            signal: AbortSignal.timeout(30_000),
+            signal: requestSignal,
           });
         } else {
           // OpenAI 兼容端点 /v1/chat/completions（含 Ollama /v1 路径和云端 API）
@@ -160,7 +172,7 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
               // keep_alive 仅 Ollama 识别，OpenAI 兼容服务会忽略未知字段
               ...(keepAlive != null ? { keep_alive: keepAlive } : {}),
             }),
-            signal: AbortSignal.timeout(30_000),
+            signal: requestSignal,
           });
         }
 
@@ -202,6 +214,12 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
 
         // 对 4xx 错误（非 429 限流）不重试，因为重试也不会成功
         if (error.message.match(/LLM API 4\d{2}/) && !error.message.includes("429")) {
+          throw error;
+        }
+
+        // v2.3.5 B2: 外部 signal 已 abort（调用方超时）→ 不重试。
+        // 外部 signal 跨重试共享，一旦 abort 不会恢复，重试只会白等 delay 后再 abort。
+        if (signal?.aborted) {
           throw error;
         }
 
@@ -356,11 +374,13 @@ export function createRuntimeCompleteFn(
   /**
    * 基于 runtime LLM 的补全调用（含 content 规范化）
    */
-  async function runtimeComplete(system: string, user: string): Promise<string> {
+  async function runtimeComplete(system: string, user: string, signal?: AbortSignal): Promise<string> {
     // v2.3.2 阶段二: 信号量限流（runtime LLM 通常本地单流）
     const release = await runtimeSemaphore.acquire();
     try {
       // v2.3.3 ERR-1: runtime LLM 也需要超时控制，防 SDK complete 挂起导致信号量槽位永久占用
+      // v2.3.5 B2: 合并外部 signal（调用方超时）与 30s 内部安全超时
+      const requestSignal = combineSignals(signal, AbortSignal.timeout(30_000));
       const result = await runtimeLlm.complete({
         messages: [
           { role: "system", content: system },
@@ -369,7 +389,7 @@ export function createRuntimeCompleteFn(
         maxTokens: 1024,
         temperature: 0.3,
         purpose: "graph-memory-pro:llm",
-        signal: AbortSignal.timeout(30_000),
+        signal: requestSignal,
       });
       const text = normalizeContent(result?.text);
       if (!text) {
@@ -435,7 +455,7 @@ export function createRuntimeCompleteFn(
     }
   }
 
-  return async (system: string, user: string): Promise<string> => {
+  return async (system: string, user: string, signal?: AbortSignal): Promise<string> => {
     // 首次调用：执行 provider 探测（所有并发调用共享同一个 detectPromise）
     if (decision === null) {
       if (!detectPromise) {
@@ -446,12 +466,12 @@ export function createRuntimeCompleteFn(
 
     if (decision === "fallback") {
       const fb = getFallback();
-      if (fb) return fb(system, user);
+      if (fb) return fb(system, user, signal);
       // fallback 配置无效（如未配置 model/baseURL）→ 退回 runtime
     }
 
     // decision === "runtime" 或 fallback 无效时
-    return runtimeComplete(system, user);
+    return runtimeComplete(system, user, signal);
   };
 }
 

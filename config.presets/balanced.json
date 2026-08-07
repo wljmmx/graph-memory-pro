@@ -46,7 +46,7 @@
   "judge": {
     "enabled": true,
     "asyncMode": true,
-    "judgeWarmupFeedbacks": 50,
+    "judgeWarmupFeedbacks": 20,
     "heuristicMatch": "both",
     "tier": 1,
     "llmJudgeMaxNodes": 10,
@@ -54,14 +54,15 @@
     "customStrategy": ""
   },
   "feedback": { "enabled": true, "retentionDays": 90 },
-  "warmup": { "warmupFeedbacks": 100, "judgeWarmupFeedbacks": 50 },
+  "autoFeedback": { "enabled": true, "trackGetExpansion": true, "maxRecallRecordsPerSession": 5 },
+  "warmup": { "warmupFeedbacks": 40 },
   "associationMatrix": {
     "enabled": false,
     "learningRate": 0.01,
     "momentum": 0.9,
     "adamBeta1": 0.9,
     "adamBeta2": 0.999,
-    "warmupFeedbacks": 100
+    "warmupFeedbacks": 40
   },
   "marginalUtility": { "enabled": false, "neighborhoodSize": 5, "minImprovement": 0.0 },
   "evolvableEmbedding": {
@@ -109,7 +110,7 @@
     "maxRounds": 10,
     "benchmarkMaxCases": 50,
     "llmDiagnosis": true,
-    "warmupFeedbacks": 100
+    "warmupFeedbacks": 40
   },
   "mcp": {
     "enabled": false,

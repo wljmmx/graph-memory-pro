@@ -569,7 +569,7 @@ export default definePluginEntry({
     judge: Type.Optional(Type.Object({
       enabled: Type.Optional(Type.Boolean({ default: true })),
       asyncMode: Type.Optional(Type.Boolean({ default: true })),
-      judgeWarmupFeedbacks: Type.Optional(Type.Number({ default: 50 })),
+      judgeWarmupFeedbacks: Type.Optional(Type.Number({ default: 20, description: "v2.3.5 B1: Judge 冷启动阈值（50→20）" })),
       heuristicMatch: Type.Optional(Type.Union([
         Type.Literal("id"),
         Type.Literal("name"),
@@ -586,8 +586,8 @@ export default definePluginEntry({
       retentionDays: Type.Optional(Type.Number({ default: 90 })),
     })),
     warmup: Type.Optional(Type.Object({
-      warmupFeedbacks: Type.Optional(Type.Number({ default: 100 })),
-      judgeWarmupFeedbacks: Type.Optional(Type.Number({ default: 50 })),
+      // v2.3.5: judgeWarmupFeedbacks 已迁移到 judge 段（避免冗余）
+      warmupFeedbacks: Type.Optional(Type.Number({ default: 40, description: "v2.3.5 B1: M 矩阵冷启动阈值（100→40）" })),
     })),
     // ── v2.1.2 第三批 在线学习 + 可进化嵌入 + 重要性评分 ────────
     associationMatrix: Type.Optional(Type.Object({
@@ -596,7 +596,7 @@ export default definePluginEntry({
       momentum: Type.Optional(Type.Number({ default: 0.9 })),
       adamBeta1: Type.Optional(Type.Number({ default: 0.9 })),
       adamBeta2: Type.Optional(Type.Number({ default: 0.999 })),
-      warmupFeedbacks: Type.Optional(Type.Number({ default: 100 })),
+      warmupFeedbacks: Type.Optional(Type.Number({ default: 40, description: "v2.3.5 B1: M 矩阵冷启动阈值（100→40）" })),
     })),
     marginalUtility: Type.Optional(Type.Object({
       enabled: Type.Optional(Type.Boolean({ default: true })),
@@ -662,7 +662,7 @@ export default definePluginEntry({
       maxRounds: Type.Optional(Type.Number({ default: 10 })),
       benchmarkMaxCases: Type.Optional(Type.Number({ default: 50 })),
       llmDiagnosis: Type.Optional(Type.Boolean({ default: true })),
-      warmupFeedbacks: Type.Optional(Type.Number({ default: 100 })),
+      warmupFeedbacks: Type.Optional(Type.Number({ default: 40, description: "v2.3.5 B1: autoTuner 冷启动阈值（100→40）" })),
     })),
     // ── v2.2.0 MCP Server ────────────
     mcp: Type.Optional(Type.Object({

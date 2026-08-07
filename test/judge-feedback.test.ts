@@ -15,7 +15,7 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { GmNode, GmConfig } from "../src/types.ts";
-import { JudgeManager } from "../src/recaller/judge.ts";
+import { JudgeManager, parseLlmJudgeJson } from "../src/recaller/judge.ts";
 import { mockDriver } from "./helpers/neo4j-mock.ts";
 
 // ── vi.mock：拦截 store 模块，把 upsertFeedback 替换为可断言的 vi.fn ──
@@ -579,6 +579,52 @@ describe("JudgeManager Tier 1/2/3 策略分发 (v2.2.0)", () => {
       expect(r.effectiveTier).toBe(2);
       expect(r.usedNodeIds).toEqual(["n-001"]);
     });
+
+    it("tier=2 → LLM 调用透传 AbortSignal（可用于取消底层 fetch）", async () => {
+      const fakeLlm = vi.fn().mockResolvedValue(
+        JSON.stringify({ used: ["n-001"], reasoning: "" }),
+      );
+      const jm = new JudgeManager(
+        { tier: 2, judgeWarmupFeedbacks: 1, asyncMode: false },
+        fakeLlm as any,
+      );
+      jm.incrementFeedback();
+
+      await jm.judge([mkNode("n-001", "conda-env")], "用 conda-env");
+
+      // CompleteFn 第三参数为 signal（v2.3.5 B2），用于超时取消底层请求
+      expect(fakeLlm).toHaveBeenCalledTimes(1);
+      const signal = fakeLlm.mock.calls[0]![2] as AbortSignal | undefined;
+      expect(signal).toBeInstanceOf(AbortSignal);
+      expect(signal!.aborted).toBe(false);
+    });
+
+    it("tier=2 + LLM 超时 → fallback Tier 1 且 signal 被 abort", async () => {
+      vi.useFakeTimers();
+      // LLM 永不 resolve，模拟慢请求；监听传入的 signal
+      let receivedSignal: AbortSignal | null = null;
+      const slowLlm = vi.fn((...args: unknown[]) => {
+        receivedSignal = args[2] as AbortSignal;
+        return new Promise<string>(() => {}); // never resolves
+      });
+      const jm = new JudgeManager(
+        { tier: 2, judgeWarmupFeedbacks: 1, llmJudgeTimeoutMs: 100, asyncMode: false },
+        slowLlm as any,
+      );
+      jm.incrementFeedback();
+
+      const judgePromise = jm.judge([mkNode("n-001", "conda-env")], "用 conda-env");
+      // 推进时间超过 llmJudgeTimeoutMs
+      vi.advanceTimersByTime(150);
+      const r = await judgePromise;
+
+      // 超时 → fallback Tier 1 启发式
+      expect(r.effectiveTier).toBe(1);
+      expect(r.matchedBy).toBe("heuristic");
+      // signal 已被 abort（底层 fetch 会被取消）
+      expect(receivedSignal!.aborted).toBe(true);
+      vi.useRealTimers();
+    });
   });
 
   // ── Tier 3: 自定义策略 ────────────────────────────────────
@@ -687,5 +733,53 @@ describe("JudgeManager Tier 1/2/3 策略分发 (v2.2.0)", () => {
       expect(r.matchedBy).toBe("heuristic");
       expect(r.effectiveTier).toBe(1);
     });
+  });
+});
+
+// ── parseLlmJudgeJson 鲁棒解析（v2.3.5 B2） ──────────────────
+
+describe("parseLlmJudgeJson", () => {
+  it("纯 JSON → 直接解析", () => {
+    const r = parseLlmJudgeJson(JSON.stringify({ used: ["a", "b"], reasoning: "ok" }));
+    expect(r.used).toEqual(["a", "b"]);
+    expect(r.reasoning).toBe("ok");
+  });
+
+  it("```json 围栏 → 解析", () => {
+    const r = parseLlmJudgeJson("```json\n" + JSON.stringify({ used: ["x"] }) + "\n```");
+    expect(r.used).toEqual(["x"]);
+  });
+
+  it("纯 ``` 围栏（无语言标签）→ 解析", () => {
+    const r = parseLlmJudgeJson("```\n" + JSON.stringify({ used: ["y"] }) + "\n```");
+    expect(r.used).toEqual(["y"]);
+  });
+
+  it("JSON 前后有解释性文本 → 提取首个对象", () => {
+    const r = parseLlmJudgeJson(
+      "结果如下：\n```json\n" + JSON.stringify({ used: ["z"] }) + "\n```\n仅供参考",
+    );
+    expect(r.used).toEqual(["z"]);
+  });
+
+  it("JSON 前后有解释性文本（无围栏）→ 提取首个对象", () => {
+    const r = parseLlmJudgeJson("判定结果是 " + JSON.stringify({ used: ["w"] }) + " 完毕");
+    expect(r.used).toEqual(["w"]);
+  });
+
+  it("空字符串 → 抛错", () => {
+    expect(() => parseLlmJudgeJson("")).toThrow("empty LLM response");
+    expect(() => parseLlmJudgeJson(null)).toThrow("empty LLM response");
+    expect(() => parseLlmJudgeJson(undefined)).toThrow("empty LLM response");
+  });
+
+  it("非 JSON 且无 {} → 抛错（含截断的原始内容）", () => {
+    expect(() => parseLlmJudgeJson("这完全不是 JSON")).toThrow(/failed to parse LLM judge JSON/);
+  });
+
+  it("reasoning 字段可选", () => {
+    const r = parseLlmJudgeJson(JSON.stringify({ used: ["a"] }));
+    expect(r.used).toEqual(["a"]);
+    expect(r.reasoning).toBeUndefined();
   });
 });

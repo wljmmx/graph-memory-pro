@@ -46,9 +46,10 @@
     "similarityThreshold": 0.95
   },
   "judge": {
+    "$comment": "v2.3.5: tier=1 启发式（默认，零 LLM 成本）；tier=2 LLM 裁判（需 LLM 配置，热启动后启用）；tier=3 自定义策略。judgeWarmupFeedbacks=20 配合 agent_end 自动反馈可快速退出冷启动",
     "enabled": true,
     "asyncMode": true,
-    "judgeWarmupFeedbacks": 50,
+    "judgeWarmupFeedbacks": 20,
     "heuristicMatch": "both",
     "tier": 1,
     "llmJudgeMaxNodes": 10,
@@ -56,14 +57,20 @@
     "customStrategy": ""
   },
   "feedback": { "enabled": true, "retentionDays": 90 },
-  "warmup": { "warmupFeedbacks": 100, "judgeWarmupFeedbacks": 50 },
+  "autoFeedback": {
+    "$comment": "v2.3.5: agent_end 自动反馈采集，破除冷启动死循环。默认启用，无需手动 gm_feedback",
+    "enabled": true,
+    "trackGetExpansion": true,
+    "maxRecallRecordsPerSession": 5
+  },
+  "warmup": { "warmupFeedbacks": 40 },
   "associationMatrix": {
     "enabled": true,
     "learningRate": 0.01,
     "momentum": 0.9,
     "adamBeta1": 0.9,
     "adamBeta2": 0.999,
-    "warmupFeedbacks": 100
+    "warmupFeedbacks": 40
   },
   "marginalUtility": { "enabled": true, "neighborhoodSize": 5, "minImprovement": 0.0 },
   "evolvableEmbedding": {
@@ -111,7 +118,7 @@
     "maxRounds": 10,
     "benchmarkMaxCases": 50,
     "llmDiagnosis": true,
-    "warmupFeedbacks": 100
+    "warmupFeedbacks": 40
   },
   "mcp": {
     "enabled": false,

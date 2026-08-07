@@ -318,8 +318,9 @@
           },
           "judgeWarmupFeedbacks": {
             "type": "integer",
-            "default": 50,
-            "minimum": 1
+            "default": 20,
+            "minimum": 1,
+            "description": "v2.3.5 B1: Judge 冷启动阈值（50→20）。冷启动期强制 Tier 1 启发式，配合 agent_end 自动反馈可快速达标。"
           },
           "heuristicMatch": {
             "type": "string",
@@ -369,16 +370,13 @@
       "warmup": {
         "type": "object",
         "additionalProperties": false,
+        "description": "v2.3.5: 全局冷启动配置。judgeWarmupFeedbacks 已迁移到 judge 段，此处仅保留 warmupFeedbacks（M 矩阵冷启动）。",
         "properties": {
           "warmupFeedbacks": {
             "type": "integer",
-            "default": 100,
-            "minimum": 1
-          },
-          "judgeWarmupFeedbacks": {
-            "type": "integer",
-            "default": 50,
-            "minimum": 1
+            "default": 40,
+            "minimum": 1,
+            "description": "v2.3.5 B1: M 矩阵冷启动阈值（100→40）。配合 agent_end 自动反馈可快速达标。"
           }
         }
       },
@@ -415,8 +413,9 @@
           },
           "warmupFeedbacks": {
             "type": "integer",
-            "default": 100,
-            "minimum": 1
+            "default": 40,
+            "minimum": 1,
+            "description": "v2.3.5 B1: M 矩阵冷启动阈值（100→40）。"
           }
         }
       },
@@ -662,8 +661,9 @@
           },
           "warmupFeedbacks": {
             "type": "integer",
-            "default": 100,
-            "minimum": 1
+            "default": 40,
+            "minimum": 1,
+            "description": "v2.3.5 B1: autoTuner 冷启动阈值（100→40）。"
           }
         }
       },

@@ -6,9 +6,43 @@
 
 ## [2.3.5] — 2026-07-10
 
+### Changed — 冷启动死循环破除（B1）
+
+针对 `gm_feedback` 为手动工具导致反馈长期不达标、Judge / M 矩阵永久冷启动的问题，降低阈值并新增自动反馈采集，让系统在正常使用中即可退出冷启动。
+
+- **冷启动阈值降低**：[src/recaller/judge.ts](src/recaller/judge.ts) `judgeWarmupFeedbacks` 50→20；[index.ts](index.ts) / [openclaw.plugin.json](openclaw.plugin.json) / [config.example.json](config.example.json) / [config.presets/](config.presets/) 中 `warmupFeedbacks` / `autoTuner.warmupFeedbacks` 100→40。旧值在纯手动 `gm_feedback` 下几乎不可达，配合 agent_end 自动反馈后 20/40 即可快速达标。
+- **autoFeedback 自动反馈采集**：[config.example.json](config.example.json) / 预设文件新增 `autoFeedback` 段（默认启用），通过 `agent_end` hook 基于 Tier 1 启发式自动判定并落库反馈，破除"必须手动 gm_feedback"的死循环。
+- **冗余配置清理**：移除 `warmup.judgeWarmupFeedbacks`（与 `judge.judgeWarmupFeedbacks` 重复且未使用），schema / 示例 / 预设三处对齐。
+- **tier=2 预设参考**：[config.presets/full.json](config.presets/full.json) 设置 `judge.tier=2`，作为启用 LLM 裁判的参考配置（热启动后生效）。
+
+### Fixed — LLM 判定鲁棒性（B2）
+
+- **LLM 超时不取消底层请求**：[src/utils.ts](src/utils.ts) 新增 `withTimeoutSignal`（透传 AbortSignal）+ `combineSignals`（合并外部超时与内部 30s 安全超时）；[src/engine/llm.ts](src/engine/llm.ts) `CompleteFn` 新增可选 `signal` 参数并在 fetch / runtime LLM 调用中透传；[src/recaller/judge.ts](src/recaller/judge.ts) Tier 2 改用 `withTimeoutSignal`。超时后底层 fetch 被 abort，避免 orphan request 继续占用 LLM 配额与信号量槽位；外部 signal 已 abort 时不再无谓重试。
+- **LLM JSON 解析鲁棒性**：[src/recaller/judge.ts](src/recaller/judge.ts) 新增 `parseLlmJudgeJson`，按"直接解析 → 去 markdown 围栏 → 提取首个 `{...}` 对象"三级回退，兼容 ```json 围栏、纯 ``` 围栏、JSON 前后含解释性文本等 LLM 输出格式。
+- **节点截断静默**：Tier 2 节点数超 `llmJudgeMaxNodes` 时新增 warn 日志（总数 / 上限 / 溢出数），不再静默截断。
+- **超时错误语义不清**：`withTimeout` / `withTimeoutSignal` 均传 `label`，错误信息明确（如 "Tier 2 LLM judge timed out after 8000ms"）。
+
 ### Added — 集成测试
 
 - **TEST-1 smoke test 骨架**：新增 [test/smoke.test.ts](test/smoke.test.ts) + [docker-compose.smoke.yml](docker-compose.smoke.yml) + [vitest.smoke.config.ts](vitest.smoke.config.ts)，连接真实 Neo4j 验证 schema/写入/读取/向量索引/连接池计数。Neo4j 不可用时自动 skip，不影响主测试套件。通过 `npm run test:smoke` 运行。
+
+### Added — 测试
+
+- 新增 `withTimeoutSignal` / `combineSignals` 单元测试 10 用例（正常完成 / signal 透传 / 超时 abort / 多信号联动 / 监听器清理）
+- 新增 `parseLlmJudgeJson` 单元测试 8 用例（纯 JSON / ```json 围栏 / 纯 ``` 围栏 / 前后文本 / 空输入 / 非 JSON）
+- 新增 judge Tier 2 signal 透传 + 超时 fallback 测试 2 用例
+- 总测试数 486 → **506**
+
+### Configuration Migration — 配置迁移（v2.3.4 → v2.3.5）
+
+无破坏性变更，现有 v2.3.4 配置无需任何改动。
+
+**默认值变更**（仅影响未显式配置该项的部署）：
+- `judge.judgeWarmupFeedbacks` 默认 50→20
+- `warmup.warmupFeedbacks` / `associationMatrix.warmupFeedbacks` / `autoTuner.warmupFeedbacks` 默认 100→40
+
+**新增可选配置**：
+- `autoFeedback.enabled`（默认 true）：agent_end 自动反馈采集，无需手动调用 `gm_feedback` 即可退出冷启动。如需保持纯手动反馈，设为 `false`。
 
 ## [2.3.4] — 2026-07-10
 
