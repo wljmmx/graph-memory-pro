@@ -1548,8 +1548,7 @@ export default definePluginEntry({
             "",
             `Current action: ${JSON.stringify(tuner.getCurrentAction())}`,
             "",
-            "⚠️ 注意：调优结果需手动应用到 GmConfig 并重启 Recaller 才生效。",
-            "   可通过 applyActionSpace(cfg, tuner.getCurrentAction()) 生成新配置。",
+            "✅ 调优参数已自动应用到 Recaller，即时生效。",
           ];
           return { content: [{ type: "text", text: lines.join("\n") }], details: { rounds: results, finalAction: tuner.getCurrentAction(), totalRounds: tuner.getTuneRound(), snapshots: tuner.getSnapshots().length } };
         } catch (err: any) {

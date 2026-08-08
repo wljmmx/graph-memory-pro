@@ -42,6 +42,14 @@ export class Recaller {
   setEmbedFn(fn: EmbedFn): void { this.embed = fn; }
 
   /**
+   * 运行时更新配置（由 AutoTuner 调参后热生效，无需重启 Gateway）
+   * 仅更新召回相关参数，不影响已注入的 embed/judgeManager/associationMatrix
+   */
+  updateConfig(cfg: Partial<GmConfig>): void {
+    this.cfg = { ...this.cfg, ...cfg };
+  }
+
+  /**
    * 设置 JudgeManager（由外部 index.ts 在 LLM 就绪后注入）
    * 若不调用则不启用 I-2 反馈
    */

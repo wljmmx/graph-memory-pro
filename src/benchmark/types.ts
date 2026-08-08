@@ -203,16 +203,19 @@ export function evaluateCase(
   latencyMs: number,
 ): CaseResult {
   const expectedNodeIds = testCase.expectedNodeIds ?? [];
-  const recalledNodeIds = recallResult.nodes.map(n => n.id);
+  const recalledNodes = recallResult.nodes;
 
   // 计算 P@1 / P@3 / MRR
+  // 同时匹配 node.id 和 node.name，兼容建图时 name 作为 expectedNodeId 的情况
   let hitAt1 = false;
   let hitAt3 = false;
   let reciprocalRank = 0;
 
   if (expectedNodeIds.length > 0) {
-    for (let i = 0; i < recalledNodeIds.length; i++) {
-      if (expectedNodeIds.includes(recalledNodeIds[i])) {
+    for (let i = 0; i < recalledNodes.length; i++) {
+      const n = recalledNodes[i];
+      const matched = expectedNodeIds.includes(n.id) || expectedNodeIds.includes(n.name);
+      if (matched) {
         if (i === 0) hitAt1 = true;
         if (i < 3) hitAt3 = true;
         reciprocalRank = 1 / (i + 1);
