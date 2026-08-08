@@ -422,11 +422,14 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
 async function autoStartApiServer(): Promise<void> {
   if (_apiServerAutoStarted) return;
 
-  const FAST_ATTEMPTS = 15;
+  // v2.3.5 fix: 缩短纯轮询窗口（30s→10s），尽快尝试 self-init。
+  //   原逻辑 30s 纯轮询期间 driver 为 null，quickHealth 误报 "driver unavailable"。
+  //   新逻辑：10s 快速探测外部 driver，找不到就立即 self-init。
+  const FAST_ATTEMPTS = 5;   // 5 × 2s = 10s
   const FAST_POLL_MS = 2000;
   const SLOW_POLL_MS = 10_000;
 
-  log.info("auto-start: polling for driver (30s fast phase)...");
+  log.info("auto-start: polling for gateway driver (10s fast phase)...");
 
   // 阶段 1：快速轮询 — 等待 register()/gateway_start 设置 driver
   for (let i = 0; i < FAST_ATTEMPTS; i++) {
@@ -440,7 +443,7 @@ async function autoStartApiServer(): Promise<void> {
   }
 
   // 阶段 2：自驱动初始化 — 轮询失败，尝试自建 driver
-  log.warn("auto-start: driver not ready after 30s, trying self-init...");
+  log.warn("auto-start: gateway driver not ready after 10s, trying self-init...");
   const selfDriver = await trySelfInitDriver();
   if (selfDriver) {
     _apiServerAutoStarted = true;
@@ -584,16 +587,26 @@ async function doGatewayInit(api: any, logger: any): Promise<void> {
   }
 
   // 5. 启动独立 HTTP API 服务器
+  //
+  // v2.3.5 fix: 双重初始化竞态修复
+  //   原逻辑：self-init 已启动 API server → register() 到达 → 关闭旧 server → 重启 → EADDRINUSE
+  //   新逻辑：self-init 和 gateway 连的是同一个 Neo4j，API server 不需要重启！
+  //   只需用 gateway 提供的 LLM/Embed/Recaller 重新注入 routes 即可。
+  //   driver 引用也直接替换为 gateway driver（同一个 Neo4j 连接池更规范）。
   if (_apiServerAutoStarted) {
     if (_apiServerDriver && _apiServerDriver !== driver) {
-      logger?.info?.("[graph-memory-pro] API server was started with a different driver (self-init), restarting with gateway driver");
-      if (_apiServerHandle) {
-        try { await _apiServerHandle.close(); } catch { /* ignore */ }
-        _apiServerHandle = null;
+      // 不再关闭 API server！只重新注入组件 + 更新 driver 引用
+      logger?.info?.("[graph-memory-pro] API server already running (self-init), re-injecting gateway components (no restart needed)");
+      _apiServerDriver = driver;
+      try {
+        const { initRoutes } = await import("./src/routes/crud.ts");
+        initRoutes(driver, _cfg, _llm ?? undefined, _embed ?? undefined, _recaller ?? undefined);
+        logger?.info?.("[graph-memory-pro] gateway components re-injected into API routes");
+      } catch (err) {
+        logger?.warn?.(`[graph-memory-pro] component re-injection failed: ${err}`);
       }
-      _apiServerAutoStarted = false;
-      _apiServerDriver = null;
     } else {
+      // 同一个 driver，只重新注入组件
       logger?.info?.("[graph-memory-pro] API server already started, re-injecting components (LLM/Embed/Recaller)");
       try {
         const { initRoutes } = await import("./src/routes/crud.ts");
@@ -869,19 +882,19 @@ export default definePluginEntry({
     }, { name: "graph-memory-pro-init" });
 
     // ── Gateway 停止时清理 ──────────────────────
+    // v2.3.5 fix: compaction 会触发 gateway_stop → 再 register()，导致全量重建竞态。
+    //   修复策略：gateway_stop 只清 timer 和 session cache，保留 driver 和 API server。
+    //   - driver: Neo4j 连接池创建成本高（~100ms），compaction 后立即复用
+    //   - API server: 端口已绑定，关了再开会 EADDRINUSE
+    //   - 真正的进程退出时 OS 会自动回收连接和端口
     api.registerHook("gateway_stop", async () => {
+      log.info("gateway_stop: soft cleanup (preserving driver + API server for compaction resilience)");
       if (_extractorTimer) { clearInterval(_extractorTimer); _extractorTimer = null; }
       if (_maintenanceTimer) { clearInterval(_maintenanceTimer); _maintenanceTimer = null; }
       if (_autoStartRetryTimer) { clearInterval(_autoStartRetryTimer); _autoStartRetryTimer = null; }
-      if (_apiServerHandle) { try { await _apiServerHandle.close(); } catch { /* ignore */ } _apiServerHandle = null; }
       resetSessionRecallCache();
-      closeDriver();
-      _driver = null;
-      _cfg = null;
-      _llm = null;
-      _embed = null;
-      _recaller = null;
-      _extractor = null;
+      // 注意：不再 closeDriver() / 关闭 API server / null 化组件
+      // compaction 后 register() 会检测到 _driver 已存在并跳过重复初始化
     }, { name: "graph-memory-pro-cleanup" });
 
     // ── v2.3.5 方案 A: agent_end 自动反馈采集 ──────────────────────

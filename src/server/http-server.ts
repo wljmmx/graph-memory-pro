@@ -182,20 +182,50 @@ export async function startApiServer(
   });
 
   // 启动监听
-  await new Promise<void>((resolve, reject) => {
-    httpServer.on("error", (err: NodeJS.ErrnoException) => {
-      logger.error?.(`[graph-memory-pro] API server listen error: ${err.message}`);
-      reject(err);
-    });
-    httpServer.listen(port, host, () => {
-      logger.info?.(`[graph-memory-pro] API server listening on http://${host}:${port}`);
-      resolve();
-    });
-  });
+  // v2.3.5 fix: EADDRINUSE 时自动尝试 +1/+2/+3 端口，避免因端口冲突导致
+  // API server 永远起不来（根因：openclaw-node 老版本抢占 7850）
+  const MAX_PORT_RETRIES = 3;
+  let actualPort = port;
+  let listenError: Error | null = null;
 
-  // 自检：验证服务可达
+  for (let attempt = 0; attempt <= MAX_PORT_RETRIES; attempt++) {
+    listenError = null;
+    const tryPort = port + attempt;
+    actualPort = tryPort;
+
+    await new Promise<void>((resolve, reject) => {
+      const onError = (err: NodeJS.ErrnoException) => {
+        httpServer.removeListener("listening", onListening);
+        if (err.code === "EADDRINUSE" && attempt < MAX_PORT_RETRIES) {
+          logger.warn?.(`[graph-memory-pro] API server port ${tryPort} in use (EADDRINUSE), trying ${tryPort + 1}...`);
+          resolve(); // 不 reject，让循环尝试下一个端口
+        } else {
+          logger.error?.(`[graph-memory-pro] API server listen error on port ${tryPort}: ${err.message}`);
+          listenError = err;
+          reject(err);
+        }
+      };
+      const onListening = () => {
+        httpServer.removeListener("error", onError);
+        actualPort = tryPort;
+        logger.info?.(`[graph-memory-pro] API server listening on http://${host}:${tryPort}`);
+        resolve();
+      };
+
+      httpServer.once("error", onError);
+      httpServer.once("listening", onListening);
+      httpServer.listen(tryPort, host);
+    }).catch((err) => {
+      listenError = err;
+    });
+
+    if (!listenError && httpServer.listening) break;
+    if (listenError) throw listenError;
+  }
+
+  // 自检：验证服务可达（用实际监听端口）
   try {
-    const resp = await fetch(`http://${host}:${port}/health`, {
+    const resp = await fetch(`http://${host}:${actualPort}/health`, {
       signal: AbortSignal.timeout(3000),
     });
     if (resp.ok) {

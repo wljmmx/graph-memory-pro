@@ -102,7 +102,7 @@ export class Recaller {
       // v2.3.2 阶段三: embed 熔断器 — OPEN 时跳过 embed 重试链路（~9s），直接降级 FTS
       const breaker = getCircuitBreaker("embed");
       if (!breaker.allow()) {
-        if (process.env.GM_DEBUG) log?.debug?.("[recall] embed circuit OPEN, skip embed → FTS fallback");
+        log?.warn?.("[recall] embed circuit OPEN, skip embed → FTS fallback");
         return undefined;
       }
       try {
@@ -239,7 +239,7 @@ export class Recaller {
             try {
               await this.updateAssociationMatrix(query, fb.usedNodeIds, fb.unusedNodeIds);
             } catch (err) {
-              if (process.env.GM_DEBUG) log.warn("M update failed", { error: String(err) });
+              log.warn("M update failed", { error: String(err) });
             }
           }
 
@@ -335,7 +335,8 @@ export class Recaller {
         logPhase("vec_search", Date.now() - tVecSearch, { nodes: vecResults.length });
         return vecResults.map(v => v.node).slice(0, limit);
       } catch (e) {
-        if (process.env.GM_DEBUG) log.warn("recall-precise vector search failed", { error: String(e) });
+        // v2.3.5 fix: recall 失败不再静默吞 — 去掉 GM_DEBUG 门槛，生产环境也能看到错误
+        log.warn("recall-precise vector search failed", { error: String(e) });
         return [];
       }
     })();
@@ -373,8 +374,8 @@ export class Recaller {
       logPhase("ppr_compute", Date.now() - tPpr, { scores: pprResult.scores.size });
       pprScores = pprResult.scores;
     } catch (e) {
-      if (process.env.GM_DEBUG) log.warn("recall-precise PPR failed", { error: String(e) });
-      pprScores = new Map();
+        log.warn("recall-precise PPR failed", { error: String(e) });
+        pprScores = new Map();
     }
 
     const scored = candidateNodes.map(n => ({
@@ -440,7 +441,7 @@ export class Recaller {
         logPhase("ppr_compute", Date.now() - tPpr, { scores: pprResult.scores.size, context: "generalized" });
         pprScores = pprResult.scores;
       } catch (e) {
-        if (process.env.GM_DEBUG) log.warn("recall-generalized PPR failed", { error: String(e) });
+        log.warn("recall-generalized PPR failed", { error: String(e) });
         pprScores = new Map();
       }
 
@@ -454,7 +455,7 @@ export class Recaller {
       logPhase("recall_generalized", Date.now() - tGen, { finalNodes: finalNodes.length });
       return { nodes: finalNodes, edges: [], tokenEstimate: finalNodes.length * 30 };
     } catch (e) {
-      if (process.env.GM_DEBUG) log.warn("recall-generalized failed", { error: String(e) });
+      log.warn("recall-generalized failed", { error: String(e) });
       return { nodes: [], edges: [], tokenEstimate: 0 };
     }
   }
