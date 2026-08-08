@@ -126,17 +126,23 @@ function extractMessageText(msg: any): string {
 }
 
 async function getOrCreateDriver(cfg: GmConfig, logger: any): Promise<Driver | null> {
+  const uri = cfg.neo4j?.uri ?? "(unknown)";
   try {
+    console.log(`[graph-memory-pro] connecting to Neo4j at ${uri}...`);
     const d = initDriver(cfg.neo4j);
     const ok = await verifyWithRetry(d);
     if (!ok) {
-      logger?.warn?.("[graph-memory-pro] Neo4j connection failed — plugin disabled");
+      console.error(`[graph-memory-pro] Neo4j connection FAILED at ${uri} — plugin disabled`);
+      logger?.warn?.(`[graph-memory-pro] Neo4j connection failed at ${uri} — plugin disabled`);
       closeDriver();
       return null;
     }
+    console.log(`[graph-memory-pro] Neo4j connected to ${uri}`);
+    logger?.info?.(`[graph-memory-pro] Neo4j connected to ${uri}`);
     return d;
   } catch (err) {
-    logger?.warn?.(`[graph-memory-pro] Neo4j init failed: ${err}`);
+    console.error(`[graph-memory-pro] Neo4j init failed at ${uri}: ${err}`);
+    logger?.warn?.(`[graph-memory-pro] Neo4j init failed at ${uri}: ${err}`);
     return null;
   }
 }
@@ -486,6 +492,149 @@ autoStartApiServer();
 
 // v2.3.4 ARCH-1: extractInBackground 已拆分到 src/services/extract-service.ts
 
+/**
+ * v2.3.5 fix: 从 api.pluginConfig 直接初始化插件（不依赖 gateway_start hook）。
+ *
+ * SDK 可能不触发 gateway_start 事件，导致 Neo4j driver 永远不初始化。
+ * 此函数封装了完整的初始化逻辑，可从 register() 或 gateway_start hook 调用。
+ */
+async function doGatewayInit(api: any, logger: any): Promise<void> {
+  const eventCfg = api.pluginConfig ?? api.config;
+  console.log(`[graph-memory-pro] config check: neo4j.uri=${eventCfg?.neo4j?.uri ? "present" : "missing"}`);
+  if (!eventCfg?.neo4j?.uri) {
+    console.warn("[graph-memory-pro] No Neo4j config — plugin skipped");
+    logger?.warn?.("[graph-memory-pro] No Neo4j config — plugin skipped");
+    return;
+  }
+  const pluginConfig = eventCfg as GmConfig;
+
+  // v2.2.0 fix: spread pluginConfig 保留全部 v2.1.2 扩展字段
+  _cfg = {
+    ...pluginConfig,
+    compactTurnCount: pluginConfig.compactTurnCount ?? 6,
+    recallMaxNodes: pluginConfig.recallMaxNodes ?? 6,
+    recallMaxDepth: pluginConfig.recallMaxDepth ?? 2,
+    freshTailCount: pluginConfig.freshTailCount ?? 10,
+    dedupThreshold: pluginConfig.dedupThreshold ?? 0.90,
+    pagerankDamping: pluginConfig.pagerankDamping ?? 0.85,
+    pagerankIterations: pluginConfig.pagerankIterations ?? 20,
+    apiServer: pluginConfig.apiServer ?? { enabled: true, port: 7850, host: "127.0.0.1" },
+  };
+
+  // 1. 连接 Neo4j
+  const driver = await getOrCreateDriver(_cfg, logger);
+  if (!driver) return;
+  _driver = driver;
+
+  // 2. 初始化 Schema
+  try {
+    const embedDimension = resolveEmbedDimension(pluginConfig);
+    await ensureSchema(driver, embedDimension);
+  } catch (err) {
+    logger?.warn?.(`[graph-memory-pro] Schema init: ${err}`);
+  }
+
+  // 3. 初始化 LLM / Embedding
+  const runtimeLlm = api.runtime?.llm;
+  if (runtimeLlm && typeof runtimeLlm.complete === "function") {
+    _llm = createRuntimeCompleteFn(runtimeLlm, _cfg.llm, logger);
+    logger?.info?.("[graph-memory-pro] LLM initialized via runtime (provider detection deferred to first call)");
+  } else {
+    _llm = createCompleteFn(_cfg.llm);
+    if (_llm) {
+      logger?.info?.("[graph-memory-pro] LLM initialized via plugin config (api.runtime.llm unavailable)");
+    }
+  }
+  _embed = _cfg.embedding ? createEmbedFn(_cfg.embedding) : null;
+
+  // 4. 初始化 Recaller / Extractor
+  _recaller = new Recaller(driver, _cfg);
+  if (_embed) _recaller.setEmbedFn(_embed);
+
+  // v2.1.2 第二批 I-2：注入 JudgeManager
+  if (_cfg.judge?.enabled !== false) {
+    const { JudgeManager } = await import("./src/recaller/judge.ts");
+    const { getFeedbackCount } = await import("./src/store/store.ts");
+    const jm = new JudgeManager(_cfg.judge, _llm ?? undefined);
+    try {
+      const persistedCount = await getFeedbackCount(driver);
+      for (let i = 0; i < persistedCount; i++) jm.incrementFeedback();
+      logger?.info?.(`[graph-memory-pro] judge enabled (warmup=${_cfg.judge?.judgeWarmupFeedbacks ?? 50}, persisted=${persistedCount})`);
+    } catch (err) {
+      logger?.warn?.(`[graph-memory-pro] judge feedback count restore failed: ${err}`);
+    }
+    _recaller.setJudgeManager(jm);
+  }
+
+  // v2.1.2 第三批 L-1：注入 AssociationMatrix（关联矩阵 M）
+  if (_cfg.associationMatrix?.enabled === true) {
+    const { createAssociationMatrix } = await import("./src/recaller/association-matrix.ts");
+    const amDim = resolveEmbedDimension(_cfg);
+    const am = createAssociationMatrix(amDim, _cfg);
+    _recaller.setAssociationMatrix(am);
+    logger?.info?.(`[graph-memory-pro] association-matrix enabled (dim=${amDim}, warmup=${_cfg.associationMatrix?.warmupFeedbacks ?? _cfg.warmup?.warmupFeedbacks ?? 100})`);
+  }
+
+  _extractor = new Extractor(driver);
+
+  if (_cfg.timing?.enabled) {
+    setTimingEnabled(true);
+  }
+
+  // 5. 启动独立 HTTP API 服务器
+  if (_apiServerAutoStarted) {
+    if (_apiServerDriver && _apiServerDriver !== driver) {
+      logger?.info?.("[graph-memory-pro] API server was started with a different driver (self-init), restarting with gateway driver");
+      if (_apiServerHandle) {
+        try { await _apiServerHandle.close(); } catch { /* ignore */ }
+        _apiServerHandle = null;
+      }
+      _apiServerAutoStarted = false;
+      _apiServerDriver = null;
+    } else {
+      logger?.info?.("[graph-memory-pro] API server already started, re-injecting components (LLM/Embed/Recaller)");
+      try {
+        const { initRoutes } = await import("./src/routes/crud.ts");
+        initRoutes(driver, _cfg, _llm ?? undefined, _embed ?? undefined, _recaller ?? undefined);
+        logger?.info?.("[graph-memory-pro] components re-injected into API routes");
+      } catch (err) {
+        logger?.warn?.(`[graph-memory-pro] component re-injection failed: ${err}`);
+      }
+    }
+  }
+
+  if (!_apiServerAutoStarted) {
+    const apiServerCfg = _cfg.apiServer;
+    if (apiServerCfg?.enabled !== false) {
+      try {
+        const { startApiServer } = await import("./src/server/http-server.ts");
+        _apiServerHandle = await startApiServer(
+          driver, _cfg,
+          {
+            enabled: true,
+            port: apiServerCfg?.port ?? 7850,
+            host: apiServerCfg?.host ?? "127.0.0.1",
+            authToken: apiServerCfg?.authToken,
+          },
+          logger,
+          _llm ?? undefined,
+          _embed ?? undefined,
+          _recaller ?? undefined,
+        );
+        _apiServerAutoStarted = true;
+        _apiServerDriver = driver;
+      } catch (err) {
+        logger?.error?.(`[graph-memory-pro] API server failed to start: ${err}`);
+      }
+    } else {
+      logger?.info?.("[graph-memory-pro] API server disabled via config (apiServer.enabled=false)");
+    }
+  }
+
+  console.log("[graph-memory-pro] initialized");
+  logger?.info?.("[graph-memory-pro] initialized");
+}
+
 // ─── Plugin Entry ──────────────────────────────────────
 
 export default definePluginEntry({
@@ -695,159 +844,26 @@ export default definePluginEntry({
     // v2.2.0 P2-1：把 SDK logger 注入到结构化日志模块
     setExternalLogger(api.logger ?? null);
 
-    // ── Gateway 启动时初始化 ──────────────────────
+    // v2.3.5 fix: SDK 可能不触发 gateway_start hook，导致 driver 永远不初始化。
+    // 在 register() 中直接从 api.pluginConfig 检测并启动初始化（fire-and-forget）。
+    const eventCfg = api.pluginConfig ?? api.config;
+    if (eventCfg?.neo4j?.uri) {
+      console.log(`[graph-memory-pro] config detected in register(): neo4j.uri=${eventCfg.neo4j.uri}`);
+      doGatewayInit(api, logger).catch(err => {
+        console.error(`[graph-memory-pro] direct init from register() failed: ${err}`);
+      });
+    } else {
+      console.log("[graph-memory-pro] no neo4j config in register(), waiting for gateway_start hook or auto-start");
+    }
+
+    // ── Gateway 启动时初始化（fallback） ──────────────────────
     api.registerHook("gateway_start", async (_event: any) => {
       console.log("[graph-memory-pro] gateway_start hook fired");
-      // P0-2: 配置优先从 SDK 注入，移除 fs.readFileSync
-      // SDK 合规：api.pluginConfig 是插件配置的正确来源（InternalHookEvent 不含 config 字段）
-      const eventCfg = api.pluginConfig ?? api.config;
-      console.log(`[graph-memory-pro] config check: neo4j.uri=${eventCfg?.neo4j?.uri ? "present" : "missing"}`);
-      if (!eventCfg?.neo4j?.uri) {
-        logger?.warn?.("[graph-memory-pro] No Neo4j config — plugin skipped");
+      if (_driver) {
+        console.log("[graph-memory-pro] gateway_start: already initialized via register(), skipping");
         return;
       }
-      const pluginConfig = eventCfg as GmConfig;
-
-      // v2.2.0 fix: spread pluginConfig 保留全部 v2.1.2 扩展字段
-      // 之前手动列举只复制了 13 个基础字段，导致 judge/associationMatrix 等
-      // 全部 v2.1.2 配置被静默丢弃（judge 永远启用，associationMatrix 永远禁用）
-      _cfg = {
-        ...pluginConfig,
-        compactTurnCount: pluginConfig.compactTurnCount ?? 6,
-        recallMaxNodes: pluginConfig.recallMaxNodes ?? 6,
-        recallMaxDepth: pluginConfig.recallMaxDepth ?? 2,
-        freshTailCount: pluginConfig.freshTailCount ?? 10,
-        dedupThreshold: pluginConfig.dedupThreshold ?? 0.90,
-        pagerankDamping: pluginConfig.pagerankDamping ?? 0.85,
-        pagerankIterations: pluginConfig.pagerankIterations ?? 20,
-        apiServer: pluginConfig.apiServer ?? { enabled: true, port: 7850, host: "127.0.0.1" },
-      };
-
-      // 1. 连接 Neo4j
-      const driver = await getOrCreateDriver(_cfg, logger);
-      if (!driver) return;
-      _driver = driver;
-
-      // 2. 初始化 Schema
-      try {
-        const embedDimension = resolveEmbedDimension(pluginConfig);
-        await ensureSchema(driver, embedDimension);
-      } catch (err) {
-        logger?.warn?.(`[graph-memory-pro] Schema init: ${err}`);
-      }
-
-      // 3. 初始化 LLM / Embedding
-      //
-      // 主会话本地模型优先策略（v2.2.1）：
-      // - 若 SDK 提供 api.runtime.llm，则用主会话模型 provider 探测：
-      //   * 本地模型（ollama/lmstudio/localai 等）→ 后续走主会话 runtime LLM
-      //   * 云端模型 → 切换到插件配置的 llm（fallback）
-      // - 否则回退到原有 createCompleteFn(_cfg.llm) 路径
-      const runtimeLlm = api.runtime?.llm;
-      if (runtimeLlm && typeof runtimeLlm.complete === "function") {
-        _llm = createRuntimeCompleteFn(runtimeLlm, _cfg.llm, logger);
-        logger?.info?.("[graph-memory-pro] LLM initialized via runtime (provider detection deferred to first call)");
-      } else {
-        _llm = createCompleteFn(_cfg.llm);
-        if (_llm) {
-          logger?.info?.("[graph-memory-pro] LLM initialized via plugin config (api.runtime.llm unavailable)");
-        }
-      }
-      _embed = _cfg.embedding ? createEmbedFn(_cfg.embedding) : null;
-
-      // 4. 初始化 Recaller / Extractor
-      _recaller = new Recaller(driver, _cfg);
-      if (_embed) _recaller.setEmbedFn(_embed);
-
-      // v2.1.2 第二批 I-2：注入 JudgeManager
-      if (_cfg.judge?.enabled !== false) {
-        const { JudgeManager } = await import("./src/recaller/judge.ts");
-        const { getFeedbackCount } = await import("./src/store/store.ts");
-        const jm = new JudgeManager(_cfg.judge, _llm ?? undefined);
-        // 从 DB 恢复累计反馈计数，避免 Gateway 重启后永久卡在冷启动期
-        try {
-          const persistedCount = await getFeedbackCount(driver);
-          for (let i = 0; i < persistedCount; i++) jm.incrementFeedback();
-          logger?.info?.(`[graph-memory-pro] judge enabled (warmup=${_cfg.judge?.judgeWarmupFeedbacks ?? 50}, persisted=${persistedCount})`);
-        } catch (err) {
-          logger?.warn?.(`[graph-memory-pro] judge feedback count restore failed: ${err}`);
-        }
-        _recaller.setJudgeManager(jm);
-      }
-
-      // v2.1.2 第三批 L-1：注入 AssociationMatrix（关联矩阵 M）
-      if (_cfg.associationMatrix?.enabled === true) {
-        const { createAssociationMatrix } = await import("./src/recaller/association-matrix.ts");
-        const amDim = resolveEmbedDimension(_cfg);
-        const am = createAssociationMatrix(amDim, _cfg);
-        _recaller.setAssociationMatrix(am);
-        logger?.info?.(`[graph-memory-pro] association-matrix enabled (dim=${amDim}, warmup=${_cfg.associationMatrix?.warmupFeedbacks ?? _cfg.warmup?.warmupFeedbacks ?? 100})`);
-      }
-
-      _extractor = new Extractor(driver);
-
-      if (_cfg.timing?.enabled) {
-        setTimingEnabled(true);
-      }
-
-      // 5. 启动独立 HTTP API 服务器（不依赖 Gateway 路由注册）
-      // 如果模块级自动启动已经启动了，检查 driver 是否一致
-      if (_apiServerAutoStarted) {
-        // 关键修复：自启动可能用自建 driver（phase 2 self-init）启动了 API 服务器，
-        // 而 gateway_start 的 getOrCreateDriver → initDriver 已经关闭了那个 driver 并创建了新的。
-        // 此时 API 服务器仍持有已关闭的旧 driver 引用，必须重启。
-        if (_apiServerDriver && _apiServerDriver !== driver) {
-          logger?.info?.("[graph-memory-pro] API server was started with a different driver (self-init), restarting with gateway driver");
-          if (_apiServerHandle) {
-            try { await _apiServerHandle.close(); } catch { /* ignore */ }
-            _apiServerHandle = null;
-          }
-          _apiServerAutoStarted = false;
-          _apiServerDriver = null;
-          // 继续走下面的启动逻辑
-        } else {
-          // driver 相同，但 self-init 路径可能未注入 LLM/Embedding/Recaller
-          // 重新调用 initRoutes 确保 crud.ts 拿到最新组件引用
-          logger?.info?.("[graph-memory-pro] API server already started, re-injecting components (LLM/Embed/Recaller)");
-          try {
-            const { initRoutes } = await import("./src/routes/crud.ts");
-            initRoutes(driver, _cfg, _llm ?? undefined, _embed ?? undefined, _recaller ?? undefined);
-            logger?.info?.("[graph-memory-pro] components re-injected into API routes");
-          } catch (err) {
-            logger?.warn?.(`[graph-memory-pro] component re-injection failed: ${err}`);
-          }
-        }
-      }
-
-      if (!_apiServerAutoStarted) {
-        const apiServerCfg = _cfg.apiServer;
-        if (apiServerCfg?.enabled !== false) {
-          try {
-            const { startApiServer } = await import("./src/server/http-server.ts");
-            _apiServerHandle = await startApiServer(
-              driver, _cfg,
-              {
-                enabled: true,
-                port: apiServerCfg?.port ?? 7850,
-                host: apiServerCfg?.host ?? "127.0.0.1",
-                authToken: apiServerCfg?.authToken,
-              },
-              logger,
-              _llm ?? undefined,
-              _embed ?? undefined,
-              _recaller ?? undefined,
-            );
-            _apiServerAutoStarted = true;
-            _apiServerDriver = driver;
-          } catch (err) {
-            logger?.error?.(`[graph-memory-pro] API server failed to start: ${err}`);
-          }
-        } else {
-          logger?.info?.("[graph-memory-pro] API server disabled via config (apiServer.enabled=false)");
-        }
-      }
-
-      logger?.info?.("[graph-memory-pro] initialized");
+      await doGatewayInit(api, logger);
     }, { name: "graph-memory-pro-init" });
 
     // ── Gateway 停止时清理 ──────────────────────
