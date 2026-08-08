@@ -63,10 +63,10 @@ function isJsonOutput(): boolean {
 // ── 外部 logger 注入（SDK 集成） ──────────────────────────────
 
 interface ExternalLogger {
-  debug?(msg: string, ...args: any[]): void;
-  info?(msg: string, ...args: any[]): void;
-  warn?(msg: string, ...args: any[]): void;
-  error?(msg: string, ...args: any[]): void;
+  debug?(msg: string, ...args: unknown[]): void;
+  info?(msg: string, ...args: unknown[]): void;
+  warn?(msg: string, ...args: unknown[]): void;
+  error?(msg: string, ...args: unknown[]): void;
 }
 
 let _externalLogger: ExternalLogger | null = null;

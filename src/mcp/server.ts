@@ -97,10 +97,11 @@ export async function startMcpServer(
             content: [{ type: "text", text: `connected, version=${VERSION}` }],
             structuredContent: asStructured({ status: "connected", version: VERSION }),
           };
-        } catch (err: any) {
+        } catch (err: unknown) {
+          const message = (err as Error).message;
           return {
-            content: [{ type: "text", text: `disconnected: ${err.message}` }],
-            structuredContent: { status: "disconnected", error: err.message },
+            content: [{ type: "text", text: `disconnected: ${message}` }],
+            structuredContent: { status: "disconnected", error: message },
           };
         }
       },
@@ -279,8 +280,8 @@ export async function startMcpServer(
             content: [{ type: "text", text: `Recorded: ${id} (source=${source ?? "experience"})` }],
             structuredContent: asStructured({ id, source: source ?? "experience" }),
           };
-        } catch (err: any) {
-          return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+        } catch (err: unknown) {
+          return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }] };
         }
       },
     );
@@ -302,8 +303,8 @@ export async function startMcpServer(
             content: [{ type: "text", text: `Maintenance done: ${result.dedup.merged} merged, ${result.community.count} communities, ${result.durationMs}ms` }],
             structuredContent: asStructured(result),
           };
-        } catch (err: any) {
-          return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+        } catch (err: unknown) {
+          return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }] };
         }
       },
     );
@@ -330,8 +331,8 @@ export async function startMcpServer(
             content: [{ type: "text", text: `Re-embedded ${result.reEmbedded}/${result.totalScanned} nodes, ${result.failed} failed, ${result.durationMs}ms` }],
             structuredContent: asStructured(result),
           };
-        } catch (err: any) {
-          return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+        } catch (err: unknown) {
+          return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }] };
         }
       },
     );
@@ -400,8 +401,8 @@ export async function startMcpServer(
             content: [{ type: "text", text: `Feedback recorded: used=${usedCount}, unused=${unusedCount}` }],
             structuredContent: asStructured({ usedCount, unusedCount, totalValid: validNodes.length }),
           };
-        } catch (err: any) {
-          return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+        } catch (err: unknown) {
+          return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }] };
         }
       },
     );
@@ -430,7 +431,7 @@ export async function startMcpServer(
           const { runBenchmark } = await import("../benchmark/runner.ts");
           const result = await withTimeout(
             () => runBenchmark(recaller, driver, cfg, {
-              datasets: datasets as any,
+              datasets: datasets,
               maxCases: maxCases ?? cfg.benchmark?.maxCases ?? 50,
               buildGraph: buildGraph ?? cfg.benchmark?.buildGraph ?? true,
             }),
@@ -441,8 +442,8 @@ export async function startMcpServer(
             content: [{ type: "text", text: `Benchmark done: P1=${(result.aggregate.avgP1 * 100).toFixed(2)}%, MRR=${result.aggregate.avgMrr.toFixed(4)}` }],
             structuredContent: asStructured(result),
           };
-        } catch (err: any) {
-          return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+        } catch (err: unknown) {
+          return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }] };
         }
       },
     );
@@ -480,8 +481,8 @@ export async function startMcpServer(
             content: [{ type: "text", text: `Tuning done: ${results.length} rounds, ${applied} applied, ${improvements} improvements` }],
             structuredContent: asStructured({ rounds: results.length, applied, improvements, results }),
           };
-        } catch (err: any) {
-          return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+        } catch (err: unknown) {
+          return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }] };
         }
       },
     );
@@ -533,11 +534,12 @@ export async function startMcpServer(
     try {
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       await mcpServer.connect(transport);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await transport.handleRequest(req as any, res, parsedBody);
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (!res.headersSent) {
         res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: err.message }));
+        res.end(JSON.stringify({ error: (err as Error).message }));
       }
     }
   });

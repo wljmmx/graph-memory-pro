@@ -7,7 +7,7 @@
  */
 
 import type { Driver } from "neo4j-driver";
-import type { GmConfig } from "../types.ts";
+import type { GmConfig, NodeType, NodeStatus, GmNode } from "../types.ts";
 import {
   findById, searchNodes, getTopNodes, getNodesByType,
   getNodeCount, getEdgeCount, getEdgesForNodes,
@@ -50,7 +50,8 @@ export function initRoutes(
 interface RouteHandler {
   method: "GET" | "POST" | "PUT" | "DELETE";
   path: string;
-  handler: (params: any) => Promise<{ status: number; body: any }>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  handler: (params: any) => Promise<{ status: number; body: unknown }>;
 }
 
 export function getRoutes(): RouteHandler[] {
@@ -100,18 +101,18 @@ export function getRoutes(): RouteHandler[] {
   ];
 }
 
-async function handleStatus(): Promise<{ status: number; body: any }> {
+async function handleStatus(): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   try {
     await _driver.verifyConnectivity();
     return { status: 200, body: { status: "connected", version: VERSION } };
-  } catch (err: any) {
-    return { status: 503, body: { status: "disconnected", error: err.message } };
+  } catch (err: unknown) {
+    return { status: 503, body: { status: "disconnected", error: (err as Error).message } };
   }
 }
 
 // v2.1.2 G-5: 图谱健康检查
-async function handleHealth(): Promise<{ status: number; body: any }> {
+async function handleHealth(): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   try {
     const { healthCheck } = await import("../graph/maintenance.ts");
@@ -121,19 +122,19 @@ async function handleHealth(): Promise<{ status: number; body: any }> {
     report.connectionPool = getPoolMetrics();
     const { getAllCircuitBreakers } = await import("../engine/circuit-breaker.ts");
     const breakers = getAllCircuitBreakers();
-    const breakerStatus: Record<string, any> = {};
+    const breakerStatus: Record<string, unknown> = {};
     for (const [name, breaker] of breakers) {
       breakerStatus[name] = breaker.getStatus();
     }
     report.circuitBreakers = breakerStatus;
     return { status: 200, body: report };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
 // v2.1.2 S-14: 手动触发 staleness 重算
-async function handleRefreshStaleness(): Promise<{ status: number; body: any }> {
+async function handleRefreshStaleness(): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   try {
     const { computeStalenessScores } = await import("../graph/maintenance.ts");
@@ -142,12 +143,12 @@ async function handleRefreshStaleness(): Promise<{ status: number; body: any }> 
       threshold: _cfg?.staleness?.threshold ?? 0.7,
     });
     return { status: 200, body: result };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
-async function handleStats(): Promise<{ status: number; body: any }> {
+async function handleStats(): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   try {
     const [nodeCount, edgeCount] = await Promise.all([
@@ -155,19 +156,19 @@ async function handleStats(): Promise<{ status: number; body: any }> {
       getEdgeCount(_driver),
     ]);
     return { status: 200, body: { nodeCount, edgeCount } };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
-async function handleGetNode(params: { id: string }): Promise<{ status: number; body: any }> {
+async function handleGetNode(params: { id: string }): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   try {
     const node = await findById(_driver, params.id);
     if (!node) return { status: 404, body: { error: "Node not found" } };
     return { status: 200, body: node };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
@@ -178,7 +179,7 @@ function safeParseInt(value: string | undefined, defaultValue: number, max?: num
   return max ? Math.min(parsed, max) : parsed;
 }
 
-async function handleSearch(params: { query?: string; limit?: string }): Promise<{ status: number; body: any }> {
+async function handleSearch(params: { query?: string; limit?: string }): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   const q = params.query || "";
   const limit = safeParseInt(params.limit, 10, 50);
@@ -188,23 +189,23 @@ async function handleSearch(params: { query?: string; limit?: string }): Promise
     const ids = nodes.map(n => n.id);
     const edges = await getEdgesForNodes(_driver, ids);
     return { status: 200, body: { nodes, edges } };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
-async function handleTop(params: { limit?: string }): Promise<{ status: number; body: any }> {
+async function handleTop(params: { limit?: string }): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   const limit = safeParseInt(params.limit, 20, 100);
   try {
     const nodes = await getTopNodes(_driver, limit);
     return { status: 200, body: { nodes } };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
-async function handleNodesByType(params: { type: string; limit?: string }): Promise<{ status: number; body: any }> {
+async function handleNodesByType(params: { type: string; limit?: string }): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   const type = params.type.toUpperCase();
   if (!["TASK", "SKILL", "EVENT"].includes(type)) {
@@ -214,18 +215,18 @@ async function handleNodesByType(params: { type: string; limit?: string }): Prom
   try {
     const nodes = await getNodesByType(_driver, type, limit);
     return { status: 200, body: { type, nodes } };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
-async function handleMaintain(): Promise<{ status: number; body: any }> {
+async function handleMaintain(): Promise<{ status: number; body: unknown }> {
   if (!_driver || !_cfg) return { status: 503, body: { error: "Neo4j not connected" } };
   try {
     const result = await runMaintenance(_driver, _cfg, _llm ?? undefined, _embed ?? undefined);
     return { status: 200, body: result };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
@@ -237,7 +238,7 @@ async function handleMaintain(): Promise<{ status: number; body: any }> {
  * 触发增量维护，仅处理 markDirty 标记的脏节点。
  * Body: { } （无参数）
  */
-async function handleIncrementalMaintain(): Promise<{ status: number; body: any }> {
+async function handleIncrementalMaintain(): Promise<{ status: number; body: unknown }> {
   if (!_driver || !_cfg) return { status: 503, body: { error: "Neo4j not connected" } };
   try {
     const result = await runIncrementalMaintenance(
@@ -245,8 +246,8 @@ async function handleIncrementalMaintain(): Promise<{ status: number; body: any 
       _llm ?? undefined, _embed ?? undefined,
     );
     return { status: 200, body: result };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
@@ -256,17 +257,17 @@ async function handleIncrementalMaintain(): Promise<{ status: number; body: any 
  * 标记节点为脏（自上次维护后变更）。
  * Body: { nodeIds: string[] }
  */
-async function handleMarkDirty(params: any): Promise<{ status: number; body: any }> {
+async function handleMarkDirty(params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
-  const nodeIds: string[] = Array.isArray(params?.nodeIds) ? params.nodeIds : [];
+  const nodeIds: string[] = Array.isArray(params?.nodeIds) ? params.nodeIds as string[] : [];
   if (nodeIds.length === 0) {
     return { status: 400, body: { error: "nodeIds is required and must be non-empty array" } };
   }
   try {
     await markDirty(_driver, nodeIds);
     return { status: 200, body: { marked: nodeIds.length } };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
@@ -275,13 +276,13 @@ async function handleMarkDirty(params: any): Promise<{ status: number; body: any
  *
  * 返回当前所有脏节点 ID。
  */
-async function handleGetDirtyNodes(): Promise<{ status: number; body: any }> {
+async function handleGetDirtyNodes(): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   try {
     const nodeIds = await getDirtyNodeIds(_driver);
     return { status: 200, body: { count: nodeIds.length, nodeIds } };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
@@ -291,14 +292,14 @@ async function handleGetDirtyNodes(): Promise<{ status: number; body: any }> {
  * 清除脏节点标记。
  * Body: { nodeIds?: string[] } （不传则清除全部）
  */
-async function handleClearDirty(params: any): Promise<{ status: number; body: any }> {
+async function handleClearDirty(params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   try {
-    const nodeIds: string[] | undefined = Array.isArray(params?.nodeIds) ? params.nodeIds : undefined;
+    const nodeIds: string[] | undefined = Array.isArray(params?.nodeIds) ? params.nodeIds as string[] : undefined;
     await clearDirty(_driver, nodeIds);
     return { status: 200, body: { cleared: nodeIds?.length ?? "all" } };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
@@ -498,7 +499,7 @@ async function handleMetrics(): Promise<{ status: number; body: string }> {
 //   - enabled=true + state file: 已启用且已运行过调优
 // AutoTuner 是按需触发的（通过 gm_tune 工具或 POST /api/auto-tuner/tune），
 // 不是后台常驻服务，因此 "enabled=true 但无 state" 是正常的初始状态。
-async function handleAutoTunerState(): Promise<{ status: number; body: any }> {
+async function handleAutoTunerState(): Promise<{ status: number; body: unknown }> {
   try {
     const enabled = _cfg?.autoTuner?.enabled === true;
     const { readFile } = await import("node:fs/promises");
@@ -544,8 +545,8 @@ async function handleAutoTunerState(): Promise<{ status: number; body: any }> {
         state: parsed,
       },
     };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
@@ -559,7 +560,7 @@ async function handleAutoTunerState(): Promise<{ status: number; body: any }> {
 //   2. 在召回过程中通过 gm_feedback / POST /api/feedback 提供反馈信号
 //   3. updateWithMarginalUtility() 根据反馈信号更新 M
 // 因此 "updatesApplied=0, historySize=0" 是启用初期的正常状态。
-async function handleAssociationMatrixState(): Promise<{ status: number; body: any }> {
+async function handleAssociationMatrixState(): Promise<{ status: number; body: unknown }> {
   const enabled = _cfg?.associationMatrix?.enabled === true;
   const am = _recaller?.getAssociationMatrix();
   if (!am) {
@@ -600,8 +601,8 @@ async function handleAssociationMatrixState(): Promise<{ status: number; body: a
             : "Active learning in progress."),
       },
     };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
@@ -610,7 +611,7 @@ async function handleAssociationMatrixState(): Promise<{ status: number; body: a
 // 一次性验证 Neo4j / LLM / Embedding 三大依赖的连通性 + 配置完整性。
 // 返回各项的 ok/warn/error 状态 + 诊断提示，便于用户排查配置问题。
 // 设计参考 MySQL "SHOW STATUS" + 健康检查端点的组合。
-async function handleDoctor(): Promise<{ status: number; body: any }> {
+async function handleDoctor(): Promise<{ status: number; body: unknown }> {
   const checks: Array<{
     name: string;
     status: "ok" | "warn" | "error";
@@ -636,12 +637,12 @@ async function handleDoctor(): Promise<{ status: number; body: any }> {
         status: "ok",
         latencyMs: Date.now() - neo4jStart,
       });
-    } catch (err: any) {
+    } catch (err: unknown) {
       checks.push({
         name: "neo4j",
         status: "error",
         latencyMs: Date.now() - neo4jStart,
-        detail: err.message,
+        detail: (err as Error).message,
         hint: `Check neo4j.uri (current: ${_cfg?.neo4j?.uri ?? "unset"})`,
       });
     }
@@ -659,11 +660,11 @@ async function handleDoctor(): Promise<{ status: number; body: any }> {
         status: "ok",
         detail: `nodes=${nodeCount}, edges=${edgeCount}`,
       });
-    } catch (err: any) {
+    } catch (err: unknown) {
       checks.push({
         name: "graph_schema",
         status: "error",
-        detail: err.message,
+        detail: (err as Error).message,
         hint: "Schema may not be initialized; call ensureSchema(driver, dim) on startup",
       });
     }
@@ -731,12 +732,12 @@ async function handleDoctor(): Promise<{ status: number; body: any }> {
           detail: `model=${embedConfig.model}, dim=${vec.length}${expectedDim ? ` (expected=${expectedDim})` : ""}`,
         });
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       checks.push({
         name: "embedding",
         status: "error",
         latencyMs: Date.now() - embedStart,
-        detail: err.message,
+        detail: (err as Error).message,
         hint: `Check embedding.model (must be embed model, not LLM model like qwen3.5:9b). Current: ${embedConfig.model ?? "unset"}`,
       });
     }
@@ -870,7 +871,7 @@ async function handleDoctor(): Promise<{ status: number; body: any }> {
 //
 // v2.3.5 B3: byPurpose 维度现按真实用途分组（extract/judge/community/diagnose/...），
 // 旧版（≤2.3.4）一律记为 "unknown"。仅 /api/usage 端点 200 返回，不返回 404。
-async function handleUsage(): Promise<{ status: number; body: any }> {
+async function handleUsage(): Promise<{ status: number; body: unknown }> {
   try {
     const { getUsageStats } = await import("../store/usage.ts");
     const stats = getUsageStats();
@@ -887,15 +888,15 @@ async function handleUsage(): Promise<{ status: number; body: any }> {
           : "No LLM calls recorded yet. Usage is in-memory and resets on restart. Calls are recorded when extractor/recall/judge/maintain services invoke LLM. If LLM is configured but returns no usage field, token counts may stay 0.",
       },
     };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
 // ── 节点 CRUD ───────────────────────────────────────────────
 
 /** POST /api/nodes — 创建/更新节点 */
-async function handleCreateNode(params: any): Promise<{ status: number; body: any }> {
+async function handleCreateNode(params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   const { type, name, description, content } = params ?? {};
   if (!type || !name) {
@@ -907,10 +908,10 @@ async function handleCreateNode(params: any): Promise<{ status: number; body: an
   }
   try {
     const now = Date.now();
-    const id = params.id ?? `api-${now}-${Math.random().toString(36).slice(2, 8)}`;
+    const id = (params.id ?? `api-${now}-${Math.random().toString(36).slice(2, 8)}`) as string;
     await upsertNode(_driver, {
       id,
-      type: nodeType as any,
+      type: nodeType as NodeType,
       name: String(name),
       description: String(description ?? ""),
       content: String(content ?? ""),
@@ -923,39 +924,39 @@ async function handleCreateNode(params: any): Promise<{ status: number; body: an
       embeddingModel: _cfg?.embedding?.model,
     });
     return { status: 201, body: { id, message: "node created" } };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
 /** PUT /api/nodes/:id — 更新节点 */
-async function handleUpdateNode(params: any): Promise<{ status: number; body: any }> {
+async function handleUpdateNode(params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   const { id } = params ?? {};
   if (!id) return { status: 400, body: { error: "id is required" } };
   try {
-    const existing = await findById(_driver, id);
+    const existing = await findById(_driver, id as string);
     if (!existing) return { status: 404, body: { error: "Node not found" } };
     const now = Date.now();
     await upsertNode(_driver, {
       ...existing,
-      name: params.name ?? existing.name,
-      description: params.description ?? existing.description,
-      content: params.content ?? existing.content,
-      status: params.status ?? existing.status,
+      name: (params.name as string | undefined) ?? existing.name,
+      description: (params.description as string | undefined) ?? existing.description,
+      content: (params.content as string | undefined) ?? existing.content,
+      status: (params.status as NodeStatus | undefined) ?? existing.status,
       updatedAt: now,
       embeddingModel: _cfg?.embedding?.model,
     });
     return { status: 200, body: { id, message: "node updated" } };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
 // ── Recall 查询 ─────────────────────────────────────────────
 
 /** POST /api/recall — 图谱召回查询 */
-async function handleRecall(params: any): Promise<{ status: number; body: any }> {
+async function handleRecall(params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   const query = params?.query;
   if (!query || !String(query).trim()) {
@@ -967,57 +968,57 @@ async function handleRecall(params: any): Promise<{ status: number; body: any }>
   try {
     const result = await _recaller.recall(String(query));
     return { status: 200, body: result };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
 // ── 社区查询 ────────────────────────────────────────────────
 
 /** GET /api/communities — 所有社区摘要列表 */
-async function handleGetCommunities(): Promise<{ status: number; body: any }> {
+async function handleGetCommunities(): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   try {
     const summaries = await getAllCommunitySummaries(_driver);
     const list = Array.from(summaries.values());
     return { status: 200, body: { count: list.length, summaries: list } };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
 /** GET /api/communities/:id/summary — 指定社区摘要 */
-async function handleGetCommunitySummary(params: { id: string }): Promise<{ status: number; body: any }> {
+async function handleGetCommunitySummary(params: { id: string }): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   try {
     const summary = await getCommunitySummary(_driver, params.id);
     if (!summary) return { status: 404, body: { error: "Community not found" } };
     return { status: 200, body: summary };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
 // ── Re-embed 触发 ───────────────────────────────────────────
 
 /** POST /api/reembed — 批量重新向量化 */
-async function handleReembed(params: any): Promise<{ status: number; body: any }> {
+async function handleReembed(params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
   if (!_driver || !_cfg) return { status: 503, body: { error: "Neo4j not connected" } };
   if (!_embed) return { status: 503, body: { error: "Embedding engine not configured" } };
   try {
     const { reEmbedNodes } = await import("../graph/reembed.ts");
-    const batchSize = params?.batchSize ?? 50;
+    const batchSize = (params?.batchSize ?? 50) as number;
     const result = await reEmbedNodes(_driver, _embed, batchSize, _cfg.embedding?.model);
     return { status: 200, body: result };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
 // ── 反馈提交 ────────────────────────────────────────────────
 
 /** POST /api/feedback — 提交召回反馈 */
-async function handleFeedback(params: any): Promise<{ status: number; body: any }> {
+async function handleFeedback(params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   const { query, recalledNodeIds, assistantReply, sessionId } = params ?? {};
   if (!query) return { status: 400, body: { error: "query is required" } };
@@ -1028,13 +1029,13 @@ async function handleFeedback(params: any): Promise<{ status: number; body: any 
       ids.map(async (id: string) => {
         try { return await findById(_driver!, id); } catch { return null; }
       }),
-    )).filter(Boolean) as any[];
+    )).filter(Boolean) as GmNode[];
 
     await _recaller.processFeedback(
       String(query),
       recalledNodes,
       String(assistantReply ?? ""),
-      sessionId,
+      sessionId as string | undefined,
     );
 
     const jm = _recaller.getJudgeManager();
@@ -1047,8 +1048,8 @@ async function handleFeedback(params: any): Promise<{ status: number; body: any 
         coldStart: jm?.isColdStart() ?? true,
       },
     };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
@@ -1068,10 +1069,10 @@ async function handleFeedback(params: any): Promise<{ status: number; body: any 
 //   - 仅在冷启动期使用（热启动后调用无意义）
 //   - 合成数据 matchedBy 会是 "cold-start"/"heuristic"（无法区分真实/合成）
 //   - 建议一次性使用，不要反复调用（会污染反馈统计）
-async function handleFeedbackBootstrap(params: any): Promise<{ status: number; body: any }> {
+async function handleFeedbackBootstrap(params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   if (!_recaller) return { status: 503, body: { error: "Recaller not initialized" } };
-  const maxNodes = Math.min(Math.max(safeParseInt(params?.maxNodes, 100, 500), 10), 500);
+  const maxNodes = Math.min(Math.max(safeParseInt(params?.maxNodes as string | undefined, 100, 500), 10), 500);
   try {
     const { getTopNodes } = await import("../store/store.ts");
     const nodes = await getTopNodes(_driver, maxNodes);
@@ -1110,22 +1111,22 @@ async function handleFeedbackBootstrap(params: any): Promise<{ status: number; b
         hint: "Bootstrap uses synthetic feedback (node name as both query and reply). Use once to exit cold start; do not call repeatedly.",
       },
     };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
 // ── Benchmark 触发 ──────────────────────────────────────────
 
 /** POST /api/benchmark — 运行评测 */
-async function handleBenchmark(params: any): Promise<{ status: number; body: any }> {
+async function handleBenchmark(params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
   if (!_recaller || !_cfg) return { status: 503, body: { error: "Plugin not fully initialized" } };
   try {
     const { runBenchmark, formatAggregateReport } = await import("../benchmark/runner.ts");
     const result = await runBenchmark(_recaller, _driver, _cfg, {
-      datasets: params?.datasets ?? "all",
-      maxCases: params?.maxCases ?? _cfg.benchmark?.maxCases ?? 0,
-      buildGraph: params?.buildGraph ?? _cfg.benchmark?.buildGraph ?? true,
+      datasets: (params?.datasets ?? "all") as string[] | "all",
+      maxCases: (params?.maxCases ?? _cfg.benchmark?.maxCases ?? 0) as number,
+      buildGraph: (params?.buildGraph ?? _cfg.benchmark?.buildGraph ?? true) as boolean,
       caseTimeoutMs: _cfg.benchmark?.caseTimeoutMs ?? 30_000,
       dataDir: _cfg.benchmark?.dataDir,
       llm: _llm ?? undefined,
@@ -1135,15 +1136,15 @@ async function handleBenchmark(params: any): Promise<{ status: number; body: any
       status: 200,
       body: { report: formatAggregateReport(result), aggregate: result.aggregate },
     };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
 // ── AutoTuner 触发 ──────────────────────────────────────────
 
 /** POST /api/auto-tuner/tune — 触发一次自动调优 */
-async function handleAutoTunerTune(params: any): Promise<{ status: number; body: any }> {
+async function handleAutoTunerTune(params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
   if (!_recaller || !_cfg) return { status: 503, body: { error: "Plugin not fully initialized" } };
   if (_cfg.autoTuner?.enabled !== true) {
     return { status: 400, body: { error: "AutoTuner disabled. Set autoTuner.enabled=true in config." } };
@@ -1163,8 +1164,8 @@ async function handleAutoTunerTune(params: any): Promise<{ status: number; body:
       if (saved && saved.trim()) tuner.deserialize(saved);
     } catch { /* 首次运行无状态文件 */ }
 
-    const rounds = Math.max(1, Math.min(params?.rounds ?? 1, _cfg.autoTuner?.maxRounds ?? 10));
-    const results: any[] = [];
+    const rounds = Math.max(1, Math.min((params?.rounds ?? 1) as number, _cfg.autoTuner?.maxRounds ?? 10));
+    const results: unknown[] = [];
     for (let i = 0; i < rounds; i++) {
       const r = await tuner.runTuneCycle(_recaller, _driver, _cfg);
       results.push(r);
@@ -1184,15 +1185,15 @@ async function handleAutoTunerTune(params: any): Promise<{ status: number; body:
         snapshots: tuner.getSnapshots().length,
       },
     };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
 // ── 配置查询 ────────────────────────────────────────────────
 
 /** GET /api/config — 返回当前运行配置（脱敏，不返回密码/token） */
-async function handleConfig(): Promise<{ status: number; body: any }> {
+async function handleConfig(): Promise<{ status: number; body: unknown }> {
   if (!_cfg) return { status: 503, body: { error: "Plugin not initialized" } };
   // 脱敏：移除密码和 token
   const safe = JSON.parse(JSON.stringify(_cfg));
@@ -1209,7 +1210,7 @@ async function handleConfig(): Promise<{ status: number; body: any }> {
 // ═══════════════════════════════════════════════════════════════
 
 /** GET /api/graph/walk?seedIds=id1,id2&depth=2&maxNodes=200 — 子图遍历 */
-async function handleGraphWalk(params: { seedIds?: string; depth?: string; maxNodes?: string }): Promise<{ status: number; body: any }> {
+async function handleGraphWalk(params: { seedIds?: string; depth?: string; maxNodes?: string }): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   const seedIdsStr = params.seedIds;
   if (!seedIdsStr) return { status: 400, body: { error: "seedIds is required (comma-separated)" } };
@@ -1220,73 +1221,73 @@ async function handleGraphWalk(params: { seedIds?: string; depth?: string; maxNo
   try {
     const result = await graphWalk(_driver, seedIds, depth, maxNodes);
     return { status: 200, body: result };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
 /** POST /api/graph/walk — 子图遍历（POST 版，适合 seedIds 较多时） */
-async function handleGraphWalkPost(params: any): Promise<{ status: number; body: any }> {
+async function handleGraphWalkPost(params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
-  const seedIds: string[] = Array.isArray(params?.seedIds) ? params.seedIds : [];
+  const seedIds: string[] = Array.isArray(params?.seedIds) ? params.seedIds as string[] : [];
   if (seedIds.length === 0) return { status: 400, body: { error: "seedIds must be a non-empty array" } };
-  const depth = safeParseInt(params?.depth?.toString(), 2, 5);
-  const maxNodes = safeParseInt(params?.maxNodes?.toString(), 200, 1000);
+  const depth = safeParseInt((params?.depth as number | string | undefined)?.toString(), 2, 5);
+  const maxNodes = safeParseInt((params?.maxNodes as number | string | undefined)?.toString(), 200, 1000);
   try {
     const result = await graphWalk(_driver, seedIds, depth, maxNodes);
     return { status: 200, body: result };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
 /** GET /api/nodes/:id/edges — 获取节点的所有关联边 */
-async function handleNodeEdges(params: { id: string }): Promise<{ status: number; body: any }> {
+async function handleNodeEdges(params: { id: string }): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   try {
     const edges = await getEdgesForNodes(_driver, [params.id]);
     return { status: 200, body: { nodeId: params.id, edges } };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
 /** GET /api/nodes/:id/feedback-stats — 节点的反馈统计 */
-async function handleNodeFeedbackStats(params: { id: string }): Promise<{ status: number; body: any }> {
+async function handleNodeFeedbackStats(params: { id: string }): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   try {
     const stats = await getNodeFeedbackStats(_driver, params.id);
     return { status: 200, body: { nodeId: params.id, ...stats } };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
 /** GET /api/communities/:id/nodes?limit=50 — 社区内节点列表 */
-async function handleCommunityNodes(params: { id: string; limit?: string }): Promise<{ status: number; body: any }> {
+async function handleCommunityNodes(params: { id: string; limit?: string }): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   const limit = safeParseInt(params.limit, 50, 500);
   try {
     const nodes = await nodesByCommunityIds(_driver, [params.id], limit);
     return { status: 200, body: { communityId: params.id, count: nodes.length, nodes } };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
 /** GET /api/communities/:id/representatives — 社区代表节点 */
-async function handleCommunityRepresentatives(params: { id: string }): Promise<{ status: number; body: any }> {
+async function handleCommunityRepresentatives(params: { id: string }): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   try {
     const nodes = await communityRepresentatives(_driver, [params.id]);
     return { status: 200, body: { communityId: params.id, representatives: nodes } };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
 /** GET /api/schema — 图谱 schema 自省（节点类型 + 边类型 + 索引） */
-async function handleSchema(): Promise<{ status: number; body: any }> {
+async function handleSchema(): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   try {
     // 查询节点标签和计数
@@ -1297,7 +1298,7 @@ async function handleSchema(): Promise<{ status: number; body: any }> {
         `CALL db.labels() YIELD label
          RETURN label`,
       );
-      const nodeTypes = await Promise.all(labelResult.records.map(async (rec: any) => {
+      const nodeTypes = await Promise.all(labelResult.records.map(async (rec) => {
         const label = rec.get("label");
         const countResult = await session.run(`MATCH (n:${label}) RETURN count(n) AS cnt`);
         const count = countResult.records[0]?.get("cnt")?.toNumber?.() ?? 0;
@@ -1308,7 +1309,7 @@ async function handleSchema(): Promise<{ status: number; body: any }> {
         `CALL db.relationshipTypes() YIELD relationshipType
          RETURN relationshipType`,
       );
-      const edgeTypes = await Promise.all(relResult.records.map(async (rec: any) => {
+      const edgeTypes = await Promise.all(relResult.records.map(async (rec) => {
         const type = rec.get("relationshipType");
         const countResult = await session.run(`MATCH ()-[r:${type}]->() RETURN count(r) AS cnt`);
         const count = countResult.records[0]?.get("cnt")?.toNumber?.() ?? 0;
@@ -1327,8 +1328,8 @@ async function handleSchema(): Promise<{ status: number; body: any }> {
     } finally {
       await session.close();
     }
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
@@ -1337,7 +1338,7 @@ async function handleSchema(): Promise<{ status: number; body: any }> {
 // ═══════════════════════════════════════════════════════════════
 
 /** POST /api/ops/circuit-breakers/reset — 重置所有熔断器 */
-async function handleResetCircuitBreakers(): Promise<{ status: number; body: any }> {
+async function handleResetCircuitBreakers(): Promise<{ status: number; body: unknown }> {
   try {
     const { getAllCircuitBreakers, resetAllCircuitBreakers } = await import("../engine/circuit-breaker.ts");
     const before = Array.from(getAllCircuitBreakers().entries()).map(([name, b]) => ({
@@ -1352,13 +1353,13 @@ async function handleResetCircuitBreakers(): Promise<{ status: number; body: any
         previousStates: before,
       },
     };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
 /** DELETE /api/ops/cache — 清空查询缓存 */
-async function handleClearCache(): Promise<{ status: number; body: any }> {
+async function handleClearCache(): Promise<{ status: number; body: unknown }> {
   try {
     let cleared = 0;
     if (_recaller) {
@@ -1377,13 +1378,13 @@ async function handleClearCache(): Promise<{ status: number; body: any }> {
         recallTimingReset: true,
       },
     };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
 /** POST /api/ops/reconnect — 手动触发 Neo4j 重连 */
-async function handleReconnect(): Promise<{ status: number; body: any }> {
+async function handleReconnect(): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   try {
     const { verifyWithRetry } = await import("../store/db.ts");
@@ -1397,17 +1398,17 @@ async function handleReconnect(): Promise<{ status: number; body: any }> {
         pool: pool,
       },
     };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 
 /** GET /api/ops/services — 后台服务状态 */
-async function handleServiceStatus(): Promise<{ status: number; body: any }> {
+async function handleServiceStatus(): Promise<{ status: number; body: unknown }> {
   // 从 index.ts 模块级变量推断服务状态
   // 这些变量在 index.ts 中声明，此处通过动态 import 读取
   try {
-    const services: Array<{ name: string; status: string; detail?: any }> = [];
+    const services: Array<{ name: string; status: string; detail?: unknown }> = [];
 
     // API server 本身正在响应请求，即为 running
     services.push({
@@ -1472,7 +1473,7 @@ async function handleServiceStatus(): Promise<{ status: number; body: any }> {
         services,
       },
     };
-  } catch (err: any) {
-    return { status: 500, body: { error: err.message } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }

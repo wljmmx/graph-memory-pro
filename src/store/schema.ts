@@ -4,7 +4,7 @@
  * 注意：不使用 APOC 插件，所有操作使用原生 Cypher 实现
  */
 
-import type { Driver } from "neo4j-driver";
+import type { Driver, Node, Relationship } from "neo4j-driver";
 import { createHash } from "crypto";
 import type { GmNode, GmEdge } from "../types.ts";
 import { getSession } from "./db.ts";
@@ -156,7 +156,7 @@ export function labelToType(label: string): string {
   return mapping[label] ?? label.toUpperCase();
 }
 
-export function recordToNode(rec: any): GmNode | null {
+export function recordToNode(rec: Node): GmNode | null {
   if (!rec || !rec.properties) return null;
   const p = rec.properties;
   const rawLabel = rec.labels?.[0];
@@ -189,7 +189,7 @@ export function recordToNode(rec: any): GmNode | null {
   };
 }
 
-export function recordToEdge(rec: any): GmEdge | null {
+export function recordToEdge(rec: Relationship): GmEdge | null {
   if (!rec || !rec.properties) return null;
   const p = rec.properties;
   // 使用 startNodeElementId/endNodeElementId 获取节点 element ID

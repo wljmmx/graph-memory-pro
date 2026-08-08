@@ -21,7 +21,7 @@
 import { definePluginEntry, buildJsonPluginConfigSchema } from "openclaw/plugin-sdk/plugin-entry";
 import { Type } from "typebox";
 import type { Driver } from "neo4j-driver";
-import type { GmConfig } from "./src/types.ts";
+import type { GmConfig, GmNode, NodeType } from "./src/types.ts";
 import type { CompleteFn } from "./src/engine/llm.ts";
 import type { EmbedFn } from "./src/engine/embed.ts";
 import { createCompleteFn, createRuntimeCompleteFn } from "./src/engine/llm.ts";
@@ -30,14 +30,46 @@ import { initDriver, closeDriver, verifyWithRetry, getDriver, setDriver as setDb
 import { ensureSchema, getNodeCount, getEdgeCount, searchNodes, upsertNode, findById } from "./src/store/store.ts";
 import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
-import { runMaintenance } from "./src/graph/maintenance.ts";
+import { runMaintenance, type GraphHealthReport } from "./src/graph/maintenance.ts";
 import { reEmbedNodes } from "./src/graph/reembed.ts";
 import { setExternalLogger, createLogger } from "./src/logger.ts";
 import { setTimingEnabled } from "./src/timing.ts";
 import { extractInBackground } from "./src/services/extract-service.ts";  // v2.3.4 ARCH-1: 从 index.ts 拆出
 import { getSessionRecallCache, resetSessionRecallCache } from "./src/recaller/session-recall-cache.ts";
+import type { TuneCycleResult } from "./src/evolution/auto-tuner.ts";
 
 const log = createLogger("index");
+
+// ─── 类型定义（SDK 不导出类型，此处定义最小化接口） ──────
+
+interface LoggerLike {
+  info?: (msg: string) => void;
+  warn?: (msg: string) => void;
+  error?: (msg: string) => void;
+  debug?: (msg: string) => void;
+}
+
+interface AgentMessageContentBlock {
+  type?: string;
+  text?: string;
+}
+
+interface AgentMessageLike {
+  role?: string;
+  type?: string;
+  content?: string | Array<AgentMessageContentBlock | string>;
+  text?: string;
+  body?: string;
+}
+
+interface AgentEndEvent {
+  messages?: AgentMessageLike[];
+}
+
+interface AgentEndCtx {
+  sessionKey?: string;
+  sessionId?: string;
+}
 
 // ─── 全局状态 ──────────────────────────────────────────
 
@@ -63,14 +95,15 @@ let _apiServerDriver: Driver | null = null;
 
 import { EMBEDDING_PRESETS } from "./src/types.ts";
 
-function resolveEmbedDimension(cfg: any): number {
+function resolveEmbedDimension(cfg: GmConfig): number {
   // 1. 用户显式指定的维度
   if (cfg?.embedding?.dimensions && typeof cfg.embedding.dimensions === 'number') {
     return cfg.embedding.dimensions;
   }
   // 2. 按模型名匹配预设
   if (cfg?.embedding?.model) {
-    const modelKey = Object.keys(EMBEDDING_PRESETS).find(k => cfg.embedding.model.includes(k) || k.includes(cfg.embedding.model));
+    const model = cfg.embedding.model;
+    const modelKey = Object.keys(EMBEDDING_PRESETS).find(k => model.includes(k) || k.includes(model));
     if (modelKey && EMBEDDING_PRESETS[modelKey].dimensions) {
       return EMBEDDING_PRESETS[modelKey].dimensions;
     }
@@ -91,7 +124,7 @@ function resolveEmbedDimension(cfg: any): number {
  *
  * 仅提取最后一条 user 和最后一条 assistant 消息的文本。
  */
-function extractLastTurn(messages: any[]): { userQuery: string; assistantReply: string } {
+function extractLastTurn(messages: AgentMessageLike[]): { userQuery: string; assistantReply: string } {
   let userQuery = "";
   let assistantReply = "";
 
@@ -114,20 +147,20 @@ function extractLastTurn(messages: any[]): { userQuery: string; assistantReply: 
   return { userQuery, assistantReply };
 }
 
-function extractMessageText(msg: any): string {
+function extractMessageText(msg: AgentMessageLike): string {
   if (!msg) return "";
   const content = msg.content ?? msg.text ?? msg.body ?? "";
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content
-      .filter((b: any) => b && (typeof b === "string" || b?.type === "text"))
-      .map((b: any) => (typeof b === "string" ? b : b.text ?? ""))
+      .filter((b) => b && (typeof b === "string" || b?.type === "text"))
+      .map((b) => (typeof b === "string" ? b : b.text ?? ""))
       .join("\n");
   }
   return "";
 }
 
-async function getOrCreateDriver(cfg: GmConfig, logger: any): Promise<Driver | null> {
+async function getOrCreateDriver(cfg: GmConfig, logger: LoggerLike): Promise<Driver | null> {
   const uri = cfg.neo4j?.uri ?? "(unknown)";
   try {
     log.info(`connecting to Neo4j at ${uri}...`);
@@ -198,7 +231,7 @@ async function readNeo4jConfigFromFile(): Promise<{ uri: string; user: string; p
       // entries 可能是数组或对象
       let pluginEntry = null;
       if (Array.isArray(entries)) {
-        pluginEntry = entries.find((e: any) =>
+        pluginEntry = entries.find((e: { id?: string; name?: string }) =>
           e?.id === "graph-memory-pro" || e?.name === "graph-memory-pro",
         );
       } else if (typeof entries === "object") {
@@ -218,11 +251,11 @@ async function readNeo4jConfigFromFile(): Promise<{ uri: string; user: string; p
 
     log.warn("no neo4j config found in openclaw.json");
     return null;
-  } catch (err: any) {
-    if (err?.code === "ENOENT") {
+  } catch (err) {
+    if ((err as { code?: string })?.code === "ENOENT") {
       log.warn("openclaw.json not found, cannot self-init driver");
     } else {
-      log.warn(`failed to read openclaw.json: ${err?.message ?? err}`);
+      log.warn(`failed to read openclaw.json: ${(err as Error)?.message ?? err}`);
     }
     return null;
   }
@@ -245,7 +278,7 @@ async function readFullConfigFromFile(): Promise<GmConfig | null> {
     const entries = config?.plugins?.entries;
     let pluginConfig = null;
     if (Array.isArray(entries)) {
-      const entry = entries.find((e: any) =>
+      const entry = entries.find((e: { id?: string; name?: string }) =>
         e?.id === "graph-memory-pro" || e?.name === "graph-memory-pro",
       );
       pluginConfig = entry?.config ?? entry;
@@ -503,7 +536,8 @@ autoStartApiServer();
  * SDK 可能不触发 gateway_start 事件，导致 Neo4j driver 永远不初始化。
  * 此函数封装了完整的初始化逻辑，可从 register() 或 gateway_start hook 调用。
  */
-async function doGatewayInit(api: any, logger: any): Promise<void> {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function doGatewayInit(api: any, logger: LoggerLike): Promise<void> {
   const eventCfg = api.pluginConfig ?? api.config;
   log.info(`config check: neo4j.uri=${eventCfg?.neo4j?.uri ? "present" : "missing"}`);
   if (!eventCfg?.neo4j?.uri) {
@@ -542,7 +576,7 @@ async function doGatewayInit(api: any, logger: any): Promise<void> {
   // 3. 初始化 LLM / Embedding
   const runtimeLlm = api.runtime?.llm;
   if (runtimeLlm && typeof runtimeLlm.complete === "function") {
-    _llm = createRuntimeCompleteFn(runtimeLlm, _cfg.llm, logger);
+    _llm = createRuntimeCompleteFn(runtimeLlm, _cfg.llm, logger as unknown as Parameters<typeof createRuntimeCompleteFn>[2]);
     logger?.info?.("[graph-memory-pro] LLM initialized via runtime (provider detection deferred to first call)");
   } else {
     _llm = createCompleteFn(_cfg.llm);
@@ -852,7 +886,9 @@ export default definePluginEntry({
       host: Type.Optional(Type.String({ default: "127.0.0.1" })),
       authToken: Type.Optional(Type.String({ default: "" })),
     })),
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   }) as any),
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   register(api: any) {
     log.info("register() called by Gateway");
     const logger = api.logger ?? console;
@@ -872,7 +908,7 @@ export default definePluginEntry({
     }
 
     // ── Gateway 启动时初始化（fallback） ──────────────────────
-    api.registerHook("gateway_start", async (_event: any) => {
+    api.registerHook("gateway_start", async (_event: unknown) => {
       log.info("gateway_start hook fired");
       if (_driver) {
         log.info("gateway_start: already initialized via register(), skipping");
@@ -922,7 +958,7 @@ export default definePluginEntry({
     //   - fire-and-forget，不阻塞会话；异常仅 warn
     //   - 仅当存在召回缓存时触发，无召回则跳过（避免空判定）
     //   - 可通过 cfg.autoFeedback.enabled 关闭
-    api.registerHook("agent_end", async (event: any, ctx: any) => {
+    api.registerHook("agent_end", async (event: AgentEndEvent, ctx: AgentEndCtx) => {
       // 功能开关
       if (_cfg?.autoFeedback?.enabled === false) return;
       if (!_driver || !_recaller) return;
@@ -935,7 +971,7 @@ export default definePluginEntry({
       if (!recallRecord || recallRecord.nodeIds.length === 0) return;
 
       // 从 messages[] 提取最后一轮 user query + assistant reply
-      const messages: any[] = Array.isArray(event?.messages) ? event.messages : [];
+      const messages: AgentMessageLike[] = Array.isArray(event?.messages) ? event.messages : [];
       const { userQuery, assistantReply } = extractLastTurn(messages);
       if (!assistantReply || !assistantReply.trim()) return;
 
@@ -943,7 +979,7 @@ export default definePluginEntry({
         // 加载召回的节点（JudgeManager 需要 GmNode[] 做判定）
         const recalledNodes = (await Promise.all(
           recallRecord.nodeIds.map(id => findById(_driver!, id)),
-        )).filter(Boolean) as any[];
+          )).filter(Boolean) as GmNode[];
 
         if (recalledNodes.length === 0) return;
 
@@ -962,8 +998,8 @@ export default definePluginEntry({
         if (process.env.GM_DEBUG) {
           log.info(`auto-feedback collected: session=${sessionKey}, recalled=${recalledNodes.length}, getHits=${recallRecord.getNodeIds.length}`);
         }
-      } catch (err: any) {
-        log.warn(`auto-feedback failed: ${err?.message ?? err}`);
+      } catch (err) {
+        log.warn(`auto-feedback failed: ${(err as Error)?.message ?? err}`);
       }
     }, { name: "graph-memory-pro-auto-feedback" });
 
@@ -988,7 +1024,7 @@ export default definePluginEntry({
     // ─────────────────────────────────────────────────────────────────
     api.registerService({
       id: "graph-memory-extractor",
-      async start(_ctx: any) {
+      async start(_ctx: unknown) {
         const interval = _cfg?.background?.extractorIntervalMs ?? 60_000;
         _extractorTimer = setInterval(async () => {
           if (!_driver || !_extractor || !_llm) return;
@@ -1036,7 +1072,7 @@ export default definePluginEntry({
           }
         }, interval);
       },
-      async stop(_ctx: any) {
+      async stop(_ctx: unknown) {
         if (_extractorTimer) { clearInterval(_extractorTimer); _extractorTimer = null; }
       },
     });
@@ -1048,7 +1084,7 @@ export default definePluginEntry({
     // ─────────────────────────────────────────────────────────────────
     api.registerService({
       id: "graph-memory-maintenance",
-      async start(_ctx: any) {
+      async start(_ctx: unknown) {
         const interval = _cfg?.background?.maintenanceIntervalMs ?? 6 * 3600_000;
         // 启动后延迟 5 分钟执行第一次，避免与初始化竞争
         const initialDelay = 5 * 60_000;
@@ -1070,7 +1106,7 @@ export default definePluginEntry({
         setTimeout(runOnce, initialDelay);
         _maintenanceTimer = setInterval(runOnce, interval);
       },
-      async stop(_ctx: any) {
+      async stop(_ctx: unknown) {
         if (_maintenanceTimer) { clearInterval(_maintenanceTimer); _maintenanceTimer = null; }
       },
     });
@@ -1084,7 +1120,7 @@ export default definePluginEntry({
     if (_cfg?.mcp?.enabled === true) {
       api.registerService({
         id: "graph-memory-mcp",
-        async start(_ctx: any) {
+        async start(_ctx: unknown) {
           if (!_driver || !_cfg) return;
           try {
             const { startMcpServer } = await import("./src/mcp/server.ts");
@@ -1112,7 +1148,7 @@ export default definePluginEntry({
             logger?.error?.(`[graph-memory-pro] MCP server start failed: ${err}`);
           }
         },
-        async stop(_ctx: any) {
+        async stop(_ctx: unknown) {
           if (_mcpServerHandle) {
             try { await _mcpServerHandle.close(); } catch { /* ignore */ }
             _mcpServerHandle = null;
@@ -1242,7 +1278,7 @@ export default definePluginEntry({
           }
           await upsertNode(_driver, {
             id,
-            type: nodeType as any,
+            type: nodeType as NodeType,
             name: p.name,
             description: p.description,
             content: p.content,
@@ -1255,8 +1291,8 @@ export default definePluginEntry({
             embeddingModel: _cfg?.embedding?.model,
           });
           return { content: [{ type: "text", text: `已记录知识节点: ${id}` }], details: { id } };
-        } catch (err: any) {
-          return { content: [{ type: "text", text: `记录失败: ${err.message}` }], details: {} };
+        } catch (err) {
+          return { content: [{ type: "text", text: `记录失败: ${(err as Error).message}` }], details: {} };
         }
       },
     });
@@ -1279,7 +1315,7 @@ export default definePluginEntry({
           const result = await runMaintenance(_driver, _cfg, _llm ?? undefined, _embed ?? undefined);
 
           // v2.1.2 G-5: 维护后追加健康报告
-          let healthReport: any = null;
+          let healthReport: GraphHealthReport | null = null;
           try {
             const { healthCheck } = await import("./src/graph/maintenance.ts");
             healthReport = await healthCheck(_driver);
@@ -1342,8 +1378,8 @@ export default definePluginEntry({
             amStats ? `历史样本: ${amStats.historySize}` : "",
           ].filter(Boolean).join("\n");
           return { content: [{ type: "text", text }], details: { nodeCount, edgeCount, ...result, health: healthReport, cache: cacheStats, judge: judgeStats, associationMatrix: amStats } };
-        } catch (err: any) {
-          return { content: [{ type: "text", text: `维护失败: ${err.message}` }], details: {} };
+        } catch (err) {
+          return { content: [{ type: "text", text: `维护失败: ${(err as Error).message}` }], details: {} };
         }
       },
     });
@@ -1391,6 +1427,7 @@ export default definePluginEntry({
         assistantReply: Type.String({ description: "Assistant's reply content", default: "" }),
         sessionId: Type.Optional(Type.String({ default: "" })),
       }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       async execute(_callId: string, params: any) {
         if (!_driver || !_recaller) {
           return { content: [{ type: "text", text: "Graph Memory Pro not connected" }], details: {} };
@@ -1401,7 +1438,7 @@ export default definePluginEntry({
           const driver = _driver;
           const recalledNodes = (await Promise.all(
             (params.recalledNodeIds as string[]).map(id => findById(driver, id)),
-          )).filter(Boolean) as any[];
+          )).filter(Boolean) as GmNode[];
 
           // 调用 Recaller.processFeedback（I-2 判断 + I-3 持久化）
           await _recaller.processFeedback(
@@ -1419,8 +1456,8 @@ export default definePluginEntry({
             `Total feedbacks: ${jm?.getFeedbackCount() ?? 0}`,
           ].join("\n");
           return { content: [{ type: "text", text }], details: { submitted: true } };
-        } catch (err: any) {
-          return { content: [{ type: "text", text: `Feedback failed: ${err.message}` }], details: {} };
+        } catch (err) {
+          return { content: [{ type: "text", text: `Feedback failed: ${(err as Error).message}` }], details: {} };
         }
       },
     });
@@ -1438,6 +1475,7 @@ export default definePluginEntry({
           maximum: 500,
         })),
       }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       async execute(_callId: string, params: any) {
         if (!_driver || !_recaller) {
           return { content: [{ type: "text", text: "Graph Memory Pro not connected" }], details: {} };
@@ -1477,8 +1515,8 @@ export default definePluginEntry({
               : `Cold start exited. Judge will now use Tier ${jm?.getConfig().tier ?? 1}.`,
           ];
           return { content: [{ type: "text", text: lines.join("\n") }], details: { bootstrapped, failed, feedbackCount: after } };
-        } catch (err: any) {
-          return { content: [{ type: "text", text: `Bootstrap failed: ${err.message}` }], details: {} };
+        } catch (err) {
+          return { content: [{ type: "text", text: `Bootstrap failed: ${(err as Error).message}` }], details: {} };
         }
       },
     });
@@ -1497,6 +1535,7 @@ export default definePluginEntry({
         maxCases: Type.Optional(Type.Number({ description: "Max cases per dataset (0 = all)" })),
         buildGraph: Type.Optional(Type.Boolean({ description: "Build graph from conversation history before evaluation (default true)" })),
       }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       async execute(_callId: string, params: any) {
         if (!_recaller || !_cfg) {
           return { content: [{ type: "text", text: "Graph Memory Pro not connected" }], details: {} };
@@ -1514,8 +1553,8 @@ export default definePluginEntry({
           });
           const text = formatAggregateReport(result);
           return { content: [{ type: "text", text }], details: result.aggregate };
-        } catch (err: any) {
-          return { content: [{ type: "text", text: `Benchmark failed: ${err.message}` }], details: {} };
+        } catch (err) {
+          return { content: [{ type: "text", text: `Benchmark failed: ${(err as Error).message}` }], details: {} };
         }
       },
     });
@@ -1529,6 +1568,7 @@ export default definePluginEntry({
       parameters: Type.Object({
         rounds: Type.Optional(Type.Number({ description: "Number of tune cycles to run (default 1, max bounded by config maxRounds)" })),
       }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       async execute(_callId: string, params: any) {
         if (!_recaller || !_cfg) {
           return { content: [{ type: "text", text: "Graph Memory Pro not connected" }], details: {} };
@@ -1555,7 +1595,7 @@ export default definePluginEntry({
           } catch { /* 首次运行无状态文件 */ }
 
           const rounds = Math.max(1, Math.min(params.rounds ?? 1, _cfg.autoTuner?.maxRounds ?? 10));
-          const results: any[] = [];
+          const results: TuneCycleResult[] = [];
           for (let i = 0; i < rounds; i++) {
             const r = await tuner.runTuneCycle(_recaller, _driver, _cfg);
             results.push(r);
@@ -1582,8 +1622,8 @@ export default definePluginEntry({
             "✅ 调优参数已自动应用到 Recaller，即时生效。",
           ];
           return { content: [{ type: "text", text: lines.join("\n") }], details: { rounds: results, finalAction: tuner.getCurrentAction(), totalRounds: tuner.getTuneRound(), snapshots: tuner.getSnapshots().length } };
-        } catch (err: any) {
-          return { content: [{ type: "text", text: `Auto-tune failed: ${err.message}` }], details: {} };
+        } catch (err) {
+          return { content: [{ type: "text", text: `Auto-tune failed: ${(err as Error).message}` }], details: {} };
         }
       },
     });

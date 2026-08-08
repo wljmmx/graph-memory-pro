@@ -6,20 +6,20 @@
  * 所有操作使用原生 Cypher，无 APOC 依赖
  */
 
-import type { Driver } from "neo4j-driver";
+import type { Driver, Session } from "neo4j-driver";
 import { getSession } from "../store/db.ts";
 import type { CompleteFn } from "../engine/llm.ts";
 import type { EmbedFn } from "../engine/embed.ts";
 import { updateCommunities, upsertCommunitySummary, pruneCommunitySummaries } from "../store/store.ts";
 import { ALL_REL_TYPES } from "../utils.ts";
 
-async function getExistingRelTypes(session: any): Promise<string[]> {
+async function getExistingRelTypes(session: Session): Promise<string[]> {
   const result = await session.run(`
     MATCH (:Task|Skill|Event)-[r]->(:Task|Skill|Event)
     WHERE type(r) IN $types
     RETURN DISTINCT type(r) AS t
   `, { types: ALL_REL_TYPES });
-  return result.records.map((r: any) => r.get("t"));
+  return result.records.map(r => r.get("t"));
 }
 
 function buildRelProjection(existingTypes: string[]): string {
@@ -419,7 +419,7 @@ export async function drillDownCommunity(
   const session = getSession(driver);
   try {
     let query: string;
-    let params: any = {};
+    let params: Record<string, unknown> = {};
 
     if (opts.domainId) {
       query = `MATCH (n:Task|Skill|Event {status: 'active', domainId: $domainId})
@@ -464,7 +464,7 @@ export async function summarizeCommunities(
     if (memberIds.length === 0) continue;
 
     const session = getSession(driver);
-    let members: any[];
+    let members: { name: string; type: string; description: string }[];
     try {
       const result = await session.run(`
         MATCH (n:Task|Skill|Event {status: 'active'})

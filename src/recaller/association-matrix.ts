@@ -434,12 +434,12 @@ function createIdentityMatrix(dim: number): Float32Array {
 }
 
 function cosineSim(a: ArrayLike<number>, b: ArrayLike<number>): number {
-  const n = (a as any).length ?? 0;
-  if (n === 0 || (b as any).length !== n) return 0;
+  const n = a.length ?? 0;
+  if (n === 0 || b.length !== n) return 0;
   let dot = 0, normA = 0, normB = 0;
   for (let i = 0; i < n; i++) {
-    const av = (a as any)[i];
-    const bv = (b as any)[i];
+    const av = a[i];
+    const bv = b[i];
     dot += av * bv;
     normA += av * av;
     normB += bv * bv;

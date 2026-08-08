@@ -33,7 +33,7 @@ interface RouteMatcher {
   path: string;
   paramNames: string[];
   method: string;
-  handler: (params: any) => Promise<{ status: number; body: any }>;
+  handler: (params: Record<string, unknown>) => Promise<{ status: number; body: unknown }>;
 }
 
 /**
@@ -149,7 +149,7 @@ export async function startApiServer(
     }
 
     // 合并查询参数
-    const params: any = { ...matchedParams };
+    const params: Record<string, unknown> = { ...matchedParams };
     for (const [k, v] of url.searchParams) {
       params[k] = v;
     }
@@ -175,9 +175,9 @@ export async function startApiServer(
       const result = await matched.handler(params);
       res.writeHead(result.status, { "Content-Type": "application/json" });
       res.end(JSON.stringify(result.body));
-    } catch (err: any) {
+    } catch (err: unknown) {
       res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: String(err?.message ?? err) }));
+      res.end(JSON.stringify({ error: String((err as Error)?.message ?? err) }));
     }
   });
 
@@ -234,8 +234,8 @@ export async function startApiServer(
     } else {
       logger.warn?.(`[graph-memory-pro] API server self-check returned ${resp.status}`);
     }
-  } catch (err: any) {
-    logger.warn?.(`[graph-memory-pro] API server self-check failed: ${err.message}`);
+  } catch (err: unknown) {
+    logger.warn?.(`[graph-memory-pro] API server self-check failed: ${(err as Error).message}`);
   }
 
   return {

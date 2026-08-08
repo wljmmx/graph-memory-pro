@@ -4,7 +4,7 @@
  * 注意：不使用 APOC 插件，所有操作使用原生 Cypher 实现
  */
 
-import type { Driver } from "neo4j-driver";
+import type { Driver, Node, Relationship } from "neo4j-driver";
 import neo4j from "neo4j-driver";
 import type { GmNode, GmEdge, GmConfig } from "../types.ts";
 import { getSession } from "./db.ts";
@@ -262,7 +262,7 @@ export async function searchNodes(
     );
 
     // 合并 4 个索引结果，按 nodeId 去重
-    const seen = new Map<string, any>();
+    const seen = new Map<string, GmNode | null>();
     for (const records of perIndexResults) {
       for (const r of records) {
         const node = r.get("n");
@@ -274,7 +274,7 @@ export async function searchNodes(
       }
     }
 
-    const nodes = Array.from(seen.values());
+    const nodes = Array.from(seen.values()).filter((n): n is GmNode => n !== null);
     nodes.sort((a, b) => (b.validatedCount ?? 0) - (a.validatedCount ?? 0) || (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
     return nodes.slice(0, limit);
   } catch {
@@ -403,8 +403,8 @@ export async function graphWalk(
     );
     if (!result.records.length) return { nodes: [], edges: [] };
     const row = result.records[0];
-    const nodeList = row.get("nodeList") as any[];
-    const relList = row.get("relList") as any[];
+    const nodeList = row.get("nodeList") as Node[];
+    const relList = row.get("relList") as Relationship[];
 
     return {
       nodes: nodeList.map(recordToNode).filter(Boolean) as GmNode[],
