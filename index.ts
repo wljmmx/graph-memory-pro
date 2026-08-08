@@ -32,10 +32,12 @@ import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
 import { runMaintenance } from "./src/graph/maintenance.ts";
 import { reEmbedNodes } from "./src/graph/reembed.ts";
-import { setExternalLogger } from "./src/logger.ts";
+import { setExternalLogger, createLogger } from "./src/logger.ts";
 import { setTimingEnabled } from "./src/timing.ts";
 import { extractInBackground } from "./src/services/extract-service.ts";  // v2.3.4 ARCH-1: 从 index.ts 拆出
 import { getSessionRecallCache, resetSessionRecallCache } from "./src/recaller/session-recall-cache.ts";
+
+const log = createLogger("index");
 
 // ─── 全局状态 ──────────────────────────────────────────
 
@@ -128,20 +130,20 @@ function extractMessageText(msg: any): string {
 async function getOrCreateDriver(cfg: GmConfig, logger: any): Promise<Driver | null> {
   const uri = cfg.neo4j?.uri ?? "(unknown)";
   try {
-    console.log(`[graph-memory-pro] connecting to Neo4j at ${uri}...`);
+    log.info(`connecting to Neo4j at ${uri}...`);
     const d = initDriver(cfg.neo4j);
     const ok = await verifyWithRetry(d);
     if (!ok) {
-      console.error(`[graph-memory-pro] Neo4j connection FAILED at ${uri} — plugin disabled`);
+      log.error(`Neo4j connection FAILED at ${uri} — plugin disabled`);
       logger?.warn?.(`[graph-memory-pro] Neo4j connection failed at ${uri} — plugin disabled`);
       closeDriver();
       return null;
     }
-    console.log(`[graph-memory-pro] Neo4j connected to ${uri}`);
+    log.info(`Neo4j connected to ${uri}`);
     logger?.info?.(`[graph-memory-pro] Neo4j connected to ${uri}`);
     return d;
   } catch (err) {
-    console.error(`[graph-memory-pro] Neo4j init failed at ${uri}: ${err}`);
+    log.error(`Neo4j init failed at ${uri}: ${err}`);
     logger?.warn?.(`[graph-memory-pro] Neo4j init failed at ${uri}: ${err}`);
     return null;
   }
@@ -205,7 +207,7 @@ async function readNeo4jConfigFromFile(): Promise<{ uri: string; user: string; p
 
       const neo4j = pluginEntry?.config?.neo4j ?? pluginEntry?.neo4j;
       if (neo4j?.uri) {
-        console.log(`[graph-memory-pro] config loaded from openclaw.json: neo4j.uri=${neo4j.uri}`);
+        log.info(`config loaded from openclaw.json: neo4j.uri=${neo4j.uri}`);
         return {
           uri: neo4j.uri,
           user: neo4j.user || "neo4j",
@@ -214,13 +216,13 @@ async function readNeo4jConfigFromFile(): Promise<{ uri: string; user: string; p
       }
     }
 
-    console.warn("[graph-memory-pro] no neo4j config found in openclaw.json");
+    log.warn("no neo4j config found in openclaw.json");
     return null;
   } catch (err: any) {
     if (err?.code === "ENOENT") {
-      console.warn("[graph-memory-pro] openclaw.json not found, cannot self-init driver");
+      log.warn("openclaw.json not found, cannot self-init driver");
     } else {
-      console.warn(`[graph-memory-pro] failed to read openclaw.json: ${err?.message ?? err}`);
+      log.warn(`failed to read openclaw.json: ${err?.message ?? err}`);
     }
     return null;
   }
@@ -278,23 +280,23 @@ async function readFullConfigFromFile(): Promise<GmConfig | null> {
 async function trySelfInitDriver(): Promise<Driver | null> {
   const neo4jCfg = await readNeo4jConfigFromFile();
   if (!neo4jCfg) {
-    console.warn("[graph-memory-pro] self-init: no neo4j config available, skipping");
+    log.warn("self-init: no neo4j config available, skipping");
     return null;
   }
 
   try {
-    console.log(`[graph-memory-pro] self-init: connecting to ${neo4jCfg.uri}...`);
+    log.info(`self-init: connecting to ${neo4jCfg.uri}...`);
     const d = initDriver(neo4jCfg);
     const ok = await verifyWithRetry(d);
     if (ok) {
-      console.log(`[graph-memory-pro] self-init: connected to ${neo4jCfg.uri}`);
+      log.info(`self-init: connected to ${neo4jCfg.uri}`);
       return d;
     }
-    console.warn(`[graph-memory-pro] self-init: connection failed to ${neo4jCfg.uri}`);
+    log.warn(`self-init: connection failed to ${neo4jCfg.uri}`);
     closeDriver();
     return null;
   } catch (err) {
-    console.warn(`[graph-memory-pro] self-init: error: ${err}`);
+    log.warn(`self-init: error: ${err}`);
     closeDriver();
     return null;
   }
@@ -315,7 +317,7 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
     // 从 openclaw.json 读取完整插件配置
     const cfg = await readFullConfigFromFile();
     if (!cfg) {
-      console.error("[graph-memory-pro] no config available for API server, aborting");
+      log.error("no config available for API server, aborting");
       return;
     }
 
@@ -327,16 +329,16 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
       const embedDimension = resolveEmbedDimension(cfg);
       await ensureSchema(driver, embedDimension);
     } catch (err) {
-      console.warn(`[graph-memory-pro] self-init schema: ${err}`);
+      log.warn(`self-init schema: ${err}`);
     }
 
     // 2. 初始化 LLM
     if (!_llm && cfg.llm) {
       try {
         _llm = createCompleteFn(cfg.llm);
-        console.log("[graph-memory-pro] self-init: LLM initialized");
+        log.info("self-init: LLM initialized");
       } catch (err) {
-        console.warn(`[graph-memory-pro] self-init: LLM init failed: ${err}`);
+        log.warn(`self-init: LLM init failed: ${err}`);
       }
     }
 
@@ -344,9 +346,9 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
     if (!_embed && cfg.embedding) {
       try {
         _embed = createEmbedFn(cfg.embedding);
-        console.log("[graph-memory-pro] self-init: Embedding initialized");
+        log.info("self-init: Embedding initialized");
       } catch (err) {
-        console.warn(`[graph-memory-pro] self-init: Embedding init failed: ${err}`);
+        log.warn(`self-init: Embedding init failed: ${err}`);
       }
     }
 
@@ -367,7 +369,7 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
             for (let i = 0; i < persistedCount; i++) jm.incrementFeedback();
           } catch { /* DB 可能还没有数据 */ }
           _recaller.setJudgeManager(jm);
-          console.log("[graph-memory-pro] self-init: JudgeManager initialized");
+          log.info("self-init: JudgeManager initialized");
         }
 
         // 注入 AssociationMatrix
@@ -376,12 +378,12 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
           const amDim = resolveEmbedDimension(cfg);
           const am = createAssociationMatrix(amDim, cfg);
           _recaller.setAssociationMatrix(am);
-          console.log("[graph-memory-pro] self-init: AssociationMatrix initialized");
+          log.info("self-init: AssociationMatrix initialized");
         }
 
-        console.log("[graph-memory-pro] self-init: Recaller initialized");
+        log.info("self-init: Recaller initialized");
       } catch (err) {
-        console.warn(`[graph-memory-pro] self-init: Recaller init failed: ${err}`);
+        log.warn(`self-init: Recaller init failed: ${err}`);
       }
     }
 
@@ -390,13 +392,13 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
       try {
         _extractor = new Extractor(driver);
       } catch (err) {
-        console.warn(`[graph-memory-pro] self-init: Extractor init failed: ${err}`);
+        log.warn(`self-init: Extractor init failed: ${err}`);
       }
     }
 
     // 6. 启动 API 服务器，传入所有组件
     const { startApiServer } = await import("./src/server/http-server.ts");
-    const logger = { info: console.log, error: console.error, warn: console.warn };
+    const apiLogger = { info: (m: string) => log.info(m), error: (m: string) => log.error(m), warn: (m: string) => log.warn(m) };
     const apiServerCfg = cfg.apiServer ?? { enabled: true, port: 7850, host: "127.0.0.1" };
     _apiServerHandle = await startApiServer(
       driver, cfg,
@@ -406,14 +408,14 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
         host: apiServerCfg.host ?? "127.0.0.1",
         authToken: apiServerCfg.authToken,
       },
-      logger,
+      apiLogger,
       _llm ?? undefined,
       _embed ?? undefined,
       _recaller ?? undefined,
     );
-    console.log("[graph-memory-pro] API server started (module-level, full init)");
+    log.info("API server started (module-level, full init)");
   } catch (err) {
-    console.error(`[graph-memory-pro] API server start failed: ${err}`);
+    log.error(`API server start failed: ${err}`);
   }
 }
 
@@ -424,7 +426,7 @@ async function autoStartApiServer(): Promise<void> {
   const FAST_POLL_MS = 2000;
   const SLOW_POLL_MS = 10_000;
 
-  console.log("[graph-memory-pro] auto-start: polling for driver (30s fast phase)...");
+  log.info("auto-start: polling for driver (30s fast phase)...");
 
   // 阶段 1：快速轮询 — 等待 register()/gateway_start 设置 driver
   for (let i = 0; i < FAST_ATTEMPTS; i++) {
@@ -438,7 +440,7 @@ async function autoStartApiServer(): Promise<void> {
   }
 
   // 阶段 2：自驱动初始化 — 轮询失败，尝试自建 driver
-  console.warn("[graph-memory-pro] auto-start: driver not ready after 30s, trying self-init...");
+  log.warn("auto-start: driver not ready after 30s, trying self-init...");
   const selfDriver = await trySelfInitDriver();
   if (selfDriver) {
     _apiServerAutoStarted = true;
@@ -447,7 +449,7 @@ async function autoStartApiServer(): Promise<void> {
   }
 
   // 阶段 3：慢速重试 — 自建失败，持续等待外部 driver 就绪
-  console.warn("[graph-memory-pro] auto-start: self-init failed, switching to slow retry (every 10s)");
+  log.warn("auto-start: self-init failed, switching to slow retry (every 10s)");
   _autoStartRetryTimer = setInterval(async () => {
     if (_apiServerAutoStarted) {
       if (_autoStartRetryTimer) { clearInterval(_autoStartRetryTimer); _autoStartRetryTimer = null; }
@@ -483,11 +485,11 @@ export function registerExternalDriver(driver: Driver): void {
     _driver = driver;
   }
   _apiServerDriver = driver;
-  console.log("[graph-memory-pro] external driver registered via registerExternalDriver()");
+  log.info("external driver registered via registerExternalDriver()");
 }
 
 // 在模块加载时触发自动启动（不阻塞模块导入）
-console.log("[graph-memory-pro] module loaded, auto-start scheduled");
+log.info("module loaded, auto-start scheduled");
 autoStartApiServer();
 
 // v2.3.4 ARCH-1: extractInBackground 已拆分到 src/services/extract-service.ts
@@ -500,9 +502,9 @@ autoStartApiServer();
  */
 async function doGatewayInit(api: any, logger: any): Promise<void> {
   const eventCfg = api.pluginConfig ?? api.config;
-  console.log(`[graph-memory-pro] config check: neo4j.uri=${eventCfg?.neo4j?.uri ? "present" : "missing"}`);
+  log.info(`config check: neo4j.uri=${eventCfg?.neo4j?.uri ? "present" : "missing"}`);
   if (!eventCfg?.neo4j?.uri) {
-    console.warn("[graph-memory-pro] No Neo4j config — plugin skipped");
+    log.warn("No Neo4j config — plugin skipped");
     logger?.warn?.("[graph-memory-pro] No Neo4j config — plugin skipped");
     return;
   }
@@ -631,7 +633,7 @@ async function doGatewayInit(api: any, logger: any): Promise<void> {
     }
   }
 
-  console.log("[graph-memory-pro] initialized");
+  log.info("initialized");
   logger?.info?.("[graph-memory-pro] initialized");
 }
 
@@ -839,7 +841,7 @@ export default definePluginEntry({
     })),
   }) as any),
   register(api: any) {
-    console.log("[graph-memory-pro] register() called by Gateway");
+    log.info("register() called by Gateway");
     const logger = api.logger ?? console;
     // v2.2.0 P2-1：把 SDK logger 注入到结构化日志模块
     setExternalLogger(api.logger ?? null);
@@ -848,19 +850,19 @@ export default definePluginEntry({
     // 在 register() 中直接从 api.pluginConfig 检测并启动初始化（fire-and-forget）。
     const eventCfg = api.pluginConfig ?? api.config;
     if (eventCfg?.neo4j?.uri) {
-      console.log(`[graph-memory-pro] config detected in register(): neo4j.uri=${eventCfg.neo4j.uri}`);
+      log.info(`config detected in register(): neo4j.uri=${eventCfg.neo4j.uri}`);
       doGatewayInit(api, logger).catch(err => {
-        console.error(`[graph-memory-pro] direct init from register() failed: ${err}`);
+        log.error(`direct init from register() failed: ${err}`);
       });
     } else {
-      console.log("[graph-memory-pro] no neo4j config in register(), waiting for gateway_start hook or auto-start");
+      log.info("no neo4j config in register(), waiting for gateway_start hook or auto-start");
     }
 
     // ── Gateway 启动时初始化（fallback） ──────────────────────
     api.registerHook("gateway_start", async (_event: any) => {
-      console.log("[graph-memory-pro] gateway_start hook fired");
+      log.info("gateway_start hook fired");
       if (_driver) {
-        console.log("[graph-memory-pro] gateway_start: already initialized via register(), skipping");
+        log.info("gateway_start: already initialized via register(), skipping");
         return;
       }
       await doGatewayInit(api, logger);
@@ -945,10 +947,10 @@ export default definePluginEntry({
         );
 
         if (process.env.GM_DEBUG) {
-          console.log(`[graph-memory-pro] auto-feedback collected: session=${sessionKey}, recalled=${recalledNodes.length}, getHits=${recallRecord.getNodeIds.length}`);
+          log.info(`auto-feedback collected: session=${sessionKey}, recalled=${recalledNodes.length}, getHits=${recallRecord.getNodeIds.length}`);
         }
       } catch (err: any) {
-        console.warn(`[graph-memory-pro] auto-feedback failed: ${err?.message ?? err}`);
+        log.warn(`auto-feedback failed: ${err?.message ?? err}`);
       }
     }, { name: "graph-memory-pro-auto-feedback" });
 
