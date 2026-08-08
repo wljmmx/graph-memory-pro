@@ -207,7 +207,7 @@ export class LlmJudgeStrategy implements JudgeStrategy {
         "Tier 2 LLM judge",
       );
       const parsed = parseLlmJudgeJson(response);
-      const usedSet = new Set<string>((parsed.used ?? []).filter((x: any) => typeof x === "string"));
+      const usedSet = new Set<string>((parsed.used ?? []).filter((x: unknown): x is string => typeof x === "string"));
 
       const usedNodeIds: string[] = [];
       const unusedNodeIds: string[] = [];

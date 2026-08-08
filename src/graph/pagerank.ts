@@ -271,7 +271,7 @@ export async function personalizedPageRank(
 async function runPPRWithSeeds(
   session: Session,
   graphName: string,
-  sourceNodeIds: any[],
+  sourceNodeIds: unknown[],
   candidateIds: string[],
   cfg: GmConfig,
 ): Promise<PPRResult> {

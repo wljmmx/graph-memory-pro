@@ -98,8 +98,8 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
 
   // v2.3.2 阶段二: LRU 缓存 — 避免相同 text 跨 tick 重复 embed
   // 缓存配置可通过 config.cacheSize / config.cacheTtlMs 覆盖（0 表示禁用缓存）
-  const cacheSize = (config as any).cacheSize ?? DEFAULT_EMBED_CACHE_SIZE;
-  const cacheTtlMs = (config as any).cacheTtlMs ?? DEFAULT_EMBED_CACHE_TTL_MS;
+  const cacheSize = config.cacheSize ?? DEFAULT_EMBED_CACHE_SIZE;
+  const cacheTtlMs = config.cacheTtlMs ?? DEFAULT_EMBED_CACHE_TTL_MS;
   const cache = (cacheSize > 0 && cacheTtlMs > 0) ? createLruCache(cacheSize, cacheTtlMs) : null;
 
   return async function embed(text: string): Promise<number[]> {
@@ -142,7 +142,7 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
           throw new Error(`Embedding API ${response.status}: ${body.slice(0, 200)}${hint}`);
         }
 
-        const data = await response.json() as any;
+        const data = await response.json() as { embeddings?: number[][] };
 
         if (!data.embeddings?.[0]) {
           // 打印 Ollama 实际返回内容，便于诊断（如模型不支持 embed、模型名错误等）

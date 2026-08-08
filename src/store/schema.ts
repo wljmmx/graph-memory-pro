@@ -6,7 +6,7 @@
 
 import type { Driver, Node, Relationship } from "neo4j-driver";
 import { createHash } from "crypto";
-import type { GmNode, GmEdge } from "../types.ts";
+import type { GmNode, GmEdge, EdgeType } from "../types.ts";
 import { getSession } from "./db.ts";
 
 // ─── 共享工具 ───────────────────────────────────────────────
@@ -198,7 +198,7 @@ export function recordToEdge(rec: Relationship): GmEdge | null {
   const toId = p.toId ?? "";
   return {
     id: p.id ?? `${fromId}-${toId}-${rec.type}`,
-    type: rec.type,
+    type: rec.type as EdgeType,
     fromId,
     toId,
     instruction: p.instruction ?? "",

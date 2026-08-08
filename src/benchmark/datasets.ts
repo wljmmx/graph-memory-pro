@@ -53,7 +53,7 @@ export async function loadLoCoMo(dataDir: string = "benchmarks/data"): Promise<B
     const data = JSON.parse(raw);
 
     const conversations: Array<{ role: string; content: string }> = data.conversations ?? [];
-    const qaPairs: Array<any> = data.qa_pairs ?? [];
+    const qaPairs: Array<{ question?: string; answer?: string; category?: string }> = data.qa_pairs ?? [];
 
     for (let i = 0; i < qaPairs.length; i++) {
       const qa = qaPairs[i];
@@ -132,7 +132,7 @@ export async function loadLongMemEval(dataDir: string = "benchmarks/data"): Prom
           query: data.question ?? "",
           expectedAnswer: data.answer ?? "",
           conversation: data.session?.messages
-            ? data.session.messages.map((m: any) => ({
+            ? data.session.messages.map((m: { role?: string; content?: string }) => ({
                 role: (m.role === "user" ? "user" : "assistant") as "user" | "assistant",
                 content: m.content ?? "",
               }))

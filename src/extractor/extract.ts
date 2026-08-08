@@ -104,20 +104,22 @@ function parseExtractResult(raw: string): ExtractResult {
 
 // ─── 验证函数 ──────────────────────────────────
 
-function isValidNode(node: any): boolean {
+function isValidNode(node: unknown): boolean {
   if (!node || typeof node !== "object") return false;
-  if (typeof node.name !== "string" || !node.name.trim()) return false;
-  if (typeof node.description !== "string") return false;
-  if (typeof node.content !== "string") return false;
-  if (typeof node.type !== "string" || !["TASK", "SKILL", "EVENT"].includes(node.type.toUpperCase())) return false;
+  const n = node as Record<string, unknown>;
+  if (typeof n.name !== "string" || !n.name.trim()) return false;
+  if (typeof n.description !== "string") return false;
+  if (typeof n.content !== "string") return false;
+  if (typeof n.type !== "string" || !["TASK", "SKILL", "EVENT"].includes(n.type.toUpperCase())) return false;
   return true;
 }
 
-function isValidEdge(edge: any): boolean {
+function isValidEdge(edge: unknown): boolean {
   if (!edge || typeof edge !== "object") return false;
-  if (typeof edge.type !== "string" || !edge.type.trim()) return false;
-  if (typeof edge.fromName !== "string" || !edge.fromName.trim()) return false;
-  if (typeof edge.toName !== "string" || !edge.toName.trim()) return false;
+  const e = edge as Record<string, unknown>;
+  if (typeof e.type !== "string" || !e.type.trim()) return false;
+  if (typeof e.fromName !== "string" || !e.fromName.trim()) return false;
+  if (typeof e.toName !== "string" || !e.toName.trim()) return false;
   return true;
 }
 

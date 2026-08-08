@@ -71,7 +71,7 @@ async function main(): Promise<void> {
 
   const cfg = loadConfig(values.config);
   const buildGraph = values["no-build-graph"] ? false : values["build-graph"];
-  const datasets = values.datasets === "all" ? "all" : values.datasets.split(",");
+  const datasets: string[] | "all" = values.datasets === "all" ? "all" : values.datasets.split(",");
   const maxCases = Number(values["max-cases"] ?? 0);
   const caseTimeoutMs = Number(values["case-timeout-ms"] ?? 30000);
 
@@ -112,7 +112,7 @@ async function main(): Promise<void> {
   // 5. 运行 Benchmark
   try {
     const result = await runBenchmark(recaller, driver, cfg, {
-      datasets: datasets as any,
+      datasets: datasets,
       dataDir: values["data-dir"],
       maxCases,
       buildGraph,

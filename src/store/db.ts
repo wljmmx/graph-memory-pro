@@ -124,6 +124,8 @@ export function getPoolMetrics(): PoolMetrics {
 function tryGetDriverActiveConnections(): number | null {
   if (!_driver) return null;
   try {
+    // neo4j-driver v6 内部私有结构反射，类型跨版本不稳定，按 SDK 边界处理
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const provider = (_driver as any)._connectionProvider;
     const pool = provider?._connectionPool;
     if (!pool) return null;
@@ -138,7 +140,7 @@ function tryGetDriverActiveConnections(): number | null {
     }
     // 某些版本是普通对象
     if (counts && typeof counts === "object") {
-      return Object.values(counts).reduce((s: number, v: any) => s + (typeof v === "number" ? v : 0), 0);
+      return Object.values(counts).reduce((s: number, v) => s + (typeof v === "number" ? v : 0), 0);
     }
     return null;
   } catch {

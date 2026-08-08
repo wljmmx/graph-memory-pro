@@ -58,7 +58,7 @@ export function checkReloadAuth(cfg: GmConfig | null, provided: string | undefin
  *
  * 从 SDK 重新获取的 api.config 可能缺少部分字段，需填充默认值后才能安全使用。
  */
-export function normalizeReloadConfig(raw: any): GmConfig {
+export function normalizeReloadConfig(raw: Record<string, unknown>): GmConfig {
   return {
     ...raw,
     compactTurnCount: raw.compactTurnCount ?? 6,

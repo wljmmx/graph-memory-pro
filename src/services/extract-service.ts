@@ -8,7 +8,7 @@
  */
 
 import type { Driver } from "neo4j-driver";
-import type { GmConfig } from "../types.ts";
+import type { GmConfig, GmNode, GmEdge } from "../types.ts";
 import type { CompleteFn } from "../engine/llm.ts";
 import type { Extractor } from "../extractor/extract.ts";
 import { upsertNode, batchUpsertNodes, upsertEdge, batchUpsertEdges } from "../store/store.ts";
@@ -29,7 +29,7 @@ export async function extractInBackground(
   driver: Driver | null,
   llm: CompleteFn | null,
   cfg: GmConfig | null,
-  logger: any,
+  logger: { debug?(...args: unknown[]): void; info?(...args: unknown[]): void },
   pendingMessages: Array<{ user: string; assistant: string }>,
 ): Promise<void> {
   if (!extractor || !driver || !llm || pendingMessages.length === 0) return;
@@ -55,7 +55,7 @@ export async function extractInBackground(
 
         // v2.3.1 P0-3 性能优化: 批量 upsert 节点（UNWIND + MERGE）
         const nodeIdMap = new Map<string, string>();
-        const nodesToWrite: any[] = [];
+        const nodesToWrite: GmNode[] = [];
         for (const enode of result.nodes) {
           const id = `auto-${now}-${Math.random().toString(36).slice(2, 8)}`;
           nodeIdMap.set(enode.name, id);
@@ -83,7 +83,7 @@ export async function extractInBackground(
         }
 
         // v2.3.1 P0-3: 批量 upsert 边
-        const edgesToWrite: any[] = [];
+        const edgesToWrite: GmEdge[] = [];
         for (const eedge of result.edges) {
           const fromId = nodeIdMap.get(eedge.fromName);
           const toId = nodeIdMap.get(eedge.toName);

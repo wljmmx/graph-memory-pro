@@ -16,7 +16,7 @@
 
 import type { Recaller } from "../recaller/recall.ts";
 import type { Driver } from "neo4j-driver";
-import type { GmConfig } from "../types.ts";
+import type { GmConfig, EdgeType } from "../types.ts";
 import type { BenchmarkCase, BenchmarkDataset, BenchmarkReport, CaseResult } from "./types.ts";
 import { evaluateCase, buildReport, formatReport } from "./types.ts";
 import { loadAllDatasets, getBuiltinSampleDataset } from "./datasets.ts";
@@ -290,7 +290,7 @@ async function buildGraphFromConversation(
           }
           await upsertEdge(driver, {
             id: `bench-edge-${testCase.id}-${i}`,
-            type: pe.type as any,
+            type: pe.type as EdgeType,
             fromId,
             toId,
             instruction: pe.instruction ?? "",
@@ -371,9 +371,9 @@ async function buildGraphFromConversation(
       });
     }
     log.info(`buildGraph: extractor wrote ${result.nodes.length} nodes for case ${testCase.id}`);
-  } catch (err: any) {
+  } catch (err: unknown) {
     // v2.3.5: 不再静默失败 — 显式打印建图错误，便于诊断 0% 指标
-    log.error(`buildGraph: FAILED for case ${testCase.id}: ${err?.message ?? err}`);
+    log.error(`buildGraph: FAILED for case ${testCase.id}: ${(err as Error)?.message ?? String(err)}`);
   }
 }
 

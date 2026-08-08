@@ -14,8 +14,8 @@ export interface GraphHealthReport {
   topNodes: Array<{ id: string; name: string; pagerank: number }>;
   anomalies: string[];
   // v2.3.2 阶段三: 可选的连接池与熔断器状态（由 routes 层追加）
-  connectionPool?: any;
-  circuitBreakers?: Record<string, any>;
+  connectionPool?: unknown;
+  circuitBreakers?: Record<string, unknown>;
 }
 
 /**

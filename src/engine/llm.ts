@@ -191,7 +191,13 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
           throw new Error(`LLM API ${response.status}: ${body.slice(0, 200)}`);
         }
 
-        const data = await response.json() as any;
+        const data = await response.json() as {
+          message?: { content?: unknown };
+          choices?: Array<{ message?: { content?: unknown } }>;
+          prompt_eval_count?: number;
+          eval_count?: number;
+          usage?: { prompt_tokens?: number; completion_tokens?: number };
+        };
 
         // 响应格式适配：Ollama /api/chat 返回 { message: { content } }，
         // OpenAI /v1/chat/completions 返回 { choices: [{ message: { content } }] }
@@ -266,7 +272,7 @@ function normalizeContent(content: unknown): string {
   if (Array.isArray(content)) {
     // OpenAI multimodal format: [{type: "text", text: "..."}, ...]
     return content
-      .map((part: any) => {
+      .map((part) => {
         if (part == null) return "";
         if (typeof part === "string") return part;
         if (typeof part.text === "string") return part.text;
@@ -411,7 +417,7 @@ export function createRuntimeCompleteFn(
       // v2.3.5 B3: purpose 由调用方传入，不再硬编码 "unknown"
       try {
         const { recordUsage } = await import("../store/usage.ts");
-        const usage = (result as any)?.usage;
+        const usage = result?.usage as { promptTokens?: number; completionTokens?: number } | undefined;
         recordUsage(
           result?.provider ? `runtime-${result.provider}` : "runtime",
           purpose,

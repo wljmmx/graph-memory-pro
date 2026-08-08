@@ -281,7 +281,7 @@ export class AutoTuner {
     //   - 或任何 case 里带 prebuiltNodes/prebuiltEdges
     const hasSampleDataset = probedDatasets.some((d: BenchmarkDataset) =>
       d.name === "Sample" ||
-      d.cases.some((c: any) => (c.prebuiltNodes && c.prebuiltNodes.length > 0) || (c.prebuiltEdges && c.prebuiltEdges.length > 0)),
+      d.cases.some((c) => (c.prebuiltNodes && c.prebuiltNodes.length > 0) || (c.prebuiltEdges && c.prebuiltEdges.length > 0)),
     );
     const SAMPLE_BUILDGRAPH_THRESHOLD = 50;
     let forceBuildGraph: boolean;
