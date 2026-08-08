@@ -19,7 +19,7 @@ import type { GmConfig } from "../types.ts";
 import type { CompleteFn } from "../engine/llm.ts";
 import type { Driver } from "neo4j-driver";
 import type { Recaller } from "../recaller/recall.ts";
-import type { BenchmarkReport, CaseResult } from "../benchmark/types.ts";
+import type { BenchmarkReport, CaseResult, BenchmarkDataset } from "../benchmark/types.ts";
 import { runBenchmark, formatAggregateReport, type BenchmarkRunResult } from "../benchmark/runner.ts";
 import { getNodeCount } from "../store/store.ts";
 import { createLogger } from "../logger.ts";
@@ -269,7 +269,7 @@ export class AutoTuner {
 
     // 探测实际数据集（无副作用，仅读文件/构造内置样本，耗时可忽略）
     const { loadAllDatasets } = await import("../benchmark/datasets.ts");
-    let probedDatasets;
+    let probedDatasets: BenchmarkDataset[];
     try {
       probedDatasets = await loadAllDatasets();
     } catch {
@@ -279,9 +279,9 @@ export class AutoTuner {
     // 判断是否有需要 buildGraph 的数据集：
     //   - 名称为 "Sample"（即 getBuiltinSampleDataset）
     //   - 或任何 case 里带 prebuiltNodes/prebuiltEdges
-    const hasSampleDataset = probedDatasets.some(d =>
+    const hasSampleDataset = probedDatasets.some((d: BenchmarkDataset) =>
       d.name === "Sample" ||
-      d.cases.some(c => (c.prebuiltNodes && c.prebuiltNodes.length > 0) || (c.prebuiltEdges && c.prebuiltEdges.length > 0)),
+      d.cases.some((c: any) => (c.prebuiltNodes && c.prebuiltNodes.length > 0) || (c.prebuiltEdges && c.prebuiltEdges.length > 0)),
     );
     const SAMPLE_BUILDGRAPH_THRESHOLD = 50;
     let forceBuildGraph: boolean;
