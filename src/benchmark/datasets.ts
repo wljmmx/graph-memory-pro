@@ -14,6 +14,9 @@
 import type { BenchmarkCase, BenchmarkDataset } from "./types.ts";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { createLogger } from "../logger.ts";
+
+const log = createLogger("benchmark-datasets");
 
 // ── LoCoMo 适配器 ──────────────────────────────────────
 
@@ -68,7 +71,7 @@ export async function loadLoCoMo(dataDir: string = "benchmarks/data"): Promise<B
       });
     }
   } catch (err) {
-    console.warn(`[benchmark] LoCoMo load failed: ${err}`);
+    log.warn(`LoCoMo load failed: ${err}`);
   }
 
   return {
@@ -115,7 +118,7 @@ export async function loadLongMemEval(dataDir: string = "benchmarks/data"): Prom
 
   try {
     const raw = readFileSync(filePath, "utf-8");
-    const lines = raw.split("\n").filter(l => l && l.trim());
+    const lines = raw.split("\n").filter((l: string) => l && l.trim());
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
@@ -141,7 +144,7 @@ export async function loadLongMemEval(dataDir: string = "benchmarks/data"): Prom
       }
     }
   } catch (err) {
-    console.warn(`[benchmark] LongMemEval load failed: ${err}`);
+    log.warn(`LongMemEval load failed: ${err}`);
   }
 
   return {

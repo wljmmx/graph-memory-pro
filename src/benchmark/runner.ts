@@ -119,12 +119,42 @@ export async function runBenchmark(
   }
 
   // 2. 可选：建图谱
-  if (buildGraph && driver && llm) {
-    const extractor = new Extractor(driver);
+  // v2.3.5: prebuiltNodes 不需要 LLM（完全确定数据），所以 buildGraph=true 时
+  //   - 有 prebuiltNodes：只要 driver 存在就写
+  //   - 需要 LLM extractor（fallback 到 conversation）：才需要 llm
+  if (buildGraph && driver) {
+    const extractor = llm ? new Extractor(driver) : null;
     for (const dataset of targetDatasets) {
       for (const testCase of dataset.cases) {
-        if (!testCase.conversation) continue;
-        await buildGraphFromConversation(extractor, driver, llm, testCase, embedFn);
+        const hasPrebuilt = testCase.prebuiltNodes && testCase.prebuiltNodes.length > 0;
+        const hasConversation = testCase.conversation && testCase.conversation.length > 0;
+        if (hasPrebuilt || (extractor && hasConversation)) {
+          await buildGraphFromConversation(
+            extractor,
+            driver,
+            llm ?? null,
+            testCase,
+            embedFn,
+          );
+        } else if (!hasPrebuilt && !extractor) {
+          log.warn(`buildGraph: case ${testCase.id} has no prebuiltNodes and LLM unavailable — skip graph build`);
+        } else if (!hasPrebuilt && !hasConversation) {
+          log.warn(`buildGraph: case ${testCase.id} has no prebuiltNodes and no conversation — skip graph build`);
+        }
+      }
+    }
+  } else if (!buildGraph) {
+    // v2.3.5: 不建图时检查数据集是否有 prebuiltNodes，这种情况 expectedNodeIds 几乎必然不匹配
+    for (const dataset of targetDatasets) {
+      const casesWithPrebuilt = dataset.cases.filter(c =>
+        (c.prebuiltNodes && c.prebuiltNodes.length > 0) || (c.prebuiltEdges && c.prebuiltEdges.length > 0),
+      ).length;
+      if (casesWithPrebuilt > 0) {
+        log.warn(
+          `buildGraph=false but dataset "${dataset.name}" has ${casesWithPrebuilt} cases with prebuiltNodes/Edges! ` +
+          `expectedNodeIds will NOT match any real graph nodes → P@1/P@3/MRR will be 0%. ` +
+          `Set buildGraph=true to inject prebuilt nodes before evaluation.`,
+        );
       }
     }
   }
@@ -135,7 +165,6 @@ export async function runBenchmark(
     const cases = maxCases > 0 ? dataset.cases.slice(0, maxCases) : dataset.cases;
     const caseResults: CaseResult[] = [];
 
-    console.log(`[benchmark] running ${dataset.name}: ${cases.length} cases`);
     log.info(`running ${dataset.name}: ${cases.length} cases`);
 
     for (const testCase of cases) {
@@ -170,8 +199,7 @@ export async function runBenchmark(
     const datasetStart = Date.now();
     const report = buildReport(dataset, caseResults, Date.now() - datasetStart);
     reports.push(report);
-    console.log(formatReport(report));
-    console.log("");
+    log.info(formatReport(report));
   }
 
   // 4. 汇总
@@ -202,11 +230,14 @@ export async function runBenchmark(
  * v2.3.5：若 testCase 提供了 prebuiltNodes / prebuiltEdges，直接写入（不走 LLM extractor）。
  *         这保证 expectedNodeIds 与实际节点 name 100% 可控对应。
  *         否则回退到 LLM extractor 提取三元组。
+ *
+ * 参数说明：
+ *   - extractor / llm：仅 fallback 到 LLM 提取时需要，有 prebuiltNodes 时可传 null。
  */
 async function buildGraphFromConversation(
-  extractor: Extractor,
+  extractor: Extractor | null,
   driver: Driver,
-  llm: CompleteFn,
+  llm: CompleteFn | null,
   testCase: BenchmarkCase,
   embedFn?: EmbedFn,
 ): Promise<void> {
@@ -217,7 +248,10 @@ async function buildGraphFromConversation(
     // v2.3.5: 优先写 prebuiltNodes（不经过 LLM，结果确定）
     if (testCase.prebuiltNodes && testCase.prebuiltNodes.length > 0) {
       for (const pn of testCase.prebuiltNodes) {
-        const id = `bench-${testCase.id}-${Math.random().toString(36).slice(2, 8)}`;
+        // v2.3.5 fix: 使用确定性 id（case id + node name 哈希），避免多次 benchmark 运行
+        // 造成同名节点重复堆积，也保证 MERGE 时真正"更新"而非"插入新的"
+        const nameHash = [...pn.name].reduce((a, c) => a + c.charCodeAt(0), 0).toString(36);
+        const id = `bench-${testCase.id}-${nameHash}`;
         nodeIdMap.set(pn.name, id);
         await upsertNode(driver, {
           id,
@@ -246,7 +280,8 @@ async function buildGraphFromConversation(
 
       // 写 prebuiltEdges（若提供）
       if (testCase.prebuiltEdges && testCase.prebuiltEdges.length > 0) {
-        for (const pe of testCase.prebuiltEdges) {
+        for (let i = 0; i < testCase.prebuiltEdges.length; i++) {
+          const pe = testCase.prebuiltEdges[i];
           const fromId = nodeIdMap.get(pe.fromName);
           const toId = nodeIdMap.get(pe.toName);
           if (!fromId || !toId) {
@@ -254,8 +289,8 @@ async function buildGraphFromConversation(
             continue;
           }
           await upsertEdge(driver, {
-            id: `bench-edge-${testCase.id}-${Math.random().toString(36).slice(2, 8)}`,
-            type: pe.type,
+            id: `bench-edge-${testCase.id}-${i}`,
+            type: pe.type as any,
             fromId,
             toId,
             instruction: pe.instruction ?? "",
@@ -271,6 +306,10 @@ async function buildGraphFromConversation(
     }
 
     // fallback：通过 LLM extractor 提取（结果不稳定，仅用于无 prebuiltNodes 的外部数据集）
+    if (!extractor || !llm) {
+      log.warn(`buildGraph: no prebuiltNodes and extractor/llm missing for case ${testCase.id} — skip`);
+      return;
+    }
     if (!testCase.conversation || testCase.conversation.length === 0) {
       log.warn(`buildGraph: no conversation and no prebuiltNodes for case ${testCase.id}`);
       return;

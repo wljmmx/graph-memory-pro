@@ -21,6 +21,10 @@ import type { Driver } from "neo4j-driver";
 import type { Recaller } from "../recaller/recall.ts";
 import type { BenchmarkReport, CaseResult } from "../benchmark/types.ts";
 import { runBenchmark, formatAggregateReport, type BenchmarkRunResult } from "../benchmark/runner.ts";
+import { getNodeCount } from "../store/store.ts";
+import { createLogger } from "../logger.ts";
+
+const log = createLogger("auto-tuner");
 
 // ── 动作空间 ──────────────────────────────────────
 
@@ -244,10 +248,62 @@ export class AutoTuner {
     const roundStart = Date.now();
 
     // 1. EVALUATE：在 Benchmark 上评估当前配置
-    console.log(`[auto-tuner] round ${this.tuneRound}: EVALUATE`);
+    //
+    // v2.3.5 fix: buildGraph 策略（彻底修复 P@1=0%）：
+    //   先探测会实际加载哪些数据集。如果包含 Sample 数据集或任何带有 prebuiltNodes/prebuiltEdges
+    //   的数据集，**强制 buildGraph=true**，无视当前 graph 节点数量。
+    //
+    //   理由：Sample 等内置/小数据集的 expectedNodeIds 是人为预置的（如 "Neo4j",
+    //   "graph-memory-pro"），只有先通过 prebuiltNodes 写入 graph 后才能被召回。
+    //   而 gm_bootstrap 等写入的 100+ 真实节点名字完全不同，不建图则 expectedNodeIds 永不匹配，
+    //   指标恒为 0%，调优器也永远在错误的信号下瞎调。
+    //
+    //   仅当数据集**完全是** LoCoMo/LongMemEval 等真实生产对话数据集（无 prebuiltNodes，
+    //   靠 conversation 提取）且 nodeCount 充足时，才 buildGraph=false 评估真实召回。
+    log.info(`round ${this.tuneRound}: EVALUATE`);
+    let nodeCount = 0;
+    try {
+      nodeCount = driver ? await getNodeCount(driver) : 0;
+    } catch { /* ignore */ }
+    log.info(`current graph node count: ${nodeCount}`);
+
+    // 探测实际数据集（无副作用，仅读文件/构造内置样本，耗时可忽略）
+    const { loadAllDatasets } = await import("../benchmark/datasets.ts");
+    let probedDatasets;
+    try {
+      probedDatasets = await loadAllDatasets();
+    } catch {
+      probedDatasets = [];
+    }
+
+    // 判断是否有需要 buildGraph 的数据集：
+    //   - 名称为 "Sample"（即 getBuiltinSampleDataset）
+    //   - 或任何 case 里带 prebuiltNodes/prebuiltEdges
+    const hasSampleDataset = probedDatasets.some(d =>
+      d.name === "Sample" ||
+      d.cases.some(c => (c.prebuiltNodes && c.prebuiltNodes.length > 0) || (c.prebuiltEdges && c.prebuiltEdges.length > 0)),
+    );
+    const SAMPLE_BUILDGRAPH_THRESHOLD = 50;
+    let forceBuildGraph: boolean;
+    let forceReason: string;
+    if (hasSampleDataset) {
+      forceBuildGraph = true;
+      forceReason = "probed dataset contains Sample or cases with prebuiltNodes/Edges, MUST buildGraph to inject expected nodes (regardless of current graph size)";
+    } else if (nodeCount < SAMPLE_BUILDGRAPH_THRESHOLD) {
+      forceBuildGraph = true;
+      forceReason = `node count (${nodeCount}) < ${SAMPLE_BUILDGRAPH_THRESHOLD}, build graph from conversations before evaluating`;
+    } else {
+      forceBuildGraph = false;
+      forceReason = `real-world dataset + node count (${nodeCount}) >= ${SAMPLE_BUILDGRAPH_THRESHOLD}, evaluating real graph recall (no graph rebuild)`;
+    }
+    log.info(`buildGraph decision: ${forceBuildGraph} — ${forceReason}`);
+    if (!forceBuildGraph && probedDatasets.length === 0) {
+      log.warn("no dataset available, benchmark will be empty");
+    }
+
     const evalResult = await runBenchmark(recaller, driver, currentCfg, {
       maxCases: this.cfg.benchmarkMaxCases,
-      buildGraph: false,
+      buildGraph: forceBuildGraph,
       llm: this.llm ?? undefined,
     });
 
@@ -255,17 +311,17 @@ export class AutoTuner {
     const failedCases = collectFailedCases(evalResult.reports);
 
     // 2. DIAGNOSE：LLM 诊断失败案例
-    console.log(`[auto-tuner] round ${this.tuneRound}: DIAGNOSE (${failedCases.length} failures)`);
+    log.info(`round ${this.tuneRound}: DIAGNOSE (${failedCases.length} failures)`);
     const diagnosis = await this.diagnose(failedCases, currentMetrics);
 
     // 3. PROPOSE：应用建议的调整
-    console.log(`[auto-tuner] round ${this.tuneRound}: PROPOSE`);
+    log.info(`round ${this.tuneRound}: PROPOSE`);
     const proposedAction = { ...this.currentAction, ...diagnosis.proposedAdjustments };
     const clampedAction = clampAction(proposedAction) as EvolveActionSpace;
     const fullClamped = this.fillAction(clampedAction);
 
     // 4. GUARD：revert-on-regression + explore-on-stagnation
-    console.log(`[auto-tuner] round ${this.tuneRound}: GUARD`);
+    log.info(`round ${this.tuneRound}: GUARD`);
     const guardResult = this.guard(currentMetrics, fullClamped);
 
     if (guardResult.revert) {
@@ -273,7 +329,7 @@ export class AutoTuner {
       const lastStable = this.snapshots.filter(s => s.stable).pop();
       if (lastStable) {
         this.currentAction = lastStable.action;
-        console.log(`[auto-tuner] reverted to snapshot v${lastStable.version}`);
+        log.info(`reverted to snapshot v${lastStable.version}`);
       }
       return {
         applied: false,
@@ -313,7 +369,7 @@ export class AutoTuner {
 
     // explore-on-stagnation：连续 N 轮无改进 → 探索新维度
     if (this.stagnationCount >= this.cfg.stagnationThreshold) {
-      console.log(`[auto-tuner] stagnation: exploring new dimensions`);
+      log.info(`stagnation detected (${this.stagnationCount} rounds), exploring new dimensions`);
       const explored = this.exploreNewDimension();
       this.currentAction = { ...this.currentAction, ...explored };
       this.stagnationCount = 0;
@@ -385,7 +441,7 @@ ${JSON.stringify(ACTION_BOUNDS, null, 2)}
         reasoning: parsed.reasoning ?? "",
       };
     } catch (err) {
-      console.warn(`[auto-tuner] LLM diagnosis failed: ${err}, fallback to heuristic`);
+      log.warn(`LLM diagnosis failed: ${err}, fallback to heuristic`);
       return this.heuristicDiagnose(failedCases, currentMetrics);
     }
   }
