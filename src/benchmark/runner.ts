@@ -25,6 +25,9 @@ import type { CompleteFn } from "../engine/llm.ts";
 import type { EmbedFn } from "../engine/embed.ts";
 import { upsertNode, upsertEdge, saveVector, computeEmbeddingHash } from "../store/store.ts";
 import { withTimeout } from "../utils.ts";
+import { createLogger } from "../logger.ts";
+
+const log = createLogger("benchmark");
 
 export interface BenchmarkOptions {
   /** 指定运行的数据集（"all" 或具体名称数组） */
@@ -133,6 +136,7 @@ export async function runBenchmark(
     const caseResults: CaseResult[] = [];
 
     console.log(`[benchmark] running ${dataset.name}: ${cases.length} cases`);
+    log.info(`running ${dataset.name}: ${cases.length} cases`);
 
     for (const testCase of cases) {
       try {
@@ -194,6 +198,10 @@ export async function runBenchmark(
 
 /**
  * 从对话历史建图谱
+ *
+ * v2.3.5：若 testCase 提供了 prebuiltNodes / prebuiltEdges，直接写入（不走 LLM extractor）。
+ *         这保证 expectedNodeIds 与实际节点 name 100% 可控对应。
+ *         否则回退到 LLM extractor 提取三元组。
  */
 async function buildGraphFromConversation(
   extractor: Extractor,
@@ -202,19 +210,84 @@ async function buildGraphFromConversation(
   testCase: BenchmarkCase,
   embedFn?: EmbedFn,
 ): Promise<void> {
-  if (!testCase.conversation || testCase.conversation.length === 0) return;
-
-  // 取最后一条 user + assistant 对
-  const lastUser = [...testCase.conversation].reverse().find(m => m.role === "user");
-  const lastAssistant = [...testCase.conversation].reverse().find(m => m.role === "assistant");
-  if (!lastUser || !lastAssistant) return;
-
   try {
-    const result = await extractor.extract(llm, lastUser.content, lastAssistant.content);
-    if (result.nodes.length === 0) return;
-
-    const nodeIdMap = new Map<string, string>();
     const now = Date.now();
+    const nodeIdMap = new Map<string, string>();
+
+    // v2.3.5: 优先写 prebuiltNodes（不经过 LLM，结果确定）
+    if (testCase.prebuiltNodes && testCase.prebuiltNodes.length > 0) {
+      for (const pn of testCase.prebuiltNodes) {
+        const id = `bench-${testCase.id}-${Math.random().toString(36).slice(2, 8)}`;
+        nodeIdMap.set(pn.name, id);
+        await upsertNode(driver, {
+          id,
+          type: pn.type,
+          name: pn.name,
+          description: pn.description,
+          content: pn.content,
+          status: pn.status ?? "active",
+          communityId: pn.communityId ?? undefined,
+          pagerank: pn.pagerank ?? 0,
+          validatedCount: pn.validatedCount ?? 0,
+          createdAt: pn.createdAt ?? now,
+          updatedAt: pn.updatedAt ?? now,
+        });
+        if (embedFn) {
+          try {
+            const text = `${pn.name}: ${pn.description}\n${pn.content.slice(0, 500)}`;
+            const vec = await embedFn(text);
+            if (vec && vec.length > 0) {
+              const hash = computeEmbeddingHash(pn.name, pn.description, pn.content);
+              await saveVector(driver, id, vec, hash);
+            }
+          } catch { /* embedding 失败不阻塞建图 */ }
+        }
+      }
+
+      // 写 prebuiltEdges（若提供）
+      if (testCase.prebuiltEdges && testCase.prebuiltEdges.length > 0) {
+        for (const pe of testCase.prebuiltEdges) {
+          const fromId = nodeIdMap.get(pe.fromName);
+          const toId = nodeIdMap.get(pe.toName);
+          if (!fromId || !toId) {
+            log.warn(`buildGraph: edge references unknown name from=${pe.fromName} to=${pe.toName} (case ${testCase.id})`);
+            continue;
+          }
+          await upsertEdge(driver, {
+            id: `bench-edge-${testCase.id}-${Math.random().toString(36).slice(2, 8)}`,
+            type: pe.type,
+            fromId,
+            toId,
+            instruction: pe.instruction ?? "",
+            condition: pe.condition ?? "",
+            weight: 1,
+            createdAt: now,
+            updatedAt: now,
+          });
+        }
+      }
+      log.info(`buildGraph: wrote ${testCase.prebuiltNodes.length} prebuilt nodes for case ${testCase.id}`);
+      return;
+    }
+
+    // fallback：通过 LLM extractor 提取（结果不稳定，仅用于无 prebuiltNodes 的外部数据集）
+    if (!testCase.conversation || testCase.conversation.length === 0) {
+      log.warn(`buildGraph: no conversation and no prebuiltNodes for case ${testCase.id}`);
+      return;
+    }
+    const lastUser = [...testCase.conversation].reverse().find(m => m.role === "user");
+    const lastAssistant = [...testCase.conversation].reverse().find(m => m.role === "assistant");
+    if (!lastUser || !lastAssistant) {
+      log.warn(`buildGraph: missing user/assistant pair for case ${testCase.id}`);
+      return;
+    }
+
+    const result = await extractor.extract(llm, lastUser.content, lastAssistant.content);
+    if (result.nodes.length === 0) {
+      log.warn(`buildGraph: extractor returned 0 nodes for case ${testCase.id} — P@1/P@3/MRR will be 0`);
+      return;
+    }
+
     for (const enode of result.nodes) {
       const id = `bench-${now}-${Math.random().toString(36).slice(2, 8)}`;
       nodeIdMap.set(enode.name, id);
@@ -231,18 +304,15 @@ async function buildGraphFromConversation(
         createdAt: now,
         updatedAt: now,
       });
-      // 为节点生成 embedding，避免 benchmark 仅靠 FTS 召回（修复建图无 embedding 缺陷）
       if (embedFn) {
         try {
           const text = `${enode.name}: ${enode.description}\n${enode.content.slice(0, 500)}`;
           const vec = await embedFn(text);
           if (vec && vec.length > 0) {
             const hash = computeEmbeddingHash(enode.name, enode.description, enode.content);
-            await saveVector(driver, id, vec, hash/* embeddingModel=unknown in benchmark */);
+            await saveVector(driver, id, vec, hash);
           }
-        } catch {
-          // embedding 失败不阻塞建图
-        }
+        } catch { /* embedding 失败不阻塞建图 */ }
       }
     }
     for (const eedge of result.edges) {
@@ -261,8 +331,10 @@ async function buildGraphFromConversation(
         updatedAt: now,
       });
     }
-  } catch {
-    // 静默失败
+    log.info(`buildGraph: extractor wrote ${result.nodes.length} nodes for case ${testCase.id}`);
+  } catch (err: any) {
+    // v2.3.5: 不再静默失败 — 显式打印建图错误，便于诊断 0% 指标
+    log.error(`buildGraph: FAILED for case ${testCase.id}: ${err?.message ?? err}`);
   }
 }
 

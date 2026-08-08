@@ -9,7 +9,7 @@
  * 适配层：将对话转为 graph-memory 提取格式
  */
 
-import type { RecallResult } from "../types.ts";
+import type { RecallResult, GmNode, GmEdge } from "../types.ts";
 
 // ── 评测数据结构 ──────────────────────────────────────
 
@@ -25,12 +25,23 @@ export interface BenchmarkCase {
   query: string;
   /** 期望的答案文本（用于 F1 计算） */
   expectedAnswer: string;
-  /** 期望命中的节点 id 列表（用于 P@1/P@3/MRR，可选） */
+  /** 期望命中的节点 id 或 name 列表（用于 P@1/P@3/MRR，可选） */
   expectedNodeIds?: string[];
   /** 对话历史（用于提取三元组建图谱） */
   conversation?: Array<{ role: "user" | "assistant"; content: string }>;
   /** 时间戳（时序类样本） */
   timestamp?: number;
+  /**
+   * v2.3.5: 预构建节点（直接 upsert，不走 LLM extractor）。
+   * 解决 extractor 要求节点名英文、LLM 输出不稳定导致 expectedNodeIds 永不匹配的问题。
+   * 若存在，buildGraphFromConversation 会直接用这些节点建图。
+   */
+  prebuiltNodes?: Array<Partial<GmNode> & Pick<GmNode, "name" | "description" | "content" | "type">>;
+  /**
+   * v2.3.5: 预构建边（可选，配合 prebuiltNodes 用 name 引用连接）。
+   * fromName / toName 对应 prebuiltNodes 的 name 字段。
+   */
+  prebuiltEdges?: Array<{ type: string; fromName: string; toName: string; instruction?: string; condition?: string }>;
 }
 
 /** 评测数据集接口 */
