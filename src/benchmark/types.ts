@@ -9,7 +9,7 @@
  * 适配层：将对话转为 graph-memory 提取格式
  */
 
-import type { RecallResult, GmNode, GmEdge } from "../types.ts";
+import type { RecallResult, GmNode } from "../types.ts";
 
 // ── 评测数据结构 ──────────────────────────────────────
 
