@@ -1533,7 +1533,9 @@ export default definePluginEntry({
           for (const node of nodes) {
             try {
               const reply = `${node.name} ${node.description ?? ""} ${node.content ?? ""}`.slice(0, 1000);
-              await _recaller.processFeedback(node.name, [node], reply, "bootstrap");
+              // v2.3.6 fix: 强制同步执行，保证每条反馈的持久化 + 计数在下一条前完成，
+              // 使下方 before/after 计数与冷启动判断准确（默认 asyncMode=true 时计数会滞后）。
+              await _recaller.processFeedback(node.name, [node], reply, "bootstrap", { sync: true });
               bootstrapped++;
             } catch {
               failed++;
@@ -1633,7 +1635,8 @@ export default definePluginEntry({
           const rounds = Math.max(1, Math.min(params.rounds ?? 1, _cfg.autoTuner?.maxRounds ?? 10));
           const results: TuneCycleResult[] = [];
           for (let i = 0; i < rounds; i++) {
-            const r = await tuner.runTuneCycle(_recaller, _driver, _cfg);
+            // v2.3.6 fix: 透传 embedFn，使调优评测建图带 embedding（与 gm_benchmark 一致）
+            const r = await tuner.runTuneCycle(_recaller, _driver, _cfg, _embed ?? undefined);
             results.push(r);
             if (!r.applied) break;
           }

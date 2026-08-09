@@ -17,6 +17,7 @@
 
 import type { GmConfig } from "../types.ts";
 import type { CompleteFn } from "../engine/llm.ts";
+import type { EmbedFn } from "../engine/embed.ts";
 import type { Driver } from "neo4j-driver";
 import type { Recaller } from "../recaller/recall.ts";
 import type { BenchmarkReport, CaseResult, BenchmarkDataset } from "../benchmark/types.ts";
@@ -157,7 +158,7 @@ export const DEFAULT_AUTOTUNER_CONFIG: AutoTunerConfig = {
   maxRounds: 10,
   benchmarkMaxCases: 50,
   llmDiagnosis: true,
-  warmupFeedbacks: 100,
+  warmupFeedbacks: 40,
 };
 
 // ── AutoTuner 主类 ──────────────────────────────────────
@@ -225,6 +226,9 @@ export class AutoTuner {
     recaller: Recaller,
     driver: Driver | null,
     currentCfg: GmConfig,
+    // v2.3.6 fix: 透传 embedFn，使 buildGraph 写入的 prebuilt 节点带 embedding，
+    // 否则向量召回（vectorSearchWithScore）命不中仅靠 FTS，调优信号偏弱。
+    embedFn?: EmbedFn,
   ): Promise<TuneCycleResult> {
     if (!this.cfg.enabled) {
       return {
@@ -305,6 +309,7 @@ export class AutoTuner {
       maxCases: this.cfg.benchmarkMaxCases,
       buildGraph: forceBuildGraph,
       llm: this.llm ?? undefined,
+      embedFn,
     });
 
     const currentMetrics = extractMetrics(evalResult);

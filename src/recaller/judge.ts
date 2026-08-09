@@ -464,11 +464,14 @@ export class JudgeManager {
     assistantReply: string,
     sessionId?: string,
     onFeedback?: (feedback: JudgeFeedback) => Promise<void>,
+    // forceSync: 强制同步执行（供 gm_bootstrap 等需要确定性计数/冷启动判断的调用）
+    // 覆盖 asyncMode，保证 onFeedback（持久化+计数+M 更新）在下一次调用前完成。
+    forceSync = false,
   ): Promise<JudgeFeedback | null> {
     if (!this.cfg.enabled) return null;
 
-    // 异步模式：fire-and-forget，但内部仍会执行 onFeedback
-    if (this.cfg.asyncMode) {
+    // 异步模式（默认）：fire-and-forget，但内部仍会执行 onFeedback
+    if (this.cfg.asyncMode && !forceSync) {
       this.processTurnAsync(query, recalledNodes, assistantReply, sessionId, onFeedback)
         .catch(err => log.warn("judge async failed", { error: String(err) }));
       return null;

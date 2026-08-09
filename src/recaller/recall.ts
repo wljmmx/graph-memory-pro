@@ -205,6 +205,8 @@ export class Recaller {
     recalledNodes: GmNode[],
     assistantReply: string,
     sessionId?: string,
+    // opts.sync: 强制同步执行（供 gm_bootstrap 等需要确定性计数/冷启动判断的调用）
+    opts?: { sync?: boolean },
   ): Promise<void> {
     if (!this.judgeManager) return;
 
@@ -248,6 +250,7 @@ export class Recaller {
             log.debug("judge result", { used: fb.usedNodeIds.length, recalled: fb.recalledNodeIds.length, coldStart });
           }
         },
+        opts?.sync ?? false,
       );
       // feedback 在同步模式下有值（已通过回调处理），异步模式下为 null（回调已在后台执行）
       void feedback;
