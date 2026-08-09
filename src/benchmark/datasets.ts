@@ -173,6 +173,7 @@ function mapLongMemEvalCategory(raw: string): string {
  * 内置样本数据集（10 题）
  *
  * 当 LoCoMo/LongMemEval 数据未下载时，使用此内置数据集进行快速验证
+ * 覆盖：单跳、多跳、时序、配置、故障排查、社区、向量召回等场景
  */
 export function getBuiltinSampleDataset(): BenchmarkDataset {
   // 节点 name 同时作为 expectedNodeIds，建图后 upsertNode 以 name 为 id 之一
@@ -270,12 +271,104 @@ export function getBuiltinSampleDataset(): BenchmarkDataset {
         { type: "SKILL", name: "社区检测", description: "图社区聚类算法", content: "社区检测通过 Label Propagation 或 Louvain 等算法将图划分为社区，graph-memory-pro 中社区检测的默认迭代次数为 50。" },
       ],
     },
+    // ── v2.3.6: 新增 5 个样本，覆盖更多真实场景 ──────────────────
+    {
+      id: "sample-6",
+      dataset: "Sample",
+      category: "多跳",
+      query: "JudgeManager 的裁判层级有哪些？",
+      expectedAnswer: "启发式裁判 LLM裁判",
+      expectedNodeIds: ["JudgeManager", "HeuristicJudge", "LlmJudge"],
+      conversation: [
+        { role: "user", content: "JudgeManager 的裁判策略" },
+        { role: "assistant", content: "Tier 1 启发式裁判，Tier 2 LLM 裁判" },
+      ],
+      prebuiltNodes: [
+        { type: "SKILL", name: "JudgeManager", description: "裁判管理器", content: "JudgeManager 管理 Tier 1 启发式裁判（HeuristicJudge）和 Tier 2 LLM 裁判（LlmJudge），在反馈达到 warmupFeedbacks 阈值后激活 LLM 裁判。" },
+        { type: "SKILL", name: "HeuristicJudge", description: "启发式裁判策略", content: "HeuristicJudge 是 Tier 1 裁判，通过关键词匹配和简单的文本相似度判定反馈正负，无需 LLM 调用。" },
+        { type: "SKILL", name: "LlmJudge", description: "LLM 裁判策略", content: "LlmJudge 是 Tier 2 裁判，通过 LLM 对反馈进行深度语义判定，仅在冷启动结束后激活。" },
+      ],
+      prebuiltEdges: [
+        { type: "USED_SKILL", fromName: "JudgeManager", toName: "HeuristicJudge", instruction: "JudgeManager 使用 HeuristicJudge 做 Tier 1 快速判定" },
+        { type: "USED_SKILL", fromName: "JudgeManager", toName: "LlmJudge", instruction: "JudgeManager 使用 LlmJudge 做 Tier 2 深度判定" },
+      ],
+    },
+    {
+      id: "sample-7",
+      dataset: "Sample",
+      category: "配置",
+      query: "QueryCache 缓存策略是什么？",
+      expectedAnswer: "TTL LRU",
+      expectedNodeIds: ["QueryCache"],
+      conversation: [
+        { role: "user", content: "查询缓存配置" },
+        { role: "assistant", content: "QueryCache 使用 TTL + LRU 策略" },
+      ],
+      prebuiltNodes: [
+        { type: "SKILL", name: "QueryCache", description: "查询结果缓存", content: "QueryCache 使用 TTL（默认 300 秒）+ LRU（默认 256 条）缓存策略，缓存 recall() 的查询结果，避免相同 query 重复召回。" },
+      ],
+    },
+    {
+      id: "sample-8",
+      dataset: "Sample",
+      category: "故障排查",
+      query: "CircuitBreaker 熔断后怎么恢复？",
+      expectedAnswer: "半开 探测",
+      expectedNodeIds: ["CircuitBreaker", "EmbedFn"],
+      conversation: [
+        { role: "user", content: "熔断器恢复机制" },
+        { role: "assistant", content: "熔断后进入半开状态，放行探测请求" },
+      ],
+      prebuiltNodes: [
+        { type: "SKILL", name: "CircuitBreaker", description: "熔断器", content: "CircuitBreaker 在 embed / LLM 调用连续失败 N 次后熔断（open），冷却后进入半开（half-open）状态，放行一个探测请求，成功则恢复（closed），失败则重新熔断。" },
+        { type: "SKILL", name: "EmbedFn", description: "向量化函数", content: "EmbedFn 将文本转换为向量，用于向量召回。CircuitBreaker 监控 EmbedFn 的失败率，熔断后降级为纯 FTS 召回。" },
+      ],
+      prebuiltEdges: [
+        { type: "REQUIRES", fromName: "CircuitBreaker", toName: "EmbedFn", instruction: "CircuitBreaker 监控 EmbedFn 调用失败率" },
+      ],
+    },
+    {
+      id: "sample-9",
+      dataset: "Sample",
+      category: "多跳",
+      query: "AutoTuner 调优流程是什么？",
+      expectedAnswer: "EVALUATE DIAGNOSE PROPOSE GUARD",
+      expectedNodeIds: ["AutoTuner", "Benchmark", "DiagnosisResult"],
+      conversation: [
+        { role: "user", content: "自动调优流程" },
+        { role: "assistant", content: "EVALUATE → DIAGNOSE → PROPOSE → GUARD 四步循环" },
+      ],
+      prebuiltNodes: [
+        { type: "SKILL", name: "AutoTuner", description: "自动调优器", content: "AutoTuner 执行 EVALUATE（跑 benchmark）→ DIAGNOSE（诊断瓶颈）→ PROPOSE（生成调参方案）→ GUARD（守卫验证）四步循环调优。" },
+        { type: "SKILL", name: "Benchmark", description: "基准评测", content: "Benchmark 评测通过 P@1/P@3/MRR/F1 指标衡量召回质量，AutoTuner 在 EVALUATE 阶段调用它获取当前指标。" },
+        { type: "EVENT", name: "DiagnosisResult", description: "诊断结果", content: "DiagnosisResult 包含根因分析（如 recall too few nodes、F1 low），作为 PROPOSE 阶段调参的依据。" },
+      ],
+      prebuiltEdges: [
+        { type: "USED_SKILL", fromName: "AutoTuner", toName: "Benchmark", instruction: "AutoTuner 在 EVALUATE 阶段调用 Benchmark" },
+        { type: "RELATES_TO", fromName: "AutoTuner", toName: "DiagnosisResult", instruction: "AutoTuner 在 DIAGNOSE 阶段生成 DiagnosisResult" },
+      ],
+    },
+    {
+      id: "sample-10",
+      dataset: "Sample",
+      category: "单跳",
+      query: "bi-temporal 双时间机制的用途？",
+      expectedAnswer: "版本回溯 时序查询",
+      expectedNodeIds: ["bi-temporal"],
+      conversation: [
+        { role: "user", content: "bi-temporal 双时间" },
+        { role: "assistant", content: "区分事件发生时间和系统记录时间，支持版本回溯" },
+      ],
+      prebuiltNodes: [
+        { type: "SKILL", name: "bi-temporal", description: "双时间戳追踪", content: "bi-temporal 双时间机制：区分事件发生时间（eventTime）和系统记录时间（recordTime），支持版本回溯与时序查询，在召回时可按时间范围过滤节点。" },
+      ],
+    },
   ];
 
   return {
     name: "Sample",
     cases,
-    description: "内置样本数据集（5 题，用于无外部数据时的快速验证）",
+    description: "内置样本数据集（10 题，覆盖单跳/多跳/时序/配置/故障排查等场景）",
     targets: { p1: 0.4, p3: 0.6 },
   };
 }

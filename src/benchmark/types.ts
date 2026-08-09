@@ -236,8 +236,10 @@ export function evaluateCase(
   }
 
   // F1（文本匹配）
+  // v2.3.6: actualText 加入 content，提升 F1 对真实召回质量的敏感度
+  //   旧版仅用 name+description，导致 expectedAnswer 中含 content token 的样本 F1 被严重低估
   const actualText = recallResult.nodes
-    .map(n => `${n.name}: ${n.description ?? ""}`)
+    .map(n => `${n.name}: ${n.description ?? ""} ${n.content ?? ""}`)
     .join(" ");
   const f1 = computeF1(testCase.expectedAnswer, actualText);
 

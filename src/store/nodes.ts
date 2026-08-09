@@ -388,9 +388,10 @@ export async function graphWalk(
   try {
     // ✅ 优化：限制关系类型为有意义的业务关系，排除 NEXT_SESSION/CONTAINS 等高频低价值边
     // v2.1.2: 新增 CAUSED_BY / LEADS_TO 因果边类型
+    // v2.3.6: 新增 RELATES_TO（泛化关系，benchmark prebuiltEdges 和外部数据集常用）
     // v2.3.1 性能优化: 加 LIMIT 限制返回节点数，防止图规模大时返回过多节点
     //       导致后续 PPR 排序开销爆炸。默认 200（recallMaxNodes 通常 ≤ 50，留 4× 余量）。
-    const relTypes = "USED_SKILL|SOLVED_BY|REQUIRES|PATCHES|CONFLICTS_WITH|CAUSED_BY|LEADS_TO";
+    const relTypes = "USED_SKILL|SOLVED_BY|REQUIRES|PATCHES|CONFLICTS_WITH|CAUSED_BY|LEADS_TO|RELATES_TO";
     const result = await session.run(
       `MATCH path = (start:Task|Skill|Event)-[r:${relTypes}*1..${depth}]-(end:Task|Skill|Event)
        WHERE start.id IN $seedIds

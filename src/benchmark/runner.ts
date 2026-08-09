@@ -24,6 +24,7 @@ import { Extractor } from "../extractor/extract.ts";
 import type { CompleteFn } from "../engine/llm.ts";
 import type { EmbedFn } from "../engine/embed.ts";
 import { upsertNode, upsertEdge, saveVector, computeEmbeddingHash } from "../store/store.ts";
+import { getSession } from "../store/db.ts";
 import { withTimeout } from "../utils.ts";
 import { createLogger } from "../logger.ts";
 
@@ -123,6 +124,9 @@ export async function runBenchmark(
   //   - 有 prebuiltNodes：只要 driver 存在就写
   //   - 需要 LLM extractor（fallback 到 conversation）：才需要 llm
   if (buildGraph && driver) {
+    // v2.3.6: 建图前清理上一轮 bench-* 节点，避免污染生产图谱和指标
+    await cleanupBenchNodes(driver);
+
     const extractor = llm ? new Extractor(driver) : null;
     for (const dataset of targetDatasets) {
       for (const testCase of dataset.cases) {
@@ -222,6 +226,25 @@ export async function runBenchmark(
       avgP99,
     },
   };
+}
+
+/**
+ * v2.3.6: 清理上一轮 benchmark 写入的 bench-* 节点
+ *
+ * benchmark 节点 id 以 "bench-" 前缀标识，每次运行前先清理，
+ * 避免旧 bench 节点干扰生产图谱的 searchNodes / getNodeCount / PPR 排序。
+ */
+async function cleanupBenchNodes(driver: Driver): Promise<void> {
+  const session = getSession(driver);
+  try {
+    await session.run(
+      `MATCH (n) WHERE n.id STARTS WITH 'bench-' DETACH DELETE n`,
+    );
+  } catch (err) {
+    log.warn(`cleanupBenchNodes: failed (non-fatal): ${(err as Error).message}`);
+  } finally {
+    await session.close();
+  }
 }
 
 /**
