@@ -1787,3 +1787,91 @@ export {
 export type {
   EvolveActionSpace, AutoTunerConfig, TuneCycleResult, DiagnosisResult, ConfigSnapshot,
 } from "./src/evolution/auto-tuner.ts";
+
+// ═══════════════════════════════════════════════════════════════════════
+// v2.3.6 综合能力聚合导出（供 lcm-graph-extra 等外部插件完整对接）
+//
+// 按能力域分组，覆盖：反馈闭环 / 召回 / 在线学习 / 图操作 / 引擎 / 运维。
+// 外部插件统一从包入口 `import { ... } from "graph-memory-pro"` 取用。
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── 会话召回缓存（反馈自动采集链路：agent_end 记录 → processFeedback 消费）─
+export { SessionRecallCache, getSessionRecallCache, resetSessionRecallCache } from "./src/recaller/session-recall-cache.js";
+export type { RecallRecord, ConsumedRecall } from "./src/recaller/session-recall-cache.js";
+
+// ── 熔断器（embed / LLM 失败降级监控）────────────────────────────
+export { CircuitBreaker, getCircuitBreaker, getAllCircuitBreakers, resetAllCircuitBreakers } from "./src/engine/circuit-breaker.js";
+export type { CircuitState, CircuitBreakerOptions, CircuitBreakerStatus } from "./src/engine/circuit-breaker.js";
+
+// ── LLM 引擎（CompleteFn 补全函数，含重试/超时/取消）──────────────
+export { createCompleteFn, createRuntimeCompleteFn } from "./src/engine/llm.js";
+export type { CompleteFn, RuntimeLlm } from "./src/engine/llm.js";
+
+// ── 图存储完整操作（store barrel 补充导出）────────────────────────
+export {
+  batchUpsertNodes,
+  vectorSearchWithScore,
+  graphWalk,
+  getNodesByType,
+  batchUpsertEdges,
+  updateCommunities,
+  getCommunitySummary,
+  getAllCommunitySummaries,
+  communityVectorSearch,
+  communityVectorSearchWithReps,
+  saveVector,
+  saveMessage,
+  getSessionMessages,
+  getRecentDistinctMessages,
+} from "./src/store/store.js";
+
+// ── Neo4j 连接池 / 会话 / 版本探测 ────────────────────────────────
+export {
+  createDriver,
+  initDriver,
+  closeDriver,
+  getConfig as getNeo4jConfig,
+  getSession,
+  getNeo4jVersion,
+  isNeo4j5Plus,
+  verifyConnectivity,
+  verifyWithRetry,
+  getPoolMetrics,
+} from "./src/store/db.js";
+export type { Neo4jConfig } from "./src/types.js";
+export type { PoolMetrics } from "./src/store/db.js";
+
+// ── 上下文组装（assemble：把召回节点组装成 system prompt / xml）─────
+export { assembleContext, buildSystemPromptAddition } from "./src/format/assemble.js";
+export { sanitizeToolUseResultPairing } from "./src/format/transcript-repair.js";
+
+// ── 增量维护（脏标记驱动的局部维护）──────────────────────────────
+export { markDirty, getDirtyNodeIds, clearDirty, runIncrementalMaintenance } from "./src/graph/incremental-maintenance.js";
+export type { IncrementalMaintenanceResult } from "./src/graph/incremental-maintenance.js";
+
+// ── 后台抽取服务（消息对 → 图谱三元组）────────────────────────────
+export { extractInBackground } from "./src/services/extract-service.js";
+
+// ── HTTP API Server（独立启动，供外部拉起 dashboard / crud）────────
+export { startApiServer } from "./src/server/http-server.js";
+export type { ApiServerConfig, ApiServerHandle } from "./src/server/http-server.js";
+
+// ── 配置热重载（diff / 鉴权 / 规范化）────────────────────────────
+export { diffConfigSegments, checkReloadAuth, normalizeReloadConfig } from "./src/routes/reload.js";
+export type { ConfigSegmentDiff, AuthResult } from "./src/routes/reload.js";
+
+// ── 图谱健康检查（healthCheck 原生报告）──────────────────────────
+export { healthCheck } from "./src/graph/maintenance/health.js";
+
+// ── 裁判策略（Tier 1/2/3 判定，供外部自定义 judge 组装）────────────
+export {
+  HeuristicJudgeStrategy,
+  LlmJudgeStrategy,
+  parseLlmJudgeJson,
+  DEFAULT_JUDGE_CONFIG,
+  DEFAULT_WARMUP_CONFIG,
+} from "./src/recaller/judge.js";
+export type { JudgeTier, JudgeMatchedBy, JudgeStrategy } from "./src/recaller/judge.js";
+
+// ── 查询缓存配置类型 ─────────────────────────────────────────────
+export type { QueryCacheConfig } from "./src/recaller/query-cache.js";
