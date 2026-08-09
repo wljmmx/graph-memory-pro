@@ -283,6 +283,12 @@ export class Recaller {
     // R-3 边际效用更新（内部含邻域评估 + 拒绝逻辑）
     const result = this.associationMatrix.updateWithMarginalUtility(queryVec, reward);
 
+    // 记录学习曲线采样（跨重启持久化，供 /api/association-matrix/history 展示）
+    if (result.applied) {
+      const fbCount = this.judgeManager?.getFeedbackCount?.() ?? 0;
+      this.associationMatrix.recordLearningSample(fbCount);
+    }
+
     if (process.env.GM_DEBUG) {
       log.info("M update", { reward: reward.toFixed(3), applied: result.applied, gain: result.neighborhoodGain.toFixed(3) });
     }

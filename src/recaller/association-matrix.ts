@@ -42,6 +42,39 @@ export const DEFAULT_AM_CONFIG: AssociationMatrixConfig = {
   warmupFeedbacks: 100,
 };
 
+/**
+ * 学习曲线采样点（跨重启持久化，随 M 一起落盘）
+ *
+ * 用于 dashboard /api/association-matrix/history 时序展示。
+ */
+export interface LearningSample {
+  /** epoch ms */
+  timestamp: number;
+  /** Adam 时间步 t */
+  t: number;
+  updatesApplied: number;
+  updatesRejected: number;
+  feedbackCount: number;
+}
+
+/** 关联矩阵 M 可视化数据 */
+export interface AssociationMatrixVisual {
+  /** 原始矩阵维度 N */
+  dim: number;
+  /** 降采样后的网格尺寸（grid × grid） */
+  grid: number;
+  /** 降采样后的矩阵值（grid*grid，行优先，每个 cell 为子块均值） */
+  values: number[];
+  /** 对角偏差：mean(|M[i,i] - 1|)，偏离单位矩阵的程度 */
+  diagDeviation: number;
+  /** 每行能量：行均方值（长度 = grid） */
+  rowEnergy: number[];
+  /** Frobenius 范数（降采样网格上计算） */
+  frobenius: number;
+  /** 与单位矩阵的接近度 ∈ [0,1]（1 = 完全单位矩阵） */
+  identityRatio: number;
+}
+
 /** R-3 边际效用配置 */
 export interface MarginalUtilityConfig {
   enabled: boolean;
@@ -101,6 +134,10 @@ export class AssociationMatrix {
   // 训练统计
   private updateCount = 0;
   private rejectedCount = 0;          // R-3 拒绝的更新数
+
+  // 学习曲线采样（跨重启持久化）
+  private learningHistory: LearningSample[] = [];
+  private readonly learningHistoryMaxSize = 200;
 
   constructor(dim: number, amCfg?: Partial<AssociationMatrixConfig>, muCfg?: Partial<MarginalUtilityConfig>) {
     this.dim = dim;
@@ -378,6 +415,111 @@ export class AssociationMatrix {
   }
 
   /**
+   * 记录一个学习曲线采样点。
+   *
+   * 调用时机：每次 M 更新提交（updateWithMarginalUtility applied=true）后由 Recaller
+   * 传入当前反馈计数。采样保存在内存环形缓冲（上限 learningHistoryMaxSize），
+   * 并随 serialize() 一起持久化，实现跨重启的历史可追溯。
+   *
+   * @param feedbackCount 当前累计反馈数（来自 JudgeManager）
+   */
+  recordLearningSample(feedbackCount: number): void {
+    this.learningHistory.push({
+      timestamp: Date.now(),
+      t: this.t,
+      updatesApplied: this.updateCount,
+      updatesRejected: this.rejectedCount,
+      feedbackCount,
+    });
+    if (this.learningHistory.length > this.learningHistoryMaxSize) {
+      this.learningHistory.shift();
+    }
+  }
+
+  /**
+   * 返回学习曲线采样（时间正序）。
+   *
+   * @param n 返回最近 n 条；不传则返回全部
+   */
+  getLearningHistory(n?: number): LearningSample[] {
+    const start = n && n > 0 && n < this.learningHistory.length
+      ? this.learningHistory.length - n
+      : 0;
+    return this.learningHistory.slice(start);
+  }
+
+  /**
+   * 计算轻量可视化数据（供 dashboard 热力网格展示）。
+   *
+   * 降采样：将 N×N 的 M 按块平均压缩到 grid×grid（默认 64，最大 128），
+   * 避免直接序列化 1024×1024=4MB 数组。同时计算学习集中度标量：
+   *   - diagDeviation：对角偏离单位矩阵程度，越大说明 M 已学习出非平凡映射
+   *   - rowEnergy：每行均方能量，反映各维度被激活的强度
+   *   - frobenius / identityRatio：整体规模与接近单位矩阵的程度
+   *
+   * @param maxGrid 目标网格尺寸上限（默认 64，最大 128）
+   */
+  computeVisual(maxGrid = 64): AssociationMatrixVisual {
+    const N = this.dim;
+    const grid = Math.max(2, Math.min(maxGrid, 128, N));
+    const block = Math.floor(N / grid);
+    const values: number[] = [];
+
+    for (let gi = 0; gi < grid; gi++) {
+      for (let gj = 0; gj < grid; gj++) {
+        let sum = 0;
+        let cnt = 0;
+        const r0 = gi * block;
+        const r1 = Math.min(N, r0 + block);
+        const c0 = gj * block;
+        const c1 = Math.min(N, c0 + block);
+        for (let i = r0; i < r1; i++) {
+          const rowOffset = i * N;
+          for (let j = c0; j < c1; j++) {
+            sum += this.M[rowOffset + j];
+            cnt++;
+          }
+        }
+        values.push(cnt > 0 ? sum / cnt : 0);
+      }
+    }
+
+    // 对角偏差：mean(|M[i,i] - 1|)
+    let diagSum = 0;
+    for (let i = 0; i < N; i++) {
+      diagSum += Math.abs(this.M[i * N + i] - 1);
+    }
+    const diagDeviation = N > 0 ? diagSum / N : 0;
+
+    // 每行能量（降采样网格维度）
+    const rowEnergy: number[] = [];
+    let frob = 0;
+    for (let gi = 0; gi < grid; gi++) {
+      let rowSum = 0;
+      for (let gj = 0; gj < grid; gj++) {
+        const v = values[gi * grid + gj];
+        rowSum += v * v;
+        frob += v * v;
+      }
+      rowEnergy.push(Math.sqrt(rowSum / grid));
+    }
+    frob = Math.sqrt(frob);
+
+    // 与单位矩阵接近度：基于对角偏差（0 → 1，偏差越大越接近 0）
+    const identityRatio = Math.max(0, Math.min(1, 1 - diagDeviation / (diagDeviation + 1)));
+
+    return {
+      dim: N,
+      grid,
+      values,
+      diagDeviation,
+      rowEnergy,
+      frobenius: frob,
+      identityRatio,
+    };
+  }
+
+  /**
    * 序列化为 JSON（用于持久化）
    *
    * 注意：M 矩阵 4MB，序列化较重，仅在 gm_maintain 周期性保存
@@ -398,6 +540,7 @@ export class AssociationMatrix {
       bnRunningVar: Array.from(this.bnRunningVar),
       updateCount: this.updateCount,
       rejectedCount: this.rejectedCount,
+      learningHistory: this.learningHistory,
     });
   }
 
@@ -420,6 +563,10 @@ export class AssociationMatrix {
     this.bnRunningVar = Float32Array.from(data.bnRunningVar ?? new Array(this.dim).fill(1));
     this.updateCount = data.updateCount ?? 0;
     this.rejectedCount = data.rejectedCount ?? 0;
+    // 学习曲线采样（兼容旧文件无此字段）
+    this.learningHistory = Array.isArray(data.learningHistory)
+      ? data.learningHistory.slice(-this.learningHistoryMaxSize)
+      : [];
   }
 }
 

@@ -84,6 +84,8 @@ export function getRoutes(): RouteHandler[] {
     { method: "GET", path: "/api/association-matrix/state", handler: handleAssociationMatrixState },
     { method: "POST", path: "/api/association-matrix/save", handler: handleAssociationMatrixSave },
     { method: "POST", path: "/api/association-matrix/load", handler: handleAssociationMatrixLoad },
+    { method: "GET", path: "/api/association-matrix/history", handler: handleAssociationMatrixHistory },
+    { method: "GET", path: "/api/association-matrix/visual", handler: handleAssociationMatrixVisual },
     { method: "GET", path: "/api/doctor", handler: handleDoctor },
     { method: "GET", path: "/api/usage", handler: handleUsage },
     { method: "GET", path: "/api/config", handler: handleConfig },
@@ -645,6 +647,46 @@ async function handleAssociationMatrixLoad(params: { path?: string }): Promise<{
     const { loadAssociationMatrix } = await import("../recaller/association-matrix-persist.ts");
     const loaded = await loadAssociationMatrix(am, { path: params?.path });
     return { status: 200, body: { ok: loaded, stats: am.getStats() } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
+  }
+}
+
+// ── AM-5: 关联矩阵 M 学习曲线（跨重启持久化）────────────────
+//
+// 返回内存环形缓冲中的学习采样（timestamp / t / updatesApplied / updatesRejected / feedbackCount），
+// 采样随 M 一起 serialize 落盘，因此重启后历史仍可追溯。
+// 参数：?n={n} 返回最近 n 条（默认全部，上限 200）。
+async function handleAssociationMatrixHistory(params: { n?: string }): Promise<{ status: number; body: unknown }> {
+  const am = _recaller?.getAssociationMatrix();
+  if (!am) return { status: 200, body: { available: false } };
+  try {
+    const n = params?.n ? safeParseInt(params.n, 200, 200) : undefined;
+    const samples = am.getLearningHistory(n);
+    return {
+      status: 200,
+      body: {
+        available: true,
+        count: samples.length,
+        samples,
+      },
+    };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
+  }
+}
+
+// ── AM-6: 关联矩阵 M 可视化（降采样热力网格）────────────────
+//
+// 返回降采样后的矩阵网格 + 学习集中度标量（diagDeviation / rowEnergy / frobenius / identityRatio）。
+// 参数：?max={grid} 目标网格尺寸（默认 64，最大 128）。降采样避免传输 1024×1024 全量矩阵。
+async function handleAssociationMatrixVisual(params: { max?: string }): Promise<{ status: number; body: unknown }> {
+  const am = _recaller?.getAssociationMatrix();
+  if (!am) return { status: 200, body: { available: false } };
+  try {
+    const maxGrid = safeParseInt(params?.max, 64, 128);
+    const visual = am.computeVisual(maxGrid);
+    return { status: 200, body: { available: true, ...visual } };
   } catch (err: unknown) {
     return { status: 500, body: { error: (err as Error).message } };
   }
