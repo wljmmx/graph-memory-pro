@@ -35,6 +35,18 @@ const log = createLogger("benchmark-datasets");
  * }
  */
 export async function loadLoCoMo(dataDir: string = "benchmarks/data"): Promise<BenchmarkDataset> {
+  // v2.3.6: 优先读取离线预处理后的标准化文件（含 prebuiltNodes/expectedNodeIds）
+  const preprocessedPath = join(dataDir, "locomo.preprocessed.json");
+  if (existsSync(preprocessedPath)) {
+    try {
+      const data = JSON.parse(readFileSync(preprocessedPath, "utf-8")) as BenchmarkDataset;
+      log.info(`LoCoMo: loaded preprocessed dataset (${data.cases.length} cases) from ${preprocessedPath}`);
+      return data;
+    } catch (err) {
+      log.warn(`LoCoMo: preprocessed load failed, fallback to raw: ${err}`);
+    }
+  }
+
   const filePath = join(dataDir, "locomo.json");
   const cases: BenchmarkCase[] = [];
 
@@ -104,6 +116,18 @@ function mapLoCoMoCategory(raw: string): string {
  * {"question": "...", "answer": "...", "category": "...", "session": {...}}
  */
 export async function loadLongMemEval(dataDir: string = "benchmarks/data"): Promise<BenchmarkDataset> {
+  // v2.3.6: 优先读取离线预处理后的标准化文件（含 prebuiltNodes）
+  const preprocessedPath = join(dataDir, "longmemeval.preprocessed.json");
+  if (existsSync(preprocessedPath)) {
+    try {
+      const data = JSON.parse(readFileSync(preprocessedPath, "utf-8")) as BenchmarkDataset;
+      log.info(`LongMemEval: loaded preprocessed dataset (${data.cases.length} cases) from ${preprocessedPath}`);
+      return data;
+    } catch (err) {
+      log.warn(`LongMemEval: preprocessed load failed, fallback to raw: ${err}`);
+    }
+  }
+
   const filePath = join(dataDir, "longmemeval.jsonl");
   const cases: BenchmarkCase[] = [];
 

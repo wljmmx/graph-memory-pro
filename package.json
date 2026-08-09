@@ -21,7 +21,9 @@
     "test:smoke": "vitest run --config vitest.smoke.config.ts",
     "lint": "eslint src/ index.ts",
     "typecheck": "tsc --noEmit",
-    "benchmark": "tsx src/benchmark/cli.ts"
+    "benchmark": "tsx src/benchmark/cli.ts",
+    "download:benchmarks": "bash scripts/download-benchmarks.sh",
+    "preprocess:benchmarks": "tsx scripts/preprocess-benchmarks.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
