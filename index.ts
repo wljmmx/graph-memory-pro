@@ -421,10 +421,12 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
         // 注入 AssociationMatrix
         if (cfg.associationMatrix?.enabled === true) {
           const { createAssociationMatrix } = await import("./src/recaller/association-matrix.ts");
+          const { tryLoadAssociationMatrix } = await import("./src/recaller/association-matrix-persist.ts");
           const amDim = resolveEmbedDimension(cfg);
           const am = createAssociationMatrix(amDim, cfg);
+          const { loaded, path } = await tryLoadAssociationMatrix(am);
           _recaller.setAssociationMatrix(am);
-          log.info("self-init: AssociationMatrix initialized");
+          log.info(`self-init: AssociationMatrix initialized (dim=${amDim}, persistedRestored=${loaded}, path=${path})`);
         }
 
         log.info("self-init: Recaller initialized");
@@ -619,12 +621,15 @@ async function doGatewayInit(api: any, logger: LoggerLike): Promise<void> {
   }
 
   // v2.1.2 第三批 L-1：注入 AssociationMatrix（关联矩阵 M）
+  // v2.3.6: 创建后从持久化文件恢复 M（若存在），避免进程重启丢失在线学习成果
   if (_cfg.associationMatrix?.enabled === true) {
     const { createAssociationMatrix } = await import("./src/recaller/association-matrix.ts");
+    const { tryLoadAssociationMatrix } = await import("./src/recaller/association-matrix-persist.ts");
     const amDim = resolveEmbedDimension(_cfg);
     const am = createAssociationMatrix(amDim, _cfg);
+    const { loaded, path } = await tryLoadAssociationMatrix(am);
     _recaller.setAssociationMatrix(am);
-    logger?.info?.(`[graph-memory-pro] association-matrix enabled (dim=${amDim}, warmup=${_cfg.associationMatrix?.warmupFeedbacks ?? _cfg.warmup?.warmupFeedbacks ?? 100})`);
+    logger?.info?.(`[graph-memory-pro] association-matrix enabled (dim=${amDim}, warmup=${_cfg.associationMatrix?.warmupFeedbacks ?? _cfg.warmup?.warmupFeedbacks ?? 100}, persistedRestored=${loaded}, path=${path})`);
   }
 
   _extractor = new Extractor(driver);
@@ -938,6 +943,15 @@ export default definePluginEntry({
     //   - 真正的进程退出时 OS 会自动回收连接和端口
     api.registerHook("gateway_stop", async () => {
       log.info("gateway_stop: soft cleanup (preserving driver + API server for compaction resilience)");
+      // v2.3.6: compaction/停止前持久化关联矩阵 M（避免在线学习成果丢失）
+      try {
+        const { saveRecallerAssociationMatrix } = await import("./src/recaller/association-matrix-persist.ts");
+        const saved = await saveRecallerAssociationMatrix(_recaller);
+        if (saved) {
+          log.info(`gateway_stop: association matrix persisted (${(saved.bytes / 1024).toFixed(1)}KB @ ${saved.path})`);
+          logger?.info?.(`[graph-memory-pro] association matrix persisted on stop (${(saved.bytes / 1024).toFixed(1)}KB)`);
+        }
+      } catch { /* 持久化失败不阻塞清理 */ }
       if (_extractorTimer) { clearInterval(_extractorTimer); _extractorTimer = null; }
       if (_maintenanceTimer) { clearInterval(_maintenanceTimer); _maintenanceTimer = null; }
       if (_autoStartRetryTimer) { clearInterval(_autoStartRetryTimer); _autoStartRetryTimer = null; }
@@ -1348,6 +1362,14 @@ export default definePluginEntry({
           // v2.1.2 第三批：L-1 关联矩阵 M 统计
           const amStats = _recaller?.getAssociationMatrix()?.getStats();
 
+          // v2.3.6: 维护周期持久化关联矩阵 M（兑现 serialize 注释"仅在 gm_maintain 周期性保存"）
+          let amPersist: { path: string; bytes: number } | null = null;
+          try {
+            const { saveRecallerAssociationMatrix } = await import("./src/recaller/association-matrix-persist.ts");
+            const saved = await saveRecallerAssociationMatrix(_recaller);
+            if (saved) amPersist = { path: saved.path, bytes: saved.bytes };
+          } catch { /* M 持久化失败不影响维护结果 */ }
+
           const text = [
             "📊 Graph Memory Pro 统计",
             `节点总数: ${nodeCount}`,
@@ -1389,8 +1411,9 @@ export default definePluginEntry({
             amStats ? `已应用更新: ${amStats.updatesApplied}` : "",
             amStats ? `被拒更新: ${amStats.updatesRejected} (R-3 边际效用拒绝)` : "",
             amStats ? `历史样本: ${amStats.historySize}` : "",
+            amPersist ? `💾 M 已持久化: ${(amPersist.bytes / 1024).toFixed(1)}KB @ ${amPersist.path}` : "",
           ].filter(Boolean).join("\n");
-          return { content: [{ type: "text", text }], details: { nodeCount, edgeCount, ...result, health: healthReport, cache: cacheStats, judge: judgeStats, associationMatrix: amStats } };
+          return { content: [{ type: "text", text }], details: { nodeCount, edgeCount, ...result, health: healthReport, cache: cacheStats, judge: judgeStats, associationMatrix: amStats, associationMatrixPersist: amPersist } };
         } catch (err) {
           return { content: [{ type: "text", text: `维护失败: ${(err as Error).message}` }], details: {} };
         }
@@ -1727,6 +1750,17 @@ export type { JudgeConfig, JudgeResult, JudgeFeedback, WarmupConfig } from "./sr
 // ─── v2.1.2 第三批 在线学习 + 可进化嵌入 + 重要性评分 Re-exports ─────────
 export { AssociationMatrix, createAssociationMatrix } from "./src/recaller/association-matrix.js";
 export type { AssociationMatrixConfig, MarginalUtilityConfig } from "./src/recaller/association-matrix.js";
+// v2.3.6: 关联矩阵 M 持久化（供 lcm-graph-extra 等外部插件对接）
+export {
+  getAssociationMatrixPath,
+  getDefaultBaseDir,
+  saveAssociationMatrix,
+  loadAssociationMatrix,
+  tryLoadAssociationMatrix,
+  createAssociationMatrixPersisted,
+  saveRecallerAssociationMatrix,
+} from "./src/recaller/association-matrix-persist.js";
+export type { AssociationMatrixPersistOptions, AssociationMatrixSaveResult } from "./src/recaller/association-matrix-persist.js";
 export { computeImportanceScores } from "./src/graph/maintenance.js";
 export type { ImportanceConfig } from "./src/graph/maintenance.js";
 

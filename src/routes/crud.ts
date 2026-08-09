@@ -82,6 +82,8 @@ export function getRoutes(): RouteHandler[] {
     { method: "GET", path: "/api/metrics", handler: handleMetrics },
     { method: "GET", path: "/api/auto-tuner/state", handler: handleAutoTunerState },
     { method: "GET", path: "/api/association-matrix/state", handler: handleAssociationMatrixState },
+    { method: "POST", path: "/api/association-matrix/save", handler: handleAssociationMatrixSave },
+    { method: "POST", path: "/api/association-matrix/load", handler: handleAssociationMatrixLoad },
     { method: "GET", path: "/api/doctor", handler: handleDoctor },
     { method: "GET", path: "/api/usage", handler: handleUsage },
     { method: "GET", path: "/api/config", handler: handleConfig },
@@ -582,6 +584,9 @@ async function handleAssociationMatrixState(): Promise<{ status: number; body: u
     const judgeManager = _recaller?.getJudgeManager();
     const feedbackCount = judgeManager?.getFeedbackCount?.() ?? 0;
     const isColdStart = stats.t === 0 && feedbackCount < warmupFeedbacks;
+    // v2.3.6: 返回持久化文件路径（供 lcm-graph-extra 等外部调用方定位）
+    const { getAssociationMatrixPath } = await import("../recaller/association-matrix-persist.ts");
+    const persistPath = getAssociationMatrixPath();
 
     return {
       status: 200,
@@ -594,6 +599,13 @@ async function handleAssociationMatrixState(): Promise<{ status: number; body: u
         coldStart: isColdStart,
         feedbackCount,
         warmupFeedbacks,
+        // v2.3.6: M 持久化相关信息
+        persist: { path: persistPath, persisted: await (async () => {
+          try {
+            const stat = await import("node:fs/promises").then(m => m.stat(persistPath));
+            return { exists: true, bytes: stat.size, modifiedAt: stat.mtime.toISOString() };
+          } catch { return { exists: false }; }
+        })() },
         hint: isColdStart
           ? `Cold start period: need ${warmupFeedbacks} feedbacks to exit (current=${feedbackCount}). M is identity matrix until then. Provide feedback via gm_feedback / POST /api/feedback.`
           : (stats.updatesApplied === 0
@@ -601,6 +613,38 @@ async function handleAssociationMatrixState(): Promise<{ status: number; body: u
             : "Active learning in progress."),
       },
     };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
+  }
+}
+
+// ── v2.3.6: 关联矩阵 M 持久化（手动保存 / 加载）──────────────
+//
+// 供运维与 lcm-graph-extra 对接：显式触发 M 落盘/恢复，路径可覆盖。
+async function handleAssociationMatrixSave(params: { path?: string }): Promise<{ status: number; body: unknown }> {
+  const am = _recaller?.getAssociationMatrix();
+  if (!am) {
+    return { status: 200, body: { ok: false, reason: "association matrix not injected into Recaller" } };
+  }
+  try {
+    const { saveAssociationMatrix } = await import("../recaller/association-matrix-persist.ts");
+    const saved = await saveAssociationMatrix(am, { path: params?.path });
+    if (!saved) return { status: 200, body: { ok: false, reason: "association matrix disabled" } };
+    return { status: 200, body: { ok: true, ...saved } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
+  }
+}
+
+async function handleAssociationMatrixLoad(params: { path?: string }): Promise<{ status: number; body: unknown }> {
+  const am = _recaller?.getAssociationMatrix();
+  if (!am) {
+    return { status: 200, body: { ok: false, reason: "association matrix not injected into Recaller" } };
+  }
+  try {
+    const { loadAssociationMatrix } = await import("../recaller/association-matrix-persist.ts");
+    const loaded = await loadAssociationMatrix(am, { path: params?.path });
+    return { status: 200, body: { ok: loaded, stats: am.getStats() } };
   } catch (err: unknown) {
     return { status: 500, body: { error: (err as Error).message } };
   }
@@ -794,10 +838,18 @@ async function handleDoctor(): Promise<{ status: number; body: unknown }> {
       const warmupFb = _cfg.associationMatrix.warmupFeedbacks ?? _cfg.warmup?.warmupFeedbacks ?? 100;
       const feedbackCount = jm?.getFeedbackCount() ?? 0;
       const isColdStart = feedbackCount < warmupFb;
+      // v2.3.6: 检查 M 持久化文件是否存在
+      const { getAssociationMatrixPath } = await import("../recaller/association-matrix-persist.ts");
+      const persistPath = getAssociationMatrixPath();
+      let persistExists = false;
+      try {
+        const { stat } = await import("node:fs/promises");
+        persistExists = (await stat(persistPath)).isFile();
+      } catch { /* 首次运行无文件 */ }
       checks.push({
         name: "association_matrix",
         status: isColdStart ? "warn" : "ok",
-        detail: `dim=${stats.dim}, t=${stats.t}, updatesApplied=${stats.updatesApplied}, updatesRejected=${stats.updatesRejected}, historySize=${stats.historySize}, feedbackCount=${feedbackCount}/${warmupFb}`,
+        detail: `dim=${stats.dim}, t=${stats.t}, updatesApplied=${stats.updatesApplied}, updatesRejected=${stats.updatesRejected}, historySize=${stats.historySize}, feedbackCount=${feedbackCount}/${warmupFb}, persisted=${persistExists} (${persistPath})`,
         hint: isColdStart
           ? `Cold start: need ${warmupFb} feedbacks (current=${feedbackCount}). M=identity until warmup.`
           : undefined,
