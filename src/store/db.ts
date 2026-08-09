@@ -66,6 +66,44 @@ export function getConfig(): Neo4jConfig | null {
 }
 
 /**
+ * v2.3.5: 核实实际连接的 Neo4j 版本（CALL dbms.components()）
+ *
+ * 用途：诊断 power() 等 5.x 专有函数报 "Unknown function" 的根因。
+ *   - 若返回版本 < 5.0，说明连的是 4.x，power()/向量索引等都会失败
+ *   - 若返回 5.x+（如 2026.06.0），说明连接正确，问题在其他环节
+ *
+ * 返回规范化后的版本字符串（如 "2026.06.0"），失败返回 null。
+ */
+export async function getNeo4jVersion(driver: Driver): Promise<string | null> {
+  const session = driver.session({ defaultAccessMode: neo4j.session.READ });
+  try {
+    const result = await session.run(
+      "CALL dbms.components() YIELD name, versions WHERE name = 'Neo4j Kernel' RETURN versions",
+    );
+    const versions = result.records[0]?.get("versions");
+    const arr = versions?.toArray ? versions.toArray() : (Array.isArray(versions) ? versions : []);
+    const v = arr[0] ?? null;
+    return v ? String(v) : null;
+  } catch {
+    // dbms.components() 可能因权限或 server 版本不可用，静默失败
+    return null;
+  } finally {
+    await session.close();
+  }
+}
+
+/**
+ * v2.3.5: 判断给定版本号是否为 Neo4j 5.x+（支持 power() 等 5.x 函数）
+ * 返回 true 表示 >= 5.0 或无法解析（不误报）。
+ */
+export function isNeo4j5Plus(version: string | null): boolean {
+  if (!version) return true; // 未知版本不误报
+  const m = /^(\d+)/.exec(version.trim());
+  if (!m) return true;
+  return parseInt(m[1], 10) >= 5;
+}
+
+/**
  * 获取一个 Neo4j 会话
  * 调用方负责 `await session.close()`
  *

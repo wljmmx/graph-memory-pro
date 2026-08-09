@@ -174,6 +174,19 @@ async function getOrCreateDriver(cfg: GmConfig, logger: LoggerLike): Promise<Dri
     }
     log.info(`Neo4j connected to ${uri}`);
     logger?.info?.(`[graph-memory-pro] Neo4j connected to ${uri}`);
+
+    // v2.3.5: 核实实际 Neo4j 版本，记录日志并告警 power() 等 5.x 函数可用性
+    try {
+      const { getNeo4jVersion, isNeo4j5Plus } = await import("./src/store/db.ts");
+      const neo4jVersion = await getNeo4jVersion(d);
+      log.info(`Neo4j version detected: ${neo4jVersion ?? "(unknown)"} (5.x+ supports power(): ${isNeo4j5Plus(neo4jVersion)})`);
+      logger?.info?.(`[graph-memory-pro] Neo4j version detected: ${neo4jVersion ?? "(unknown)"}`);
+      if (neo4jVersion && !isNeo4j5Plus(neo4jVersion)) {
+        log.warn(`Neo4j ${neo4jVersion} < 5.x: power(), vector indexes, and other 5.x-only features are unavailable`);
+        logger?.warn?.(`[graph-memory-pro] Neo4j ${neo4jVersion} < 5.x: power()/vector-index unavailable — external plugins using power() will fail`);
+      }
+    } catch { /* 版本检测失败不阻塞连接 */ }
+
     return d;
   } catch (err) {
     log.error(`Neo4j init failed at ${uri}: ${err}`);
