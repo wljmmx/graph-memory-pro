@@ -23,6 +23,7 @@ import { Recaller } from "../recaller/recall.ts";
 import { createCompleteFn } from "../engine/llm.ts";
 import { createEmbedFn } from "../engine/embed.ts";
 import { runBenchmark, formatAggregateReport } from "./runner.ts";
+import { resolveBenchmarkDataDir } from "./dataDir.ts";
 import type { GmConfig } from "../types.ts";
 
 /**
@@ -142,10 +143,11 @@ async function main(): Promise<void> {
   const caseTimeoutMs = values["case-timeout-ms"] !== undefined
     ? Number(values["case-timeout-ms"])
     : (cfg.benchmark?.caseTimeoutMs ?? 30000);
-  let buildGraph = cfg.benchmark?.buildGraph ?? true;
-  if (values["no-build-graph"]) buildGraph = false;
-  else if (values["build-graph"]) buildGraph = true;
-  const dataDir = values["data-dir"] ?? cfg.benchmark?.dataDir;
+  const buildGraph = values["no-build-graph"] ? false
+    : (values["build-graph"] ? true : (cfg.benchmark?.buildGraph ?? true));
+  // 数据目录：CLI --data-dir > openclaw.json benchmark.dataDir > 默认 benchmarks/data
+  // 与 download/preprocess 保持同一解析逻辑，避免「预处理写 A 目录、评测读 B 目录」。
+  const dataDir = resolveBenchmarkDataDir(values["data-dir"]);
 
   const datasets: string[] | "all" = values.datasets === "all" ? "all" : values.datasets.split(",");
 
@@ -156,6 +158,7 @@ async function main(): Promise<void> {
   console.log(`Datasets: ${datasets === "all" ? "all" : (datasets as string[]).join(", ")}`);
   console.log(`Max cases: ${maxCases || "all"}`);
   console.log(`Build graph: ${buildGraph}`);
+  console.log(`Data dir: ${dataDir}`);
   console.log("");
 
   // 1. 连接 Neo4j

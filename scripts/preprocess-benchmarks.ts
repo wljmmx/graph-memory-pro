@@ -25,6 +25,7 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 import type { BenchmarkCase, BenchmarkDataset } from "../src/benchmark/types.ts";
 import { buildLongMemEvalV2Dataset, loadV2QuestionsFile, loadV2TrajectoriesFile, type LongMemEvalV2Options } from "../src/benchmark/datasets.ts";
+import { resolveBenchmarkDataDir } from "../src/benchmark/dataDir.ts";
 
 // ── 类别映射（复用 datasets.ts 的映射）───────────────────────
 const LOCOMO_CATEGORY: Record<string, string> = {
@@ -278,10 +279,12 @@ async function preprocessLongMemEvalV2(dataDir: string): Promise<BenchmarkDatase
 async function main(): Promise<void> {
   const { values } = parseArgs({
     options: {
-      "data-dir": { type: "string", default: "benchmarks/data" },
+      "data-dir": { type: "string" },
     },
   });
-  const dataDir = values["data-dir"] ?? "benchmarks/data";
+  // 与 benchmark / download 保持同一数据目录解析：CLI --data-dir > openclaw.json > 默认
+  const dataDir = resolveBenchmarkDataDir(values["data-dir"]);
+  console.log(`[preprocess] 数据目录: ${dataDir}`);
   mkdirSync(dataDir, { recursive: true });
 
   // LoCoMo
