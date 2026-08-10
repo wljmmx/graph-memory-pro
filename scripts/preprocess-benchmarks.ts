@@ -24,6 +24,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import type { BenchmarkCase, BenchmarkDataset } from "../src/benchmark/types.ts";
+import { buildLongMemEvalV2Dataset, type LongMemEvalV2Options } from "../src/benchmark/datasets.ts";
 
 // ── 类别映射（复用 datasets.ts 的映射）───────────────────────
 const LOCOMO_CATEGORY: Record<string, string> = {
@@ -233,6 +234,42 @@ function preprocessLongMemEval(raw: string): BenchmarkDataset {
   };
 }
 
+// ── LongMemEval-V2 预处理 ───────────────────────────────────────
+//
+// 结构：questions.jsonl + trajectories.jsonl + haystacks/lme_v2_{tier}.json
+// 复用 datasets.ts 的 buildLongMemEvalV2Dataset 纯函数，落盘标准化数据集。
+
+function preprocessLongMemEvalV2(dataDir: string): BenchmarkDataset[] {
+  const out: BenchmarkDataset[] = [];
+  const baseDir = join(dataDir, "longmemeval-v2");
+  const questionsPath = join(baseDir, "questions.jsonl");
+  const trajectoriesPath = join(baseDir, "trajectories.jsonl");
+
+  if (!existsSync(questionsPath) || !existsSync(trajectoriesPath)) {
+    console.log(`ℹ 跳过 LongMemEval-V2（未找到 ${baseDir}，请先运行 npm run download:benchmarks longmemeval-v2）`);
+    return out;
+  }
+
+  const questionsRaw = readFileSync(questionsPath, "utf-8");
+  const trajectoriesRaw = readFileSync(trajectoriesPath, "utf-8");
+
+  for (const tier of ["small", "medium"] as const) {
+    const haystackPath = join(baseDir, "haystacks", `lme_v2_${tier}.json`);
+    if (!existsSync(haystackPath)) {
+      console.log(`ℹ LongMemEval-V2: 跳过 tier=${tier}（未找到 ${haystackPath}）`);
+      continue;
+    }
+    const haystack = JSON.parse(readFileSync(haystackPath, "utf-8")) as Record<string, string[]>;
+    const opts: LongMemEvalV2Options = { tier, maxTrajectoriesPerQuestion: 20 };
+    const dataset = buildLongMemEvalV2Dataset(questionsRaw, trajectoriesRaw, haystack, opts);
+    const outPath = join(dataDir, `longmemeval-v2-${tier}.preprocessed.json`);
+    writeFileSync(outPath, JSON.stringify(dataset, null, 2), "utf-8");
+    console.log(`✔ LongMemEval-V2 (${tier}): ${dataset.cases.length} cases → ${outPath}`);
+    out.push(dataset);
+  }
+  return out;
+}
+
 // ── 主流程 ────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -266,6 +303,9 @@ async function main(): Promise<void> {
   } else {
     console.log(`ℹ 跳过 LongMemEval（未找到 ${lmePath}）`);
   }
+
+  // LongMemEval-V2
+  preprocessLongMemEvalV2(dataDir);
 
   console.log("\n预处理完成。运行评测: npm run benchmark");
 }

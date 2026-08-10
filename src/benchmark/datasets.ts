@@ -191,6 +191,285 @@ function mapLongMemEvalCategory(raw: string): string {
   return map[raw] ?? raw;
 }
 
+// ── LongMemEval-V2 适配器 ──────────────────────────────────────
+//
+// 官方数据集: https://github.com/xiaowu0162/LongMemEval-V2
+//   HuggingFace: xiaowu0162/longmemeval-v2
+//
+// 结构（与 V1 完全不同，V1 是「会话消息」，V2 是「多模态 Web-Agent 轨迹」）：
+//   trajectories.jsonl : 每行一条轨迹 { id, goal, outcome, start_url, actions[],
+//                          states[] | content[] + metadata }
+//                          states[i] = { state_index, step, url, action, thoughts,
+//                          text(accessibility_tree), screenshot }
+//                          content[i] = { url, action, thoughts, observation:{text,screenshot} }
+//   questions.jsonl    : 每行一个问题 { id, question_type, question, answer, domain }
+//   haystacks/lme_v2_{tier}.json : { question_id: [trajectory_id,...] }
+//
+// 适配策略：
+//   一个问题 = 一个 case，其「记忆上下文」= 该问题 haystack 内的轨迹集合。
+//   每条轨迹 → 一个 prebuiltNode（name 确定、content = 轨迹状态文本），
+//   expectedNodeIds = 该问题 haystack 中已建图的轨迹节点名。
+//   轨迹间按顺序连 RELATES_TO 边，构成可游走的时序图谱。
+
+/** V2 单条轨迹状态 */
+interface V2State {
+  url?: string;
+  action?: string | null;
+  thoughts?: string | null;
+  /** states[] 格式下的可访问性树文本 */
+  text?: string;
+  /** states[] / content[] 格式下的截图路径 */
+  screenshot?: string;
+  /** content[] 格式下的观测 */
+  observation?: { text?: string; screenshot?: string };
+  step?: number;
+  state_index?: number;
+}
+
+/** V2 单条轨迹 */
+export interface V2Trajectory {
+  id: string;
+  goal?: string;
+  outcome?: string | null;
+  start_url?: string;
+  actions?: string[];
+  states?: V2State[];
+  content?: V2State[];
+  metadata?: { original_goal?: string };
+}
+
+/** V2 单条问题 */
+export interface V2Question {
+  id: string;
+  question_type: string;
+  question?: string | { text?: string; image?: string };
+  answer?: string;
+  domain?: string;
+}
+
+/** V2 建图选项 */
+export interface LongMemEvalV2Options {
+  /** haystack tier（small / medium） */
+  tier?: "small" | "medium";
+  /** 每个问题最多取多少条轨迹建图（haystack 最多 500 条，防止图过大） */
+  maxTrajectoriesPerQuestion?: number;
+  /** 最多处理多少条问题（0 = 全部） */
+  maxQuestions?: number;
+  /** 单状态文本截断长度（deno/tsx 内存友好） */
+  maxStateChars?: number;
+  /** 单轨迹节点 content 截断长度 */
+  maxTrajectoryChars?: number;
+}
+
+/** V2 类别映射（question_type → 中文类别） */
+const V2_CATEGORY: Record<string, string> = {
+  "static-environment": "静态状态",
+  "static-environment-abs": "静态状态-弃答",
+  "dynamic-environment": "动态状态",
+  "dynamic-environment-abs": "动态状态-弃答",
+  "procedure": "流程知识",
+  "procedure-abs": "流程知识-弃答",
+  "errors-gotchas": "环境陷阱",
+};
+
+function mapV2Category(qtype: string): string {
+  return V2_CATEGORY[qtype] ?? qtype ?? "未知";
+}
+
+/** 提取一条轨迹状态的文本表示（合并 url/action/thoughts/accessibility-tree） */
+export function v2StateText(state: V2State): string {
+  const parts: string[] = [];
+  if (state.url) parts.push(`URL: ${state.url}`);
+  if (state.action) parts.push(`ACTION: ${state.action}`);
+  if (state.thoughts) parts.push(`THOUGHT: ${state.thoughts}`);
+  const text = state.text ?? state.observation?.text;
+  if (text) parts.push(text);
+  // 多模态截图路径以文本引用形式保留（下游可据此加载图片做多模态召回）
+  const screenshot = state.screenshot ?? state.observation?.screenshot;
+  if (screenshot) parts.push(`SCREENSHOT: ${screenshot}`);
+  return parts.join("\n");
+}
+
+/** 解析一条 V2 轨迹（兼容 states[] 与 content[] 两种格式） */
+export function v2TrajectoryStates(traj: V2Trajectory): V2State[] {
+  if (Array.isArray(traj.states) && traj.states.length > 0) return traj.states;
+  if (Array.isArray(traj.content) && traj.content.length > 0) return traj.content;
+  return [];
+}
+
+/** 将一条轨迹压平为节点 content */
+export function v2TrajectoryContent(traj: V2Trajectory, maxStateChars = 2000, maxTrajectoryChars = 8000): string {
+  const goal = traj.goal ?? traj.metadata?.original_goal ?? "";
+  const states = v2TrajectoryStates(traj);
+  const parts = [`GOAL: ${goal}`];
+  if (traj.start_url) parts.push(`START_URL: ${traj.start_url}`);
+  for (const s of states) {
+    const text = v2StateText(s);
+    if (!text) continue;
+    parts.push(text.slice(0, maxStateChars));
+  }
+  const full = parts.join("\n\n");
+  return full.slice(0, maxTrajectoryChars);
+}
+
+/**
+ * 从 V2 原始数据构建 BenchmarkDataset（纯函数，供 loader 与 preprocess 共用）
+ *
+ * @param questionsRaw questions.jsonl 内容
+ * @param trajectoriesRaw trajectories.jsonl 内容
+ * @param haystack haystack 映射（question_id → trajectory_ids）
+ * @param opts 建图选项
+ */
+export function buildLongMemEvalV2Dataset(
+  questionsRaw: string,
+  trajectoriesRaw: string,
+  haystack: Record<string, string[]>,
+  opts: LongMemEvalV2Options = {},
+): BenchmarkDataset {
+  const {
+    maxTrajectoriesPerQuestion = 20,
+    maxQuestions = 0,
+    maxStateChars = 2000,
+    maxTrajectoryChars = 8000,
+  } = opts;
+
+  // 解析轨迹为 id → 轨迹
+  const trajMap = new Map<string, V2Trajectory>();
+  for (const line of trajectoriesRaw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const traj = JSON.parse(trimmed) as V2Trajectory;
+      if (traj && typeof traj.id === "string" && traj.id) trajMap.set(traj.id, traj);
+    } catch { /* 跳过解析失败行 */ }
+  }
+
+  const cases: BenchmarkCase[] = [];
+  for (const line of questionsRaw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (maxQuestions > 0 && cases.length >= maxQuestions) break;
+    let q: V2Question;
+    try {
+      q = JSON.parse(trimmed) as V2Question;
+    } catch { continue; }
+    if (!q || typeof q.id !== "string" || !q.id) continue;
+
+    const questionText = typeof q.question === "string" ? q.question : q.question?.text ?? "";
+    if (!questionText) continue;
+
+    const trajIds = (haystack[q.id] ?? []).slice(0, maxTrajectoriesPerQuestion);
+    if (trajIds.length === 0) continue;
+
+    // 为每条轨迹建节点
+    const prebuiltNodes: BenchmarkCase["prebuiltNodes"] = [];
+    const nodeNames: string[] = [];
+    for (const tid of trajIds) {
+      const traj = trajMap.get(tid);
+      if (!traj) continue;
+      const states = v2TrajectoryStates(traj);
+      if (states.length === 0) continue;
+      const nodeName = `lmev2-${tid}`;
+      nodeNames.push(nodeName);
+      prebuiltNodes.push({
+        type: "EVENT",
+        name: nodeName,
+        description: `LongMemEval-V2 轨迹 ${tid}（目标：${(traj.goal ?? traj.metadata?.original_goal ?? "未知").slice(0, 120)}）`,
+        content: v2TrajectoryContent(traj, maxStateChars, maxTrajectoryChars),
+        updatedAt: undefined,
+      });
+    }
+    if (prebuiltNodes.length === 0) continue;
+
+    // 轨迹间按时序连边（构成可游走图谱）
+    const prebuiltEdges: BenchmarkCase["prebuiltEdges"] = [];
+    for (let i = 0; i < nodeNames.length - 1; i++) {
+      prebuiltEdges.push({
+        type: "NEXT_SESSION",
+        fromName: nodeNames[i],
+        toName: nodeNames[i + 1],
+        instruction: "同一 haystack 中的相邻轨迹（时序上下文）",
+      });
+    }
+
+    cases.push({
+      id: `longmemeval-v2-${q.id}`,
+      dataset: "LongMemEvalV2",
+      category: mapV2Category(q.question_type),
+      query: questionText,
+      expectedAnswer: q.answer ?? "",
+      expectedNodeIds: nodeNames,
+      conversation: undefined,
+      prebuiltNodes: prebuiltNodes as BenchmarkCase["prebuiltNodes"],
+      prebuiltEdges,
+    });
+  }
+
+  return {
+    name: "LongMemEvalV2",
+    cases,
+    description: "LongMemEval-V2 评测数据集（轨迹记忆，451 题，5 种记忆能力，按 haystack 建图）",
+    targets: { p1: 0.3, f1: 0.2 },
+  };
+}
+
+/**
+ * 加载 LongMemEval-V2 数据集
+ *
+ * 优先读取离线预处理后的标准化文件，否则回退到原始文件实时构建。
+ */
+export function loadLongMemEvalV2(dataDir: string = "benchmarks/data", opts: LongMemEvalV2Options = {}): BenchmarkDataset {
+  const tier = opts.tier ?? "small";
+  // 优先读取离线预处理后的标准化文件（tier 维度），否则回退到原始文件实时构建
+  const preprocessedCandidates = [
+    join(dataDir, `longmemeval-v2-${tier}.preprocessed.json`),
+    join(dataDir, "longmemeval-v2.preprocessed.json"),
+  ];
+  for (const preprocessedPath of preprocessedCandidates) {
+    if (existsSync(preprocessedPath)) {
+      try {
+        const data = JSON.parse(readFileSync(preprocessedPath, "utf-8")) as BenchmarkDataset;
+        log.info(`LongMemEvalV2: loaded preprocessed dataset (${data.cases.length} cases) from ${preprocessedPath}`);
+        return data;
+      } catch (err) {
+        log.warn(`LongMemEvalV2: preprocessed load failed, fallback to raw: ${err}`);
+      }
+    }
+  }
+
+  const baseDir = join(dataDir, "longmemeval-v2");
+  const questionsPath = join(baseDir, "questions.jsonl");
+  const trajectoriesPath = join(baseDir, "trajectories.jsonl");
+  const haystackPath = join(baseDir, "haystacks", `lme_v2_${tier}.json`);
+
+  if (!existsSync(questionsPath) || !existsSync(trajectoriesPath) || !existsSync(haystackPath)) {
+    return {
+      name: "LongMemEvalV2",
+      cases: [],
+      description: "LongMemEval-V2 评测数据集（未下载，请运行 npm run download:benchmarks longmemeval-v2）",
+      targets: { p1: 0.3, f1: 0.2 },
+    };
+  }
+
+  try {
+    const haystack = JSON.parse(readFileSync(haystackPath, "utf-8")) as Record<string, string[]>;
+    return buildLongMemEvalV2Dataset(
+      readFileSync(questionsPath, "utf-8"),
+      readFileSync(trajectoriesPath, "utf-8"),
+      haystack,
+      opts,
+    );
+  } catch (err) {
+    log.warn(`LongMemEvalV2 load failed: ${err}`);
+    return {
+      name: "LongMemEvalV2",
+      cases: [],
+      description: "LongMemEval-V2 评测数据集（解析失败）",
+      targets: { p1: 0.3, f1: 0.2 },
+    };
+  }
+}
+
 // ── 内置样本数据集（用于无外部数据时的快速验证）──────────────────
 
 /**
@@ -401,15 +680,16 @@ export function getBuiltinSampleDataset(): BenchmarkDataset {
  * 加载所有可用的评测数据集
  */
 export async function loadAllDatasets(dataDir?: string): Promise<BenchmarkDataset[]> {
-  const [locomo, longmemeval] = await Promise.all([
+  const [locomo, longmemeval, longmemevalV2] = await Promise.all([
     loadLoCoMo(dataDir),
     loadLongMemEval(dataDir),
+    Promise.resolve(loadLongMemEvalV2(dataDir ?? "benchmarks/data")),
   ]);
 
-  const datasets = [locomo, longmemeval];
+  const datasets = [locomo, longmemeval, longmemevalV2];
 
-  // 如果两个数据集都为空，加入内置样本
-  if (locomo.cases.length === 0 && longmemeval.cases.length === 0) {
+  // 如果所有真实数据集都为空，加入内置样本
+  if (locomo.cases.length === 0 && longmemeval.cases.length === 0 && longmemevalV2.cases.length === 0) {
     datasets.push(getBuiltinSampleDataset());
   }
 
