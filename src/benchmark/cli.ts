@@ -14,7 +14,9 @@
  */
 
 import { parseArgs } from "node:util";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import os from "node:os";
 import { initDriver, verifyWithRetry, closeDriver } from "../store/db.ts";
 import { ensureSchema } from "../store/store.ts";
 import { Recaller } from "../recaller/recall.ts";
@@ -23,14 +25,76 @@ import { createEmbedFn } from "../engine/embed.ts";
 import { runBenchmark, formatAggregateReport } from "./runner.ts";
 import type { GmConfig } from "../types.ts";
 
+/**
+ * 从 ~/.openclaw/openclaw.json 读取 graph-memory-pro 插件配置。
+ * 查找路径：plugins.entries["graph-memory-pro"].config（兼容数组/对象两种 entries 结构）。
+ */
+function readConfigFromOpenclaw(): GmConfig | null {
+  const home = process.env.HOME || process.env.USERPROFILE || os.homedir();
+  const configPath = join(home, ".openclaw", "openclaw.json");
+  if (!existsSync(configPath)) return null;
+  try {
+    const raw = readFileSync(configPath, "utf-8");
+    const config = JSON.parse(raw) as { plugins?: { entries?: unknown } };
+    const entries = config?.plugins?.entries;
+
+    let pluginConfig: Record<string, unknown> | null = null;
+    if (Array.isArray(entries)) {
+      const entry = (entries as Array<{ id?: string; name?: string; config?: unknown }>).find(
+        (e) => e?.id === "graph-memory-pro" || e?.name === "graph-memory-pro",
+      );
+      const cfg = entry?.config ?? entry;
+      if (cfg && typeof cfg === "object") pluginConfig = cfg as Record<string, unknown>;
+    } else if (entries && typeof entries === "object") {
+      const rec = entries as Record<string, { config?: unknown }>;
+      const scoped = rec["graph-memory-pro"] ?? rec["graph_memory_pro"];
+      if (scoped && typeof scoped === "object") {
+        const cfg = (scoped as { config?: unknown }).config ?? scoped;
+        if (cfg && typeof cfg === "object") pluginConfig = cfg as Record<string, unknown>;
+      }
+    }
+
+    if (!pluginConfig) return null;
+    const neo4j = pluginConfig.neo4j;
+    const hasNeo4j = neo4j && typeof neo4j === "object" && typeof (neo4j as { uri?: unknown }).uri === "string";
+    if (!hasNeo4j) {
+      console.warn("[benchmark] openclaw.json 中未找到 graph-memory-pro 的 neo4j 配置，忽略 openclaw.json");
+      return null;
+    }
+    const cfg = pluginConfig as unknown as GmConfig;
+    return {
+      ...cfg,
+      compactTurnCount: cfg.compactTurnCount ?? 6,
+      recallMaxNodes: cfg.recallMaxNodes ?? 6,
+      recallMaxDepth: cfg.recallMaxDepth ?? 2,
+      freshTailCount: cfg.freshTailCount ?? 10,
+      dedupThreshold: cfg.dedupThreshold ?? 0.9,
+      pagerankDamping: cfg.pagerankDamping ?? 0.85,
+      pagerankIterations: cfg.pagerankIterations ?? 20,
+    };
+  } catch (err) {
+    console.warn(`[benchmark] 读取 openclaw.json 失败: ${(err as Error)?.message ?? err}`);
+    return null;
+  }
+}
+
 function loadConfig(configPath?: string): GmConfig {
-  // 1. 显式 --config 指定的文件
+  // 1. 显式 --config 指定的文件（最高优先级）
   if (configPath) {
     const raw = readFileSync(configPath, "utf-8");
+    console.log(`[benchmark] 使用 --config 配置: ${configPath}`);
     return JSON.parse(raw) as GmConfig;
   }
 
-  // 2. 环境变量构建最小配置
+  // 2. 优先读取 openclaw.json 插件配置（plugins.entries.graph-memory-pro.config）
+  const fromOpenclaw = readConfigFromOpenclaw();
+  if (fromOpenclaw) {
+    console.log(`[benchmark] 使用 openclaw.json 的 graph-memory-pro 插件配置`);
+    return fromOpenclaw;
+  }
+
+  // 3. 兜底：环境变量构建最小配置
+  console.log("[benchmark] 未找到 openclaw.json 配置，使用环境变量 + 默认值");
   const neo4jUri = process.env.GM_NEO4J_URI ?? "bolt://localhost:7687";
   const neo4jUser = process.env.GM_NEO4J_USER ?? "neo4j";
   const neo4jPassword = process.env.GM_NEO4J_PASSWORD ?? "";
@@ -62,18 +126,28 @@ async function main(): Promise<void> {
       config: { type: "string", short: "c" },
       "data-dir": { type: "string" },
       datasets: { type: "string", default: "all" },
-      "max-cases": { type: "string", default: "0" },
-      "build-graph": { type: "boolean", default: true },
-      "no-build-graph": { type: "boolean", default: false },
-      "case-timeout-ms": { type: "string", default: "30000" },
+      "max-cases": { type: "string" },
+      "build-graph": { type: "boolean" },
+      "no-build-graph": { type: "boolean" },
+      "case-timeout-ms": { type: "string" },
     },
   });
 
   const cfg = loadConfig(values.config);
-  const buildGraph = values["no-build-graph"] ? false : values["build-graph"];
+
+  // benchmark 参数优先级：CLI 显式指定 > cfg.benchmark（来自 openclaw.json）> 默认值
+  const maxCases = values["max-cases"] !== undefined
+    ? Number(values["max-cases"])
+    : (cfg.benchmark?.maxCases ?? 0);
+  const caseTimeoutMs = values["case-timeout-ms"] !== undefined
+    ? Number(values["case-timeout-ms"])
+    : (cfg.benchmark?.caseTimeoutMs ?? 30000);
+  let buildGraph = cfg.benchmark?.buildGraph ?? true;
+  if (values["no-build-graph"]) buildGraph = false;
+  else if (values["build-graph"]) buildGraph = true;
+  const dataDir = values["data-dir"] ?? cfg.benchmark?.dataDir;
+
   const datasets: string[] | "all" = values.datasets === "all" ? "all" : values.datasets.split(",");
-  const maxCases = Number(values["max-cases"] ?? 0);
-  const caseTimeoutMs = Number(values["case-timeout-ms"] ?? 30000);
 
   console.log("=== Graph Memory Pro Benchmark ===");
   console.log(`Neo4j: ${cfg.neo4j.uri}`);
@@ -113,7 +187,7 @@ async function main(): Promise<void> {
   try {
     const result = await runBenchmark(recaller, driver, cfg, {
       datasets: datasets,
-      dataDir: values["data-dir"],
+      dataDir,
       maxCases,
       buildGraph,
       caseTimeoutMs,
