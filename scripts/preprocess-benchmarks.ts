@@ -24,7 +24,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import type { BenchmarkCase, BenchmarkDataset } from "../src/benchmark/types.ts";
-import { buildLongMemEvalV2Dataset, type LongMemEvalV2Options } from "../src/benchmark/datasets.ts";
+import { buildLongMemEvalV2Dataset, loadV2QuestionsFile, loadV2TrajectoriesFile, type LongMemEvalV2Options } from "../src/benchmark/datasets.ts";
 
 // ── 类别映射（复用 datasets.ts 的映射）───────────────────────
 const LOCOMO_CATEGORY: Record<string, string> = {
@@ -239,7 +239,7 @@ function preprocessLongMemEval(raw: string): BenchmarkDataset {
 // 结构：questions.jsonl + trajectories.jsonl + haystacks/lme_v2_{tier}.json
 // 复用 datasets.ts 的 buildLongMemEvalV2Dataset 纯函数，落盘标准化数据集。
 
-function preprocessLongMemEvalV2(dataDir: string): BenchmarkDataset[] {
+async function preprocessLongMemEvalV2(dataDir: string): Promise<BenchmarkDataset[]> {
   const out: BenchmarkDataset[] = [];
   const baseDir = join(dataDir, "longmemeval-v2");
   const questionsPath = join(baseDir, "questions.jsonl");
@@ -250,8 +250,11 @@ function preprocessLongMemEvalV2(dataDir: string): BenchmarkDataset[] {
     return out;
   }
 
-  const questionsRaw = readFileSync(questionsPath, "utf-8");
-  const trajectoriesRaw = readFileSync(trajectoriesPath, "utf-8");
+  // trajectories.jsonl 体积巨大，必须流式逐行读取，避免 ERR_STRING_TOO_LONG
+  const [questions, trajMap] = await Promise.all([
+    loadV2QuestionsFile(questionsPath),
+    loadV2TrajectoriesFile(trajectoriesPath),
+  ]);
 
   for (const tier of ["small", "medium"] as const) {
     const haystackPath = join(baseDir, "haystacks", `lme_v2_${tier}.json`);
@@ -261,7 +264,7 @@ function preprocessLongMemEvalV2(dataDir: string): BenchmarkDataset[] {
     }
     const haystack = JSON.parse(readFileSync(haystackPath, "utf-8")) as Record<string, string[]>;
     const opts: LongMemEvalV2Options = { tier, maxTrajectoriesPerQuestion: 20 };
-    const dataset = buildLongMemEvalV2Dataset(questionsRaw, trajectoriesRaw, haystack, opts);
+    const dataset = buildLongMemEvalV2Dataset(questions, trajMap, haystack, opts);
     const outPath = join(dataDir, `longmemeval-v2-${tier}.preprocessed.json`);
     writeFileSync(outPath, JSON.stringify(dataset, null, 2), "utf-8");
     console.log(`✔ LongMemEval-V2 (${tier}): ${dataset.cases.length} cases → ${outPath}`);
@@ -305,7 +308,7 @@ async function main(): Promise<void> {
   }
 
   // LongMemEval-V2
-  preprocessLongMemEvalV2(dataDir);
+  await preprocessLongMemEvalV2(dataDir);
 
   console.log("\n预处理完成。运行评测: npm run benchmark");
 }

@@ -12,7 +12,8 @@
  */
 
 import type { BenchmarkCase, BenchmarkDataset } from "./types.ts";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
 import { join } from "node:path";
 import { createLogger } from "../logger.ts";
 
@@ -313,16 +314,50 @@ export function v2TrajectoryContent(traj: V2Trajectory, maxStateChars = 2000, ma
 }
 
 /**
+ * 流式读取 V2 questions.jsonl（逐行解析，避免超大文件一次性读入内存导致 ERR_STRING_TOO_LONG）
+ */
+export async function loadV2QuestionsFile(path: string): Promise<V2Question[]> {
+  const out: V2Question[] = [];
+  const rl = createInterface({ input: createReadStream(path), crlfDelay: Infinity });
+  for await (const line of rl) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const q = JSON.parse(t) as V2Question;
+      if (q && typeof q.id === "string" && q.id) out.push(q);
+    } catch { /* 跳过解析失败行 */ }
+  }
+  return out;
+}
+
+/**
+ * 流式读取 V2 trajectories.jsonl（逐行解析进 Map，避免超大文件一次性读入内存导致 ERR_STRING_TOO_LONG）
+ */
+export async function loadV2TrajectoriesFile(path: string): Promise<Map<string, V2Trajectory>> {
+  const map = new Map<string, V2Trajectory>();
+  const rl = createInterface({ input: createReadStream(path), crlfDelay: Infinity });
+  for await (const line of rl) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const traj = JSON.parse(t) as V2Trajectory;
+      if (traj && typeof traj.id === "string" && traj.id) map.set(traj.id, traj);
+    } catch { /* 跳过解析失败行 */ }
+  }
+  return map;
+}
+
+/**
  * 从 V2 原始数据构建 BenchmarkDataset（纯函数，供 loader 与 preprocess 共用）
  *
- * @param questionsRaw questions.jsonl 内容
- * @param trajectoriesRaw trajectories.jsonl 内容
+ * @param questions 已解析的问题列表（用 loadV2QuestionsFile 流式读取）
+ * @param trajMap id → 轨迹 映射（用 loadV2TrajectoriesFile 流式读取）
  * @param haystack haystack 映射（question_id → trajectory_ids）
  * @param opts 建图选项
  */
 export function buildLongMemEvalV2Dataset(
-  questionsRaw: string,
-  trajectoriesRaw: string,
+  questions: V2Question[],
+  trajMap: Map<string, V2Trajectory>,
   haystack: Record<string, string[]>,
   opts: LongMemEvalV2Options = {},
 ): BenchmarkDataset {
@@ -333,26 +368,9 @@ export function buildLongMemEvalV2Dataset(
     maxTrajectoryChars = 8000,
   } = opts;
 
-  // 解析轨迹为 id → 轨迹
-  const trajMap = new Map<string, V2Trajectory>();
-  for (const line of trajectoriesRaw.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      const traj = JSON.parse(trimmed) as V2Trajectory;
-      if (traj && typeof traj.id === "string" && traj.id) trajMap.set(traj.id, traj);
-    } catch { /* 跳过解析失败行 */ }
-  }
-
   const cases: BenchmarkCase[] = [];
-  for (const line of questionsRaw.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
+  for (const q of questions) {
     if (maxQuestions > 0 && cases.length >= maxQuestions) break;
-    let q: V2Question;
-    try {
-      q = JSON.parse(trimmed) as V2Question;
-    } catch { continue; }
     if (!q || typeof q.id !== "string" || !q.id) continue;
 
     const questionText = typeof q.question === "string" ? q.question : q.question?.text ?? "";
@@ -418,7 +436,7 @@ export function buildLongMemEvalV2Dataset(
  *
  * 优先读取离线预处理后的标准化文件，否则回退到原始文件实时构建。
  */
-export function loadLongMemEvalV2(dataDir: string = "benchmarks/data", opts: LongMemEvalV2Options = {}): BenchmarkDataset {
+export async function loadLongMemEvalV2(dataDir: string = "benchmarks/data", opts: LongMemEvalV2Options = {}): Promise<BenchmarkDataset> {
   const tier = opts.tier ?? "small";
   // 优先读取离线预处理后的标准化文件（tier 维度），否则回退到原始文件实时构建
   const preprocessedCandidates = [
@@ -443,6 +461,7 @@ export function loadLongMemEvalV2(dataDir: string = "benchmarks/data", opts: Lon
   const haystackPath = join(baseDir, "haystacks", `lme_v2_${tier}.json`);
 
   if (!existsSync(questionsPath) || !existsSync(trajectoriesPath) || !existsSync(haystackPath)) {
+    log.warn(`LongMemEvalV2: raw files missing (${baseDir})`);
     return {
       name: "LongMemEvalV2",
       cases: [],
@@ -453,12 +472,12 @@ export function loadLongMemEvalV2(dataDir: string = "benchmarks/data", opts: Lon
 
   try {
     const haystack = JSON.parse(readFileSync(haystackPath, "utf-8")) as Record<string, string[]>;
-    return buildLongMemEvalV2Dataset(
-      readFileSync(questionsPath, "utf-8"),
-      readFileSync(trajectoriesPath, "utf-8"),
-      haystack,
-      opts,
-    );
+    // trajectories.jsonl 体积巨大，必须流式逐行读取，避免 ERR_STRING_TOO_LONG
+    const [questions, trajMap] = await Promise.all([
+      loadV2QuestionsFile(questionsPath),
+      loadV2TrajectoriesFile(trajectoriesPath),
+    ]);
+    return buildLongMemEvalV2Dataset(questions, trajMap, haystack, opts);
   } catch (err) {
     log.warn(`LongMemEvalV2 load failed: ${err}`);
     return {
@@ -683,7 +702,7 @@ export async function loadAllDatasets(dataDir?: string): Promise<BenchmarkDatase
   const [locomo, longmemeval, longmemevalV2] = await Promise.all([
     loadLoCoMo(dataDir),
     loadLongMemEval(dataDir),
-    Promise.resolve(loadLongMemEvalV2(dataDir ?? "benchmarks/data")),
+    loadLongMemEvalV2(dataDir ?? "benchmarks/data"),
   ]);
 
   const datasets = [locomo, longmemeval, longmemevalV2];
