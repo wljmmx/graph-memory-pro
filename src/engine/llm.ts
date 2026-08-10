@@ -109,7 +109,16 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
   // Ollama keep_alive 参数（仅 Ollama 识别，OpenAI 会忽略）
   // 默认 "1h"（与 embed 引擎一致），不传时 Ollama 默认 5m 后卸载模型，
   // 导致周期性调用冷启动延迟（LLM 模型加载通常数秒到数十秒）。
-  const keepAlive = config.keepAlive || "1h";
+  // 注意：数值型（含数值字符串如 "-1"）必须传 number，否则 Go 的 time.ParseDuration
+  // 解析字符串 "-1" 会报 `time: missing unit in duration "-1"`（400）。
+  const keepAlive = (() => {
+    const raw = config.keepAlive;
+    if (raw === undefined || raw === null || raw === "") return "1h";
+    if (typeof raw === "number") return raw;
+    const trimmed = String(raw).trim();
+    if (/^-?\d+$/.test(trimmed)) return Number(trimmed);
+    return trimmed;
+  })();
 
   // P2-B2: 检测是否为 Ollama 本地服务。
   // Ollama 的 OpenAI 兼容层 (/v1/*) 是实验性支持，keep_alive 可能被忽略。

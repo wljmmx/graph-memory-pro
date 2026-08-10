@@ -91,7 +91,16 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
   // 可配置 "5m"/"30m"/"2h"/-1（永久驻留）。
   // 不传或传 "5m" 时，模型在 5 分钟无请求后自动卸载，下次请求需重新加载，
   // 导致首次召回延迟显著（GGUF 模型加载可能数秒到数十秒）。
-  const keepAlive = config.keepAlive || "1h";
+  // 注意：数值型（含数值字符串如 "-1"）必须传 number，否则 Go 的 time.ParseDuration
+  // 解析字符串 "-1" 会报 `time: missing unit in duration "-1"`（Embedding API 400）。
+  const keepAlive = (() => {
+    const raw = config.keepAlive;
+    if (raw === undefined || raw === null || raw === "") return "1h";
+    if (typeof raw === "number") return raw;
+    const trimmed = String(raw).trim();
+    if (/^-?\d+$/.test(trimmed)) return Number(trimmed);
+    return trimmed;
+  })();
   // v2.3.0: 预期向量维度（可选）。配置后引擎层校验返回向量维度一致性，
   // 防止模型更换后维度与向量索引不一致（如 nomic-embed-text 768 → 1024）
   const expectedDim = config.dimensions;

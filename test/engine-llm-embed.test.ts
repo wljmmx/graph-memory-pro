@@ -116,6 +116,22 @@ describe("createCompleteFn", () => {
     expect(body.keep_alive).toBe("30m");
   });
 
+  it("keepAlive 为数值字符串 -1 时转为 number 传给 Ollama（避免 time.ParseDuration 报错）", async () => {
+    fetchSpy.mockResolvedValue(
+      mockResponse({ choices: [{ message: { content: "ok" } }] }),
+    );
+    const complete = createCompleteFn({
+      baseURL: "http://localhost:11434/v1",
+      model: "qwen3.5:9b",
+      keepAlive: "-1",
+    });
+    await complete("s", "u");
+    const [, init] = fetchSpy.mock.calls[0];
+    const body = JSON.parse(init.body as string);
+    // 数值型（含数值字符串）必须为 number，否则 Ollama 报 `time: missing unit in duration "-1"`
+    expect(body.keep_alive).toBe(-1);
+  });
+
   it("未配置 keepAlive 时默认 1h（OpenAI 兼容端点，v2.3.0 改为始终发送）", async () => {
     fetchSpy.mockResolvedValue(
       mockResponse({ choices: [{ message: { content: "ok" } }] }),
@@ -777,6 +793,18 @@ describe("createEmbedFn", () => {
     const [, init] = fetchSpy.mock.calls[0];
     const body = JSON.parse(init.body as string);
     expect(body.keep_alive).toBe("1h");
+  });
+
+  it("embed keepAlive 为数值字符串 -1 时转为 number（避免 time.ParseDuration 报错）", async () => {
+    fetchSpy.mockResolvedValue(mockResponse({ embeddings: [[0.1]] }));
+    const embed = createEmbedFn({
+      baseURL: "http://localhost:11434",
+      keepAlive: "-1",
+    });
+    await embed("text");
+    const [, init] = fetchSpy.mock.calls[0];
+    const body = JSON.parse(init.body as string);
+    expect(body.keep_alive).toBe(-1);
   });
 
   it("v2.3.0 维度校验：返回维度与 config.dimensions 一致时通过", async () => {
