@@ -34,8 +34,35 @@
 
 set -euo pipefail
 
-DATA_DIR="${GM_BENCHMARK_DATA_DIR:-benchmarks/data}"
+# 数据目录优先级：GM_BENCHMARK_DATA_DIR > openclaw.json benchmark.dataDir > 默认 benchmarks/data。
+# 与 preprocess / benchmark 保持同一解析逻辑，避免「预处理写 A 目录、评测读 B 目录」。
+if [ -n "${GM_BENCHMARK_DATA_DIR:-}" ]; then
+  DATA_DIR="$GM_BENCHMARK_DATA_DIR"
+else
+  DATA_DIR="$(
+    node -e '
+      const fs = require("fs"), os = require("os"), path = require("path");
+      const p = path.join(os.homedir(), ".openclaw", "openclaw.json");
+      try {
+        const raw = JSON.parse(fs.readFileSync(p, "utf-8"));
+        const entries = raw?.plugins?.entries;
+        let cfg = null;
+        if (Array.isArray(entries)) {
+          const e = entries.find((x) => x?.id === "graph-memory-pro" || x?.name === "graph-memory-pro");
+          cfg = e?.config ?? e;
+        } else if (entries && typeof entries === "object") {
+          const scoped = entries["graph-memory-pro"] ?? entries["graph_memory_pro"];
+          cfg = scoped?.config ?? scoped;
+        }
+        const d = cfg?.benchmark?.dataDir;
+        process.stdout.write(typeof d === "string" && d.trim() ? d.trim() : "");
+      } catch { process.stdout.write(""); }
+    '
+  )"
+  DATA_DIR="${DATA_DIR:-benchmarks/data}"
+fi
 mkdir -p "$DATA_DIR"
+echo "ℹ 基准数据目录: $DATA_DIR"
 
 TARGET="${1:-all}"
 
