@@ -25,8 +25,12 @@
 #     默认不下载。如需完整快照，可用官方脚本：
 #         python data/download_data.py --data-root benchmarks/data/longmemeval-v2
 #
-# 注意：LongMemEval（V1）原始文件路径/命名可能随上游变动，脚本会尝试常见路径；
-#       若失败，请手动下载后放置到 benchmarks/data/longmemeval.jsonl。
+#
+# LongMemEval（V1）说明：
+#   - 数据源：HuggingFace xiaowu0162/longmemeval-cleaned（国内默认走 hf-mirror.com 镜像）。
+#   - 自动下载 cleaned 小版本 longmemeval_s_cleaned.json（~277MB，JSON 数组），
+#     随后用 node 就地转换为 loader/preprocess 期望的 JSONL 格式（longmemeval.jsonl）。
+#   - 无需手动处理；下载完成后仍需运行 npm run preprocess:benchmarks 生成标准化数据集。
 
 set -euo pipefail
 
@@ -61,14 +65,50 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "locomo" ]; then
     "$DATA_DIR/locomo.json"
 fi
 
-# ── LongMemEval ──
+# ── LongMemEval (V1) ──
+# 数据源：HuggingFace xiaowu0162/longmemeval-cleaned（国内默认走 hf-mirror.com 镜像）
+#   自动下载 cleaned 小版本 longmemeval_s_cleaned.json（~277MB，JSON 数组），
+#   随后用 node 就地转换为 loader/preprocess 期望的 JSONL 格式（longmemeval.jsonl）。
 if [ "$TARGET" = "all" ] || [ "$TARGET" = "longmemeval" ]; then
   if [ -f "$DATA_DIR/longmemeval.jsonl" ] && [ -s "$DATA_DIR/longmemeval.jsonl" ]; then
     echo "✔ 已存在，跳过: $DATA_DIR/longmemeval.jsonl"
   else
-    echo "ℹ LongMemEval 原始文件路径随上游仓库变动，请手动下载后放置到:"
-    echo "    $DATA_DIR/longmemeval.jsonl"
-    echo "  参考: https://github.com/xiaowu0162/LongMemEval"
+    LME_DIR="$DATA_DIR/longmemeval"
+    mkdir -p "$LME_DIR"
+    LME_RAW="$LME_DIR/longmemeval_s_cleaned.json"
+    LME_HF="${GM_HF_BASE:-https://hf-mirror.com}/datasets/xiaowu0162/longmemeval-cleaned/resolve/main"
+    download "$LME_HF/longmemeval_s_cleaned.json" "$LME_RAW"
+
+    echo "→ 转换 cleaned JSON → JSONL: $DATA_DIR/longmemeval.jsonl"
+    node -e '
+      const fs = require("fs");
+      const raw = JSON.parse(fs.readFileSync(process.argv[1], "utf-8"));
+      const catMap = {
+        "single-session-user": "single_session",
+        "single-session-questioner": "single_session",
+        "multi-session": "multi_session",
+        "knowledge-update": "knowledge_update",
+        "temporal-reasoning": "temporal",
+      };
+      const lines = raw.map((d) => {
+        const tsRaw = d.question_date ? String(d.question_date).split(" ")[0] : "";
+        const ts = tsRaw ? Date.parse(tsRaw) : NaN;
+        return JSON.stringify({
+          question: d.question ?? "",
+          answer: d.answer ?? "",
+          category: catMap[d.question_type] ?? d.question_type ?? "single_session",
+          timestamp: Number.isNaN(ts) ? undefined : ts,
+          session: {
+            messages: (d.haystack_sessions ?? []).flat().map((m) => ({
+              role: m.role === "user" ? "user" : "assistant",
+              content: m.content ?? "",
+            })),
+          },
+        });
+      });
+      fs.writeFileSync(process.argv[2], lines.join("\n") + "\n");
+    ' "$LME_RAW" "$DATA_DIR/longmemeval.jsonl"
+    echo "✔ 完成: $DATA_DIR/longmemeval.jsonl"
   fi
 fi
 
