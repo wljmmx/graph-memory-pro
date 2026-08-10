@@ -740,6 +740,7 @@ export default definePluginEntry({
       keepAlive: Type.Optional(Type.Union([Type.String({ default: "" }), Type.Number({ default: -1 })])),
       cacheSize: Type.Optional(Type.Number({ default: 256, description: "v2.3.2 阶段二: embed LRU 缓存容量（默认 256，0 禁用缓存）" })),
       cacheTtlMs: Type.Optional(Type.Number({ default: 600_000, description: "v2.3.2 阶段二: embed LRU 缓存 TTL ms（默认 10min，0 禁用缓存）" })),
+      maxConcurrency: Type.Optional(Type.Number({ default: 3, description: "v2.4.0: embed 最大并发请求数（默认 3 for 本地 Ollama，过高会触发 503 server busy）" })),
       options: Type.Optional(Type.Object({}, { additionalProperties: true, default: {} })),
     })),
     timing: Type.Optional(Type.Object({

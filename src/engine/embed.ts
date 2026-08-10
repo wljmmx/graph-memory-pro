@@ -21,6 +21,49 @@ const RETRY_DELAYS = [1000, 3000, 5000];
 // v2.3.2 S6: 重试 jitter 上限 — 防止并发失败时重试波峰对齐加剧下游过载
 const RETRY_JITTER_MAX_MS = 500;
 
+// v2.4.0: 并发控制信号量（限制 embed 并发请求数，防本地 Ollama 503 server busy）
+// Ollama 默认 OLLAMA_NUM_PARALLEL=1，单流处理，并发过高会报
+// "maximum pending requests exceeded"，触发 embedding 熔断。
+// 默认并发 3（本地跑不宜超过 3），云端 API 可配置 maxConcurrency 调高。
+const DEFAULT_EMBED_MAX_CONCURRENCY = 3;
+
+interface Semaphore {
+  acquire(): Promise<() => void>;
+}
+
+function createSemaphore(max: number): Semaphore {
+  let active = 0;
+  const waiters: Array<() => void> = [];
+  return {
+    async acquire(): Promise<() => void> {
+      if (active >= max) {
+        await new Promise<void>((resolve) => waiters.push(resolve));
+      }
+      active++;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        active--;
+        const next = waiters.shift();
+        if (next) next();
+      };
+    },
+  };
+}
+
+// 模块级共享信号量（同 baseURL+model 的 EmbedFn 共享同一限制器）
+const _semaphores = new Map<string, Semaphore>();
+function getSemaphore(baseURL: string, model: string, maxConcurrency: number): Semaphore {
+  const key = `${baseURL}|${model}`;
+  let sem = _semaphores.get(key);
+  if (!sem) {
+    sem = createSemaphore(maxConcurrency);
+    _semaphores.set(key, sem);
+  }
+  return sem;
+}
+
 // v2.3.2 阶段二: 简易 LRU 缓存（无外部依赖，基于 Map 插入顺序）
 // 避免相同 text 跨 tick 重复 embed（如 associationMatrix 对同一 query 再次 embed、doctor 探测固定文本）
 interface LruCacheEntry {
@@ -111,6 +154,10 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
   const cacheTtlMs = config.cacheTtlMs ?? DEFAULT_EMBED_CACHE_TTL_MS;
   const cache = (cacheSize > 0 && cacheTtlMs > 0) ? createLruCache(cacheSize, cacheTtlMs) : null;
 
+  // v2.4.0: 并发控制信号量（同 baseURL+model 共享，默认 3）
+  const maxConcurrency = config.maxConcurrency ?? DEFAULT_EMBED_MAX_CONCURRENCY;
+  const semaphore = getSemaphore(baseURL, model, maxConcurrency);
+
   return async function embed(text: string): Promise<number[]> {
     if (text == null || text === '') {
       throw new Error('Embedding API: input text cannot be null, undefined, or empty');
@@ -122,81 +169,87 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
       if (cached) return cached;
     }
 
-    const lastErr: Error[] = [];
-    const delays = [...RETRY_DELAYS];
+    // v2.4.0: acquire 信号量，确保并发不超限（重试在持锁期间复用同一槽位）
+    const release = await semaphore.acquire();
+    try {
+      const lastErr: Error[] = [];
+      const delays = [...RETRY_DELAYS];
 
-    for (let attempt = 0; attempt <= delays.length; attempt++) {
-      try {
-        const response = await fetch(`${baseURL}/api/embed`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...(apiKey ? { "Authorization": `Bearer ${apiKey}` } : {}),
-          },
-          body: JSON.stringify({
-            model,
-            input: [text],
-            keep_alive: keepAlive,
-            ...(config.options ? { options: config.options } : {}),
-          }),
-          signal: AbortSignal.timeout(30_000),
-        });
+      for (let attempt = 0; attempt <= delays.length; attempt++) {
+        try {
+          const response = await fetch(`${baseURL}/api/embed`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...(apiKey ? { "Authorization": `Bearer ${apiKey}` } : {}),
+            },
+            body: JSON.stringify({
+              model,
+              input: [text],
+              keep_alive: keepAlive,
+              ...(config.options ? { options: config.options } : {}),
+            }),
+            signal: AbortSignal.timeout(30_000),
+          });
 
-        if (!response.ok) {
-          const body = await response.text().catch(() => "");
-          let hint = '';
-          if (response.status === 400 && body.includes('invalid input type')) {
-            hint = '. 提示：请检查 embedding.model 配置是否为支持 embedding 的模型（如 nomic-embed-text、bge-large-zh），聊天模型（如 qwen3.6）不支持 embedding';
+          if (!response.ok) {
+            const body = await response.text().catch(() => "");
+            let hint = '';
+            if (response.status === 400 && body.includes('invalid input type')) {
+              hint = '. 提示：请检查 embedding.model 配置是否为支持 embedding 的模型（如 nomic-embed-text、bge-large-zh），聊天模型（如 qwen3.6）不支持 embedding';
+            }
+            throw new Error(`Embedding API ${response.status}: ${body.slice(0, 200)}${hint}`);
           }
-          throw new Error(`Embedding API ${response.status}: ${body.slice(0, 200)}${hint}`);
-        }
 
-        const data = await response.json() as { embeddings?: number[][] };
+          const data = await response.json() as { embeddings?: number[][] };
 
-        if (!data.embeddings?.[0]) {
-          // 打印 Ollama 实际返回内容，便于诊断（如模型不支持 embed、模型名错误等）
-          const respPreview = JSON.stringify(data).slice(0, 300);
-          console.warn(
-            `[graph-memory-pro:embed] Ollama /api/embed returned no embedding data`,
-            { model, responsePreview: respPreview, hasEmbeddings: Array.isArray(data.embeddings), embeddingsLen: data.embeddings?.length },
-          );
-          throw new Error(
-            `Ollama embedding API returned no embedding data (model=${model}, response=${respPreview})`,
-          );
-        }
+          if (!data.embeddings?.[0]) {
+            // 打印 Ollama 实际返回内容，便于诊断（如模型不支持 embed、模型名错误等）
+            const respPreview = JSON.stringify(data).slice(0, 300);
+            console.warn(
+              `[graph-memory-pro:embed] Ollama /api/embed returned no embedding data`,
+              { model, responsePreview: respPreview, hasEmbeddings: Array.isArray(data.embeddings), embeddingsLen: data.embeddings?.length },
+            );
+            throw new Error(
+              `Ollama embedding API returned no embedding data (model=${model}, response=${respPreview})`,
+            );
+          }
 
-        const vec: number[] = data.embeddings[0];
+          const vec: number[] = data.embeddings[0];
 
-        // v2.3.0: 维度校验 — 若 config.dimensions 已配置，校验返回向量维度一致
-        // 防止模型更换后维度与向量索引不一致（如 nomic-embed-text 768 → 1024）
-        if (expectedDim && vec.length !== expectedDim) {
-          throw new Error(
-            `Embedding dimension mismatch: expected ${expectedDim}, got ${vec.length} (model=${model}). ` +
-            `Check embedding.model or embedding.dimensions in config.`,
-          );
-        }
+          // v2.3.0: 维度校验 — 若 config.dimensions 已配置，校验返回向量维度一致
+          // 防止模型更换后维度与向量索引不一致（如 nomic-embed-text 768 → 1024）
+          if (expectedDim && vec.length !== expectedDim) {
+            throw new Error(
+              `Embedding dimension mismatch: expected ${expectedDim}, got ${vec.length} (model=${model}). ` +
+              `Check embedding.model or embedding.dimensions in config.`,
+            );
+          }
 
-        // v2.3.2 阶段二: 成功后写入 LRU 缓存
-        if (cache) cache.set(text, vec);
+          // v2.3.2 阶段二: 成功后写入 LRU 缓存
+          if (cache) cache.set(text, vec);
 
-        return vec;
-      } catch (err) {
-        const error = err instanceof Error ? err : new Error(String(err));
-        lastErr.push(error);
+          return vec;
+        } catch (err) {
+          const error = err instanceof Error ? err : new Error(String(err));
+          lastErr.push(error);
 
-        // v2.3.2 S6: 4xx 错误（非 429 限流）不重试 — 重试也不会成功（如 400 无效模型/401 鉴权失败）
-        if (error.message.match(/Embedding API 4\d{2}/) && !error.message.includes("429")) {
-          throw error;
-        }
+          // v2.3.2 S6: 4xx 错误（非 429 限流）不重试 — 重试也不会成功（如 400 无效模型/401 鉴权失败）
+          if (error.message.match(/Embedding API 4\d{2}/) && !error.message.includes("429")) {
+            throw error;
+          }
 
-        if (attempt < delays.length) {
-          // v2.3.2 S6: 加 jitter 防并发重试波峰对齐
-          const jitter = Math.random() * RETRY_JITTER_MAX_MS;
-          await new Promise((r) => setTimeout(r, delays[attempt] + jitter));
+          if (attempt < delays.length) {
+            // v2.3.2 S6: 加 jitter 防并发重试波峰对齐
+            const jitter = Math.random() * RETRY_JITTER_MAX_MS;
+            await new Promise((r) => setTimeout(r, delays[attempt] + jitter));
+          }
         }
       }
-    }
 
-    throw lastErr[lastErr.length - 1] || new Error("Embedding failed");
+      throw lastErr[lastErr.length - 1] || new Error("Embedding failed");
+    } finally {
+      release();
+    }
   };
 }
