@@ -45,35 +45,56 @@ export async function upsertNode(
     const archivedAt = Date.now();
     const keepCount = cfg?.evolvableEmbedding?.archiveKeepCount ?? 3;
 
-    await session.run(
+    // v2.4.0 修复: Neo4j 属性不支持 Map/List<Map>，embeddingHistory 改为 JSON 字符串存储。
+    //   原生 Cypher 无法把 Map 序列化为 JSON（本项目不使用 APOC），故归档逻辑移到应用层：
+    //   1) OPTIONAL MATCH 读旧节点 embedding/hash/history
+    //   2) 应用层判断是否归档，序列化为 JSON 字符串
+    //   3) MERGE + SET 主写，history 以字符串参数传入
+    const read = await session.run(
       `OPTIONAL MATCH (old:${label} {id: $id})
-       WITH old,
-            CASE
-              WHEN old IS NOT NULL
-                AND old.embeddingHash IS NOT NULL
-                AND old.embeddingHash <> $newContentHash
-                AND old.embedding IS NOT NULL
-                AND size(old.embedding) > 0
-              THEN ([
-                {
-                  embedding: old.embedding,
-                  embeddingModel: old.embeddingModel,
-                  embeddingHash: old.embeddingHash,
-                  archivedAt: $archivedAt
-                }
-              ] + COALESCE(old.embeddingHistory, []))[..$keepCount]
-              ELSE COALESCE(old.embeddingHistory, [])
-            END AS newHistory,
-            CASE
-              WHEN old IS NOT NULL
-                AND old.embeddingHash IS NOT NULL
-                AND old.embeddingHash <> $newContentHash
-                AND old.embedding IS NOT NULL
-                AND size(old.embedding) > 0
-              THEN true
-              ELSE false
-            END AS evolvableApplied
-       MERGE (n:${label} {id: $id})
+       RETURN old.embeddingHash AS oldHash,
+              old.embedding AS oldEmbedding,
+              old.embeddingModel AS oldModel,
+              old.embeddingHistory AS oldHistory`,
+      { id: node.id },
+    );
+
+    let newHistoryJson: string | null = null;
+    const row = read.records[0];
+    if (row) {
+      const oldHash = row.get("oldHash");
+      const oldEmbedding = row.get("oldEmbedding");
+      const oldModel = row.get("oldModel");
+      const oldHistory = row.get("oldHistory");
+
+      const evolvableApplied =
+        oldHash != null &&
+        oldHash !== newContentHash &&
+        Array.isArray(oldEmbedding) &&
+        oldEmbedding.length > 0;
+
+      if (evolvableApplied) {
+        // 反序列化旧的 history（兼容历史 string 与误存的数组两种形态）
+        let prev: GmNode["embeddingHistory"] = [];
+        if (typeof oldHistory === "string") {
+          try { prev = JSON.parse(oldHistory) ?? []; } catch { prev = []; }
+        } else if (Array.isArray(oldHistory)) {
+          prev = oldHistory;
+        }
+        const entry = {
+          embedding: oldEmbedding,
+          embeddingModel: oldModel ?? undefined,
+          embeddingHash: oldHash,
+          archivedAt,
+        };
+        newHistoryJson = JSON.stringify([entry, ...(prev ?? [])].slice(0, keepCount));
+      }
+    }
+
+    const hasNewHistory = newHistoryJson !== null;
+
+    await session.run(
+      `MERGE (n:${label} {id: $id})
        SET n.name = $name,
            n.description = $description,
            n.content = $content,
@@ -90,15 +111,15 @@ export async function upsertNode(
            n.stalenessScore = COALESCE($stalenessScore, 0.0),
            n.importanceScore = COALESCE($importanceScore, 0.0),
            n.embeddingHash = CASE
-             WHEN evolvableApplied THEN null
+             WHEN $hasNewHistory THEN null
              ELSE COALESCE($newContentHash, n.embeddingHash)
            END,
            n.embedding = CASE
-             WHEN evolvableApplied THEN null
+             WHEN $hasNewHistory THEN null
              ELSE n.embedding
            END,
            n.embeddingHistory = CASE
-             WHEN evolvableApplied THEN newHistory
+             WHEN $hasNewHistory THEN $newHistoryJson
              ELSE COALESCE(n.embeddingHistory, [])
            END,
            n.validTo = $validTo,
@@ -125,8 +146,8 @@ export async function upsertNode(
         supersededBy: node.supersededBy ?? null,
         embeddingModel: node.embeddingModel ?? null,
         newContentHash,
-        archivedAt,
-        keepCount,
+        newHistoryJson,
+        hasNewHistory,
       },
     );
   } finally {

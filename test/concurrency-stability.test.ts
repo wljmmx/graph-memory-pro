@@ -139,66 +139,65 @@ describe("v2.3.2 S1: preheatProjection 并发互斥", () => {
 // ─── S4: upsertNode archiveKeepCount 配置化 ──────────────────────
 
 describe("v2.3.2 S4: upsertNode archiveKeepCount 从 cfg 读取", () => {
-  it("未传 cfg 时 keepCount 默认 3（向后兼容）", async () => {
+  /**
+   * v2.4.0: upsertNode 归档逻辑移到应用层，embeddingHistory 以 JSON 字符串写入。
+   *   这里预置一个"旧节点 + 不同 hash + N 条历史"，触发归档后断言
+   *   JSON history 长度 == min(keepCount, 1 + N)，从而验证 keepCount 从 cfg 读取。
+   */
+  function makeHistory(n: number): any[] {
+    return Array.from({ length: n }, (_, i) => ({
+      embedding: [i], embeddingModel: "m", embeddingHash: `h${i}`, archivedAt: i,
+    }));
+  }
+
+  async function runUpsert(keepCountCfg?: number, historyCount = 6) {
     const calls: any[] = [];
+    const oldRecord = {
+      get(key: string) {
+        switch (key) {
+          case "oldHash": return "different-old-hash";
+          case "oldEmbedding": return [0.1, 0.2, 0.3];
+          case "oldModel": return "m";
+          case "oldHistory": return makeHistory(historyCount);
+          default: return null;
+        }
+      },
+    };
     const session = {
-      async run(query: string, params: Record<string, any> = {}) {
-        calls.push({ query, params });
-        return { records: [], summary: { counters: { upserts: () => 1 } } };
+      async run(_query: string, params: Record<string, any> = {}) {
+        calls.push({ query: _query, params });
+        return { records: [oldRecord], summary: { counters: { upserts: () => 1 } } };
       },
       async close() {},
     };
     const driver = { session: () => session, async close() {} } as any;
-
-    await upsertNode(driver, {
+    const node = {
       id: "n1", type: "TASK", name: "n", description: "d", content: "c",
       status: "active", pagerank: 0, validatedCount: 0, createdAt: 1, updatedAt: 1,
-    } as any);
+    } as any;
+    const cfg = keepCountCfg !== undefined ? { evolvableEmbedding: { archiveKeepCount: keepCountCfg } } : undefined;
+    await upsertNode(driver, node, cfg);
+    return calls;
+  }
 
-    // 默认 keepCount = 3
-    expect(calls[0].params.keepCount).toBe(3);
-    // Cypher 使用参数化切片
-    expect(calls[0].query).toContain("[..$keepCount]");
+  it("未传 cfg 时 keepCount 默认 3（向后兼容）", async () => {
+    const calls = await runUpsert();
+    // 读旧节点 + MERGE 写
+    expect(calls).toHaveLength(2);
+    const history = JSON.parse(calls[1].params.newHistoryJson);
+    expect(history).toHaveLength(3);
   });
 
   it("传 cfg.evolvableEmbedding.archiveKeepCount=5 时 keepCount=5", async () => {
-    const calls: any[] = [];
-    const session = {
-      async run(query: string, params: Record<string, any> = {}) {
-        calls.push({ query, params });
-        return { records: [], summary: { counters: { upserts: () => 1 } } };
-      },
-      async close() {},
-    };
-    const driver = { session: () => session, async close() {} } as any;
-
-    const cfg = { evolvableEmbedding: { archiveKeepCount: 5 } } as any;
-    await upsertNode(driver, {
-      id: "n1", type: "TASK", name: "n", description: "d", content: "c",
-      status: "active", pagerank: 0, validatedCount: 0, createdAt: 1, updatedAt: 1,
-    } as any, cfg);
-
-    expect(calls[0].params.keepCount).toBe(5);
+    const calls = await runUpsert(5);
+    const history = JSON.parse(calls[1].params.newHistoryJson);
+    expect(history).toHaveLength(5);
   });
 
   it("cfg.archiveKeepCount=1 时 keepCount=1", async () => {
-    const calls: any[] = [];
-    const session = {
-      async run(query: string, params: Record<string, any> = {}) {
-        calls.push({ query, params });
-        return { records: [], summary: { counters: { upserts: () => 1 } } };
-      },
-      async close() {},
-    };
-    const driver = { session: () => session, async close() {} } as any;
-
-    const cfg = { evolvableEmbedding: { archiveKeepCount: 1 } } as any;
-    await upsertNode(driver, {
-      id: "n1", type: "SKILL", name: "n", description: "d", content: "c",
-      status: "active", pagerank: 0, validatedCount: 0, createdAt: 1, updatedAt: 1,
-    } as any, cfg);
-
-    expect(calls[0].params.keepCount).toBe(1);
+    const calls = await runUpsert(1);
+    const history = JSON.parse(calls[1].params.newHistoryJson);
+    expect(history).toHaveLength(1);
   });
 });
 

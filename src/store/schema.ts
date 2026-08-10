@@ -185,7 +185,10 @@ export function recordToNode(rec: Node): GmNode | null {
     embeddingModel: p.embeddingModel,
     // v2.1.2 第三批 R-4
     embeddingHash: p.embeddingHash,
-    embeddingHistory: Array.isArray(p.embeddingHistory) ? p.embeddingHistory : undefined,
+    // v2.4.0: embeddingHistory 以 JSON 字符串存储（Neo4j 属性不支持 List<Map>），读取时反序列化
+    embeddingHistory: typeof p.embeddingHistory === "string"
+      ? (() => { try { return JSON.parse(p.embeddingHistory); } catch { return undefined; } })()
+      : (Array.isArray(p.embeddingHistory) ? p.embeddingHistory : undefined),
   };
 }
 

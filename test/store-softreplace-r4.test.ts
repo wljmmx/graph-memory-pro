@@ -49,23 +49,29 @@ function makeNode(overrides: Partial<GmNode> = {}): GmNode {
 // ═══════════════════════════════════════════════════════════════
 
 describe("upsertNode R-4 可进化嵌入", () => {
+  // v2.4.0: upsertNode 改为两步（读旧节点 → 应用层归档 → MERGE 写），
+  //   embeddingHistory 以 JSON 字符串存储（Neo4j 属性不支持 List<Map>）。
+  //   calls[0] = OPTIONAL MATCH 读旧节点；calls[1] = MERGE + SET 主写。
+  const writeCall = (calls: any[]) => calls[1];
+
   it("1. 新节点（无旧节点记录）：不触发归档，正常 MERGE", async () => {
     const driver = mockDriver() as any;
-    // 新实现：单条 Cypher 用 OPTIONAL MATCH 读旧节点，old 为 null → 跳过归档分支
+    // 第一步读旧节点返回空 → row 为 null → 不归档
     driver.queueResult([]);
 
     const node = makeNode({ id: "new-node-1" });
     await upsertNode(driver, node);
 
     const calls = driver.getAllRunCalls();
-    // 单条 Cypher（OPTIONAL MATCH + CASE WHEN + MERGE）
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2);
     expect(calls[0].query).toContain("OPTIONAL MATCH");
-    expect(calls[0].query).toContain("MERGE");
-    // 不应出现单独的归档 SET（n.embedding = null）
-    expect(calls[0].query).not.toContain("n.embedding = null");
-    // evolvableApplied=false → newContentHash = contentHash(node)
-    expect(calls[0].params.newContentHash).toBe(contentHash(node));
+    const w = writeCall(calls);
+    expect(w.query).toContain("MERGE");
+    // 不触发归档 → hasNewHistory=false，newHistoryJson=null
+    expect(w.params.hasNewHistory).toBe(false);
+    expect(w.params.newHistoryJson).toBeNull();
+    // 写入新 hash
+    expect(w.params.newContentHash).toBe(contentHash(node));
   });
 
   it("2. 旧节点 + content 相同（hash 相同）：不触发归档", async () => {
@@ -73,79 +79,81 @@ describe("upsertNode R-4 可进化嵌入", () => {
     const node = makeNode({ id: "node-same", content: "same-content" });
     const sameHash = contentHash(node);
     driver.queueResult([{
-      embeddingHash: sameHash,
-      embedding: [0.1, 0.2, 0.3],
-      embeddingModel: "m1",
-      embeddingHistory: [],
+      oldHash: sameHash,
+      oldEmbedding: [0.1, 0.2, 0.3],
+      oldModel: "m1",
+      oldHistory: [],
     }]);
 
     await upsertNode(driver, node);
 
     const calls = driver.getAllRunCalls();
-    // 单条 Cypher，无单独归档 SET
-    expect(calls).toHaveLength(1);
-    expect(calls[0].query).not.toContain("n.embedding = null");
-    // hash 相同 → evolvableApplied=false → 写入新 hash（=旧 hash）
-    expect(calls[0].params.newContentHash).toBe(sameHash);
+    const w = writeCall(calls);
+    // hash 相同 → 不归档
+    expect(w.params.hasNewHistory).toBe(false);
+    expect(w.params.newHistoryJson).toBeNull();
+    expect(w.params.newContentHash).toBe(sameHash);
   });
 
   it("3. 旧节点 + content 变化 + 旧 embedding 存在：归档并清空 embedding", async () => {
     const driver = mockDriver() as any;
     const node = makeNode({ id: "node-changed", content: "new-content-v2" });
     driver.queueResult([{
-      embeddingHash: "old-different-hash",
-      embedding: [0.1, 0.2, 0.3],
-      embeddingModel: "old-model",
-      embeddingHistory: [],
+      oldHash: "old-different-hash",
+      oldEmbedding: [0.1, 0.2, 0.3],
+      oldModel: "old-model",
+      oldHistory: [],
     }]);
 
     await upsertNode(driver, node);
 
     const calls = driver.getAllRunCalls();
-    // 新实现：单条 Cypher 同时处理归档和 MERGE（OPTIONAL MATCH + CASE WHEN + MERGE）
-    expect(calls).toHaveLength(1);
-
-    // 归档逻辑在服务端 CASE WHEN 中完成，客户端断言 Cypher 结构
+    expect(calls).toHaveLength(2);
     expect(calls[0].query).toContain("OPTIONAL MATCH");
-    expect(calls[0].query).toContain("CASE");
-    expect(calls[0].query).toContain("MERGE");
-    expect(calls[0].query).toContain("newHistory");
-    // 新 hash 写入
-    expect(calls[0].params.newContentHash).toBe(contentHash(node));
-    expect(calls[0].params.id).toBe("node-changed");
-    // archivedAt 参数存在（>0）
-    expect(calls[0].params.archivedAt).toBeGreaterThan(0);
+    const w = writeCall(calls);
+    expect(w.query).toContain("MERGE");
+    // 触发归档 → hasNewHistory=true，newHistoryJson 为 JSON 字符串
+    expect(w.params.hasNewHistory).toBe(true);
+    expect(typeof w.params.newHistoryJson).toBe("string");
+    const history = JSON.parse(w.params.newHistoryJson);
+    expect(history).toHaveLength(1);
+    expect(history[0].embeddingHash).toBe("old-different-hash");
+    expect(history[0].embeddingModel).toBe("old-model");
+    expect(history[0].archivedAt).toBeGreaterThan(0);
+    // 新 hash 写入参数仍存在
+    expect(w.params.newContentHash).toBe(contentHash(node));
+    expect(w.params.id).toBe("node-changed");
   });
 
   it("4. 旧节点 + content 变化 + 无旧 embedding：不触发归档", async () => {
     const driver = mockDriver() as any;
     const node = makeNode({ id: "node-no-emb", content: "changed-content" });
     driver.queueResult([{
-      embeddingHash: "old-hash",
-      embedding: null,        // 无旧嵌入
-      embeddingModel: null,
-      embeddingHistory: [],
+      oldHash: "old-hash",
+      oldEmbedding: null,     // 无旧嵌入
+      oldModel: null,
+      oldHistory: [],
     }]);
 
     await upsertNode(driver, node);
 
     const calls = driver.getAllRunCalls();
-    // 单条 Cypher，无单独归档 SET（因 oldEmbedding 为 null 不满足归档条件）
-    expect(calls).toHaveLength(1);
-    expect(calls[0].query).not.toContain("n.embedding = null");
-    // evolvableApplied=false → 写入新 hash
-    expect(calls[0].params.newContentHash).toBe(contentHash(node));
+    const w = writeCall(calls);
+    // oldEmbedding 为 null → 不满足归档条件
+    expect(w.params.hasNewHistory).toBe(false);
+    expect(w.params.newHistoryJson).toBeNull();
+    expect(w.params.newContentHash).toBe(contentHash(node));
   });
 
   it("5. embeddingHistory 归档保留最近 3 条（archiveKeepCount=3）", async () => {
     const driver = mockDriver() as any;
     const node = makeNode({ id: "node-trim", content: "fresh-content" });
     driver.queueResult([{
-      embeddingHash: "old-hash",
-      embedding: [0.9, 0.8],
-      embeddingModel: "old-model",
+      oldHash: "old-hash",
+      oldEmbedding: [0.9, 0.8],
+      oldModel: "old-model",
       // 已有 3 条历史（最旧 → 最新）
-      embeddingHistory: [
+      oldHistory: [
         { embedding: [1, 2], embeddingModel: "m1", embeddingHash: "h1", archivedAt: 1000 },
         { embedding: [3, 4], embeddingModel: "m2", embeddingHash: "h2", archivedAt: 2000 },
         { embedding: [5, 6], embeddingModel: "m3", embeddingHash: "h3", archivedAt: 3000 },
@@ -155,14 +163,13 @@ describe("upsertNode R-4 可进化嵌入", () => {
     await upsertNode(driver, node);
 
     const calls = driver.getAllRunCalls();
-    // 单条 Cypher，归档在服务端 CASE WHEN 中完成
-    expect(calls).toHaveLength(1);
-    // v2.3.2 S4: 服务端 trim 到 archiveKeepCount 条（参数化 $keepCount，默认 3）
-    expect(calls[0].query).toContain("newHistory");
-    expect(calls[0].query).toContain("[..$keepCount]");
-    expect(calls[0].params.keepCount).toBe(3);
-    // archivedAt 参数存在
-    expect(calls[0].params.archivedAt).toBeGreaterThan(0);
+    const w = writeCall(calls);
+    // 触发归档
+    expect(w.params.hasNewHistory).toBe(true);
+    const history = JSON.parse(w.params.newHistoryJson);
+    // 新条目 + 旧 3 条 → trim 到 keepCount=3
+    expect(history).toHaveLength(3);
+    expect(history[0].embeddingHash).toBe("old-hash");
   });
 });
 
