@@ -31,6 +31,7 @@ import { ensureSchema, getNodeCount, getEdgeCount, searchNodes, upsertNode, find
 import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
 import { runMaintenance, type GraphHealthReport } from "./src/graph/maintenance.ts";
+import { resolveBenchmarkDataDir } from "./src/benchmark/dataDir.ts";
 import { reEmbedNodes } from "./src/graph/reembed.ts";
 import { setExternalLogger, createLogger } from "./src/logger.ts";
 import { setTimingEnabled } from "./src/timing.ts";
@@ -1585,7 +1586,7 @@ export default definePluginEntry({
             maxCases: params.maxCases ?? _cfg.benchmark?.maxCases ?? 0,
             buildGraph: params.buildGraph ?? _cfg.benchmark?.buildGraph ?? true,
             caseTimeoutMs: _cfg.benchmark?.caseTimeoutMs ?? 30_000,
-            dataDir: _cfg.benchmark?.dataDir,
+            dataDir: resolveBenchmarkDataDir(undefined),
             llm: _llm ?? undefined,
             embedFn: _embed ?? undefined,
           });
@@ -1777,6 +1778,7 @@ export type { MigrationResult } from "./src/graph/reembed.js";
 
 // ─── v2.1.2 第五批 Benchmark + 自主调优 Re-exports ─────────
 export { runBenchmark, formatAggregateReport } from "./src/benchmark/runner.ts";
+export { resolveBenchmarkDataDir, readBenchmarkDataDirFromOpenclaw, DEFAULT_BENCHMARK_DATA_DIR } from "./src/benchmark/dataDir.ts";
 export type { BenchmarkOptions, BenchmarkRunResult } from "./src/benchmark/runner.ts";
 export {
   computeP1, computeP3, computeMRR, computeF1, computeP99Latency, computeAvgTokenEstimate,
