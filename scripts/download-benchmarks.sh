@@ -15,7 +15,7 @@
 #   - LoCoMo:          https://github.com/snap-research/locomo  (locomo10.json)
 #   - LongMemEval:     https://github.com/xiaowu0162/LongMemEval
 #   - LongMemEval-V2:  https://github.com/xiaowu0162/LongMemEval-V2
-#                      HuggingFace: xiaowu0162/longmemeval-v2
+#                      HuggingFace: xiaowu0162/longmemeval-v2（国内走 hf-mirror.com 镜像）
 #                      （questions.jsonl / trajectories.jsonl / haystacks/*.json）
 #
 # LongMemEval-V2 说明：
@@ -74,10 +74,11 @@ fi
 
 # ── LongMemEval-V2 ──
 # 官方 HuggingFace 数据集: xiaowu0162/longmemeval-v2
-# 核心文件直链（resolve/main/ 指向 main 分支最新快照）：
+# 国内网络请使用 HFAI 镜像 hf-mirror.com（已设为默认），海外可改回官方域名。
+# 核心文件直链：
 #   questions.jsonl / trajectories.jsonl / haystacks/lme_v2_{small,medium}.json
 # 截图归档不下载（体积巨大，文本图谱评测不依赖）。
-HF_BASE="https://huggingface.co/datasets/xiaowu0162/longmemeval-v2/resolve/main"
+HF_BASE="${GM_HF_BASE:-https://hf-mirror.com/datasets/xiaowu0162/longmemeval-v2/resolve/main}"
 V2_DIR="$DATA_DIR/longmemeval-v2"
 
 if [ "$TARGET" = "all" ] || [ "$TARGET" = "longmemeval-v2" ]; then
