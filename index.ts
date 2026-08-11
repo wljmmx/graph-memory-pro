@@ -540,6 +540,15 @@ export function registerExternalDriver(driver: Driver): void {
   log.info("external driver registered via registerExternalDriver()");
 }
 
+/**
+ * 返回模块级 Recaller 单例(A)，供外部插件（如 lcm-graph-extra）复用，
+ * 避免各自 new Recaller 造成双实例 / 关联矩阵 M 分叉。
+ * 未初始化时返回 null（调用方应降级或稍后重试）。
+ */
+export function getRecaller(): Recaller | null {
+  return _recaller;
+}
+
 // 在模块加载时触发自动启动（不阻塞模块导入）
 log.info("module loaded, auto-start scheduled");
 autoStartApiServer();
