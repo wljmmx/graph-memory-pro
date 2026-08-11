@@ -549,6 +549,17 @@ export function getRecaller(): Recaller | null {
   return _recaller;
 }
 
+/**
+ * 返回模块级生效配置(GmConfig)，即 gm-pro 从 openclaw.json
+ * `plugins.entries["graph-memory-pro"].config` 读取并填充默认值后实际使用的配置。
+ * 供外部插件（如 lcm-graph-extra）复用，避免各自再维护一套重复的 Judge /
+ * AssociationMatrix / Embedding 等参数（默认值易漂移）。
+ * 未初始化时返回 null。
+ */
+export function getEffectiveConfig(): GmConfig | null {
+  return _cfg;
+}
+
 // 在模块加载时触发自动启动（不阻塞模块导入）
 log.info("module loaded, auto-start scheduled");
 autoStartApiServer();
