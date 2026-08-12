@@ -76,4 +76,34 @@ describe("buildSystemPromptAddition", () => {
     expect(result).toContain("gm_search");
     expect(result).toContain("gm_record");
   });
+
+  // v2.4.0 点3: 标准格式化输出约束
+  it("默认注入 output policy（简洁+贴近原文）", () => {
+    const result = buildSystemPromptAddition({
+      selectedNodes: [{ type: "SKILL", src: "active" }],
+      edgeCount: 0,
+    });
+    expect(result).toContain("Output policy");
+    expect(result).toContain("Be concise");
+    expect(result).toContain("Preserve the original wording");
+  });
+
+  it("outputFormat.enabled=false 时不注入 output policy", () => {
+    const result = buildSystemPromptAddition({
+      selectedNodes: [{ type: "SKILL", src: "active" }],
+      edgeCount: 0,
+      outputFormat: { enabled: false },
+    });
+    expect(result).not.toContain("Output policy");
+  });
+
+  it("outputFormat 仅打开贴近原文时省略简洁要求", () => {
+    const result = buildSystemPromptAddition({
+      selectedNodes: [{ type: "SKILL", src: "active" }],
+      edgeCount: 0,
+      outputFormat: { concise: false, faithful: true },
+    });
+    expect(result).toContain("Preserve the original wording");
+    expect(result).not.toContain("Be concise");
+  });
 });

@@ -10,15 +10,17 @@ import {
   searchNodes, vectorSearchWithScore,
   graphWalk,
   communityVectorSearchWithReps,
-  saveVector, getVectorHash, computeEmbeddingHash,
+  getVectorHash, computeEmbeddingHash,
   upsertFeedback,
 } from "../store/store.ts";
+import { embedNode } from "../store/embed-helper.ts";
 import { personalizedPageRank, preheatProjection } from "../graph/pagerank.ts";
 import { logPhase, isTimingEnabled, printAllDistributions, resetAllDistributions } from "../timing.ts";
 import { getCircuitBreaker } from "../engine/circuit-breaker.ts";
 import { QueryCache } from "./query-cache.ts";
 import { JudgeManager } from "./judge.ts";
 import { AssociationMatrix } from "./association-matrix.ts";
+import { temporalRecency, combineScore, computeChunkSimilarities } from "./rerank.ts";
 import { createLogger } from "../logger.ts";
 
 const log = createLogger("recaller");
@@ -304,6 +306,11 @@ export class Recaller {
   ): Promise<RecallResult> {
     const tPrecise = Date.now();
 
+    // v2.4.0 点5: 多阶段检索 —— 先图关系筛选候选，再向量相似度排序
+    if (this.cfg.recall?.multiStage && (precomputedVec?.length || this.embed)) {
+      return this.recallMultiStage(query, limit, precomputedVec);
+    }
+
     // v2.3.1 性能优化: FTS 搜索 与 向量搜索 并行执行（无数据依赖）。
     // 旧实现串行：fts_search → vec_search，多耗费一次网络往返。
     const tFts = Date.now();
@@ -403,6 +410,72 @@ export class Recaller {
     return { nodes: finalNodes, edges, tokenEstimate: finalNodes.length * 50 + edges.length * 20 };
   }
 
+  /**
+   * v2.4.0 点5: 多阶段检索
+   *
+   * Stage 1（图关系筛选）：FTS 种子 → graphWalk 候选邻域，仅保留与查询在图上相关的节点；
+   * Stage 2（向量相似度排序）：在候选集内用 query 向量做余弦相似度（支持分块向量），
+   *   再结合时序新鲜度 / 重要性 / 过时惩罚综合重排，减少全局向量搜索带来的无关节点干扰。
+   */
+  private async recallMultiStage(
+    query: string,
+    limit: number,
+    precomputedVec?: number[],
+  ): Promise<RecallResult> {
+    const tMulti = Date.now();
+
+    // 获取 query 向量（优先复用入口预计算）
+    let vec: number[];
+    if (precomputedVec?.length) {
+      vec = precomputedVec;
+    } else {
+      vec = await this.embed!(query);
+    }
+    if (!vec.length) return { nodes: [], edges: [], tokenEstimate: 0 };
+
+    // Stage 1: FTS 种子 → 图邻域候选
+    const tFts = Date.now();
+    const seeds = await searchNodes(this.driver, query, limit);
+    logPhase("multi_stage_fts", Date.now() - tFts, { seeds: seeds.length });
+    if (seeds.length === 0) return { nodes: [], edges: [], tokenEstimate: 0 };
+
+    const seedIds = seeds.map(n => n.id);
+    const tGw = Date.now();
+    const walked = await graphWalk(this.driver, seedIds, this.cfg.recallMaxDepth);
+    let candidates = walked.nodes;
+    if (candidates.length === 0) {
+      candidates = seeds;
+    }
+    logPhase("multi_stage_graph_filter", Date.now() - tGw, { candidates: candidates.length });
+
+    // Stage 2: 候选集内向量相似度 + 综合重排
+    const sims = computeChunkSimilarities(vec, candidates);
+    const now = Date.now();
+    const temporalWeight = this.cfg.recall?.temporalWeight ?? 0.3;
+    const scored = candidates.map(n => {
+      const structure = n.importanceScore ?? n.pagerank ?? 0;
+      const score = combineScore({
+        vectorSim: sims.get(n.id) ?? 0,
+        importance: structure,
+        pagerank: n.pagerank,
+        staleness: n.stalenessScore ?? 0,
+        recency: temporalRecency(n, now),
+        temporalWeight,
+      });
+      return { node: n, score };
+    });
+    scored.sort((a, b) => b.score - a.score);
+
+    const finalNodes = scored.slice(0, limit).map(s => s.node);
+    const finalIds = new Set(finalNodes.map(n => n.id));
+    const edges = (walked.edges ?? []).filter(e =>
+      finalIds.has(e.fromId) && finalIds.has(e.toId)
+    );
+
+    logPhase("recall_multi_stage", Date.now() - tMulti, { finalNodes: finalNodes.length });
+    return { nodes: finalNodes, edges, tokenEstimate: finalNodes.length * 50 + edges.length * 20 };
+  }
+
   private async recallGeneralized(
     query: string,
     limit: number,
@@ -497,7 +570,11 @@ export class Recaller {
     //   - 高过时节点（stalenessScore > threshold）排到末尾
     //   - 同 staleness 等级按 score × importanceScore × (1 - stalenessScore) 降序
     //   - 旧版本（无 importanceScore）回退到 pagerank
+    // v2.4.0 点4: 引入时序权重 —— 结合节点新鲜度（temporalRecency）做时序衰减，
+    //   避免过期（validTo 在过去 / superseded）或冲突（transitional）节点被错误排前。
     const stalenessThreshold = this.cfg?.staleness?.threshold ?? 0.7;
+    const temporalWeight = this.cfg?.recall?.temporalWeight ?? 0.3;
+    const now = Date.now();
     nodes.sort((x, y) => {
       const sx = x.stalenessScore ?? 0;
       const sy = y.stalenessScore ?? 0;
@@ -510,9 +587,19 @@ export class Recaller {
       const iy = y.importanceScore ?? 0;
       const wx = ix * (1 - sx);
       const wy = iy * (1 - sy);
-      // 优先 importance 加权；若均无 importanceScore → 回退 pagerank
-      if (wx === 0 && wy === 0) return y.pagerank - x.pagerank;
-      return wy - wx;
+      let base: number;
+      if (wx === 0 && wy === 0) {
+        base = 0;
+      } else {
+        base = wy - wx;
+      }
+      // v2.4.0 点4: 时序权重 —— 新鲜度加权，过期/冲突节点显著降权
+      const rx = temporalRecency(x, now);
+      const ry = temporalRecency(y, now);
+      const temporalDiff = (ry - rx) * temporalWeight;
+      // 顶点顺序：基础分（importance/过时）优先，同分时按时序新鲜度
+      if (base !== 0) return base + temporalDiff;
+      return temporalDiff !== 0 ? temporalDiff : y.pagerank - x.pagerank;
     });
 
     logPhase("merge_results", Date.now() - tMerge, { nodes: nodes.length, edges: edges.size });
@@ -531,11 +618,14 @@ export class Recaller {
     if (node.embedding && Array.isArray(node.embedding) && node.embedding.length > 0 && existingHash === hash) return;
     try {
       const tSync = Date.now();
-      // 嵌入文本使用截断格式（与 reEmbedNodes 一致），但 hash 使用全量格式
-      const text = node.name + ": " + node.description + "\n" + node.content.slice(0, 500);
-      const vec = await this.embed(text);
+      // v2.4.0 点2/点6: 统一处理记忆切片长度与长文本分段嵌入
+      await embedNode(this.driver, this.embed, node.id, {
+        name: node.name,
+        description: node.description,
+        content: node.content,
+        embeddingModel: node.embeddingModel,
+      }, this.cfg);
       logPhase("vec_embed", Date.now() - tSync, { context: "syncEmbed" });
-      if (vec.length) await saveVector(this.driver, node.id, vec, hash, node.embeddingModel);
     } catch {}
   }
 }

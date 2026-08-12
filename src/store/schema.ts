@@ -189,6 +189,9 @@ export function recordToNode(rec: Node): GmNode | null {
     embeddingHistory: typeof p.embeddingHistory === "string"
       ? (() => { try { return JSON.parse(p.embeddingHistory); } catch { return undefined; } })()
       : (Array.isArray(p.embeddingHistory) ? p.embeddingHistory : undefined),
+    // v2.4.0 点6: 长文本分块向量/文本（数组的数组）
+    chunkTexts: Array.isArray(p.chunkTexts) ? p.chunkTexts : undefined,
+    chunkEmbeddings: Array.isArray(p.chunkEmbeddings) ? p.chunkEmbeddings : undefined,
   };
 }
 

@@ -20,7 +20,11 @@ export type TimingPhase =
   | "merge_results"
   | "extract_llm"
   | "recall_cache_hit"
-  | "recall_cache_similar_hit";
+  | "recall_cache_similar_hit"
+  // v2.4.0 点5: 多阶段检索
+  | "multi_stage_fts"
+  | "multi_stage_graph_filter"
+  | "recall_multi_stage";
 
 export interface TimingRecord {
   phase: TimingPhase;

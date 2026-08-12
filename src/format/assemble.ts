@@ -15,11 +15,43 @@ import type { CommunitySummary } from "../types.ts";
 // 每 token 约 4 个英文字符（保守估计）
 const CHARS_PER_TOKEN = 4;
 
+/**
+ * v2.4.0 点3: 标准格式化输出约束
+ *
+ * 为系统提示注入「简洁、贴近原文、减少自由篡改」的输出指导，避免 LLM 自由发挥。
+ * 返回空串（通过 enabled=false 关闭）。
+ */
+export function buildOutputGuidance(cfg?: {
+  enabled?: boolean;
+  concise?: boolean;
+  faithful?: boolean;
+}): string {
+  if (!cfg || cfg.enabled === false) return "";
+  const concise = cfg.concise ?? true;
+  const faithful = cfg.faithful ?? true;
+
+  const parts: string[] = [
+    "",
+    "Output policy:",
+    "- Answer strictly from the <knowledge_graph> and conversation context above.",
+  ];
+  if (faithful) {
+    parts.push("- Preserve the original wording of the source; do not paraphrase or invent details.");
+  }
+  if (concise) {
+    parts.push("- Be concise: state the answer directly, avoid unnecessary elaboration.");
+  }
+  parts.push("- Refer to recalled solutions verbatim when they match the query.");
+  return parts.join("\n");
+}
+
 export function buildSystemPromptAddition(params: {
   selectedNodes: Array<{ type: string; src: "active" | "recalled" }>;
   edgeCount: number;
+  /** v2.4.0 点3: 标准格式化输出约束（简洁/贴近原文/减少自由篡改） */
+  outputFormat?: { enabled?: boolean; concise?: boolean; faithful?: boolean };
 }): string {
-  const { selectedNodes, edgeCount } = params;
+  const { selectedNodes, edgeCount, outputFormat } = params;
   if (selectedNodes.length === 0) return "";
 
   const recalledCount = selectedNodes.filter(n => n.src === "recalled").length;
@@ -63,6 +95,15 @@ export function buildSystemPromptAddition(params: {
       "PATCHES: newer Skill corrects older one — prefer newer",
       "CONFLICTS_WITH: two Skills are mutually exclusive — check conditions",
     );
+  }
+
+  // v2.4.0 点3: 注入标准格式化输出约束（简洁 / 贴近原文 / 减少自由篡改）
+  if (outputFormat?.enabled !== false) {
+    const guidance = buildOutputGuidance({
+      concise: outputFormat?.concise,
+      faithful: outputFormat?.faithful,
+    });
+    if (guidance) parts.push(guidance);
   }
 
   return parts.join("\n");

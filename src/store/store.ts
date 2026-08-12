@@ -62,7 +62,7 @@ export {
 } from "./community.ts";
 
 // ─── 向量索引 ──────────────────────────────────────────────
-export { saveVector, getVectorHash } from "./vector.ts";
+export { saveVector, getVectorHash, saveChunkVectors } from "./vector.ts";
 
 // ─── 消息存储 ──────────────────────────────────────────────
 export {

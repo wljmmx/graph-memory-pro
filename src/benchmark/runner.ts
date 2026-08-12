@@ -23,7 +23,8 @@ import { loadAllDatasets, getBuiltinSampleDataset } from "./datasets.ts";
 import { Extractor } from "../extractor/extract.ts";
 import type { CompleteFn } from "../engine/llm.ts";
 import type { EmbedFn } from "../engine/embed.ts";
-import { upsertNode, upsertEdge, saveVector, computeEmbeddingHash } from "../store/store.ts";
+import { upsertNode, upsertEdge } from "../store/store.ts";
+import { embedNode } from "../store/embed-helper.ts";
 import { getSession } from "../store/db.ts";
 import { withTimeout } from "../utils.ts";
 import { createLogger } from "../logger.ts";
@@ -297,12 +298,11 @@ async function buildGraphFromConversation(
           const breaker = getCircuitBreaker("embed");
           if (breaker.allow()) {
             try {
-              const text = `${pn.name}: ${pn.description}\n${pn.content.slice(0, 500)}`;
-              const vec = await embedFn(text);
-              if (vec && vec.length > 0) {
-                const hash = computeEmbeddingHash(pn.name, pn.description, pn.content);
-                await saveVector(driver, id, vec, hash);
-              }
+              await embedNode(driver, embedFn, id, {
+                name: pn.name,
+                description: pn.description,
+                content: pn.content,
+              });
               breaker.recordSuccess();
             } catch {
               breaker.recordFailure();
@@ -384,12 +384,11 @@ async function buildGraphFromConversation(
         const breaker = getCircuitBreaker("embed");
         if (breaker.allow()) {
           try {
-            const text = `${enode.name}: ${enode.description}\n${enode.content.slice(0, 500)}`;
-            const vec = await embedFn(text);
-            if (vec && vec.length > 0) {
-              const hash = computeEmbeddingHash(enode.name, enode.description, enode.content);
-              await saveVector(driver, id, vec, hash);
-            }
+            await embedNode(driver, embedFn, id, {
+              name: enode.name,
+              description: enode.description,
+              content: enode.content,
+            });
             breaker.recordSuccess();
           } catch {
             breaker.recordFailure();

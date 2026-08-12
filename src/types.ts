@@ -309,6 +309,61 @@ export interface GmConfig {
     host?: string;
     authToken?: string;
   };
+
+  // ── v2.4.0 检索质量与输出增强 ────────────────────────────
+
+  /**
+   * 检索与输出配置（v2.4.0 新增）
+   *
+   * 覆盖：记忆切片长度、长文本分段嵌入、多阶段检索、时序权重、标准格式化输出。
+   */
+  recall?: {
+    /**
+     * 点2：嵌入文本的记忆切片长度（字符数，默认 800）。
+     * 旧版硬编码 500，长描述/内容的尾部关键上下文会被切断。
+     * 仅作用于「嵌入文本」构造（embed 的输入），不改变节点 content 存储。
+     */
+    memorySliceChars?: number;
+
+    /**
+     * 点6：长文本分段嵌入。
+     * enabled=true 时，嵌入文本超过 chunkSize 会按 chunkSize 切分（含 chunkOverlap 重叠），
+     * 每段分别 embed 并保存到 chunkEmbeddings，提升长文本局部匹配能力。
+     */
+    chunking?: {
+      enabled?: boolean;
+      /** 单段字符数（默认 400） */
+      chunkSize?: number;
+      /** 段间重叠字符数（默认 40） */
+      chunkOverlap?: number;
+    };
+
+    /**
+     * 点5：多阶段检索。
+     * enabled=true 时，先通过图关系（FTS 种子 → graphWalk 邻域）筛选候选节点，
+     * 再在候选中做向量相似度排序，减少全局向量搜索带来的无关节点干扰。
+     */
+    multiStage?: boolean;
+
+    /**
+     * 点4：时序权重（0~1，默认 0.3）。
+     * 重排召回结果时，结合节点 validTo/updatedAt 的新鲜度做时序衰减，
+     * 与关联矩阵 M 的关联分共同加权，避免过期/冲突节点被错误排前。
+     */
+    temporalWeight?: number;
+
+    /**
+     * 点3：标准格式化输出。
+     * 为系统提示注入「简洁、贴近原文、减少自由篡改」的输出约束。
+     */
+    outputFormat?: {
+      enabled?: boolean;
+      /** 是否要求简洁（默认 true） */
+      concise?: boolean;
+      /** 是否要求贴近原文表述（默认 true） */
+      faithful?: boolean;
+    };
+  };
 }
 
 export type NodeType = "TASK" | "SKILL" | "EVENT";
@@ -400,6 +455,12 @@ export interface GmNode {
     embeddingHash?: string;
     archivedAt: number;
   }>;
+
+  // ── v2.4.0 长文本分段嵌入（点 6）──────────────
+  /** 分块文本（与 chunkEmbeddings 一一对应） */
+  chunkTexts?: string[];
+  /** 分块向量（每段一个，供多阶段检索做局部相似度细化） */
+  chunkEmbeddings?: number[][];
 
   // ── S-4 层次化社区（v2.1.2 第四批新增）─────────
   /** Level 2 主题 id（社区→主题） */

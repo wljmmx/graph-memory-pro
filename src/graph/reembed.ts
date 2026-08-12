@@ -1,6 +1,7 @@
 import type { Driver } from "neo4j-driver";
 import type { EmbedFn } from "../engine/embed.ts";
-import { computeEmbeddingHash } from "../store/store.ts";
+import type { GmConfig } from "../types.ts";
+import { embedNode } from "../store/embed-helper.ts";
 
 export interface ReEmbedResult {
   totalScanned: number;
@@ -15,6 +16,7 @@ export async function reEmbedNodes(
   embedFn?: EmbedFn,
   batchSize = 50,
   embeddingModel?: string,
+  cfg?: GmConfig,
 ): Promise<ReEmbedResult> {
   if (!embedFn) {
     return { totalScanned: 0, reEmbedded: 0, failed: 0, skipped: 1, durationMs: 0 };
@@ -59,21 +61,14 @@ export async function reEmbedNodes(
               continue;
             }
 
-            const text = name + ": " + desc + "\n" + content.slice(0, 500);
-
-            const vec = await embedFn(text);
-            if (vec && vec.length > 0) {
-              // v2.2.0 fix: embeddingHash 统一使用 computeEmbeddingHash (md5(name|desc|content))
-              await session.run(
-                "MATCH (n:Task|Skill|Event {id: $nodeId})" +
-                " SET n.embedding = $vec, n.embeddingHash = $hash, n.embeddingModel = $model",
-                {
-                  nodeId,
-                  vec,
-                  hash: computeEmbeddingHash(name, desc, content),
-                  model: embeddingModel ?? null,
-                },
-              );
+            // v2.4.0 点2/点6: 通过 embedNode 统一处理记忆切片长度与长文本分段嵌入
+            const vectors = await embedNode(driver, embedFn, nodeId, {
+              name,
+              description: desc,
+              content,
+              embeddingModel: embeddingModel ?? undefined,
+            }, cfg);
+            if (vectors > 0) {
               reEmbedded++;
             } else {
               skipped++;
