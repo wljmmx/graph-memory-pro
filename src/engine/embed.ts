@@ -118,6 +118,30 @@ function createLruCache(capacity: number, ttlMs: number) {
   };
 }
 
+// v2.4.0 P2-9: embed LRU 缓存命中率统计（供 /api/metrics 输出）
+// 键为 baseURL|model，进程级累计，不持久化。
+const _embedCacheStats = new Map<string, { hits: number; misses: number }>();
+function bumpEmbedCacheStat(key: string, hit: boolean): void {
+  const s = _embedCacheStats.get(key) ?? { hits: 0, misses: 0 };
+  if (hit) s.hits++;
+  else s.misses++;
+  _embedCacheStats.set(key, s);
+}
+export interface EmbedCacheStats {
+  cacheKey: string;
+  hits: number;
+  misses: number;
+  hitRate: number;
+}
+export function getEmbedCacheStats(): EmbedCacheStats[] {
+  const out: EmbedCacheStats[] = [];
+  for (const [key, s] of _embedCacheStats) {
+    const total = s.hits + s.misses;
+    out.push({ cacheKey: key, hits: s.hits, misses: s.misses, hitRate: total ? s.hits / total : 0 });
+  }
+  return out;
+}
+
 /**
  * 清洗 baseURL：去除反引号、首尾空格、尾部斜杠
  * 防止 markdown 代码块标记 ` ` 误入 JSON 配置
@@ -178,10 +202,16 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
 
     // v2.3.2 阶段二: 命中缓存直接返回，避免重复调用 Ollama
     // P1-6: 缓存键用文本 hash，减少原始文本键的内存占用
+    const statsKey = cache ? `${baseURL}|${model}` : "";
     const cacheKey = cache ? hash64(text) : null;
     if (cacheKey) {
       const cached = cache!.get(cacheKey);
-      if (cached) return cached;
+      if (cached) {
+        // P2-9: 记录命中率
+        if (statsKey) bumpEmbedCacheStat(statsKey, true);
+        return cached;
+      }
+      if (statsKey) bumpEmbedCacheStat(statsKey, false);
     }
 
     // v2.4.0: acquire 信号量，确保并发不超限（重试在持锁期间复用同一槽位）

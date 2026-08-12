@@ -427,6 +427,12 @@ async function handleMetrics(): Promise<{ status: number; body: string }> {
     lines.push("# HELP graph_memory_association_matrix_history_size M training history samples.");
   lines.push("# TYPE graph_memory_association_matrix_history_size gauge");
   lines.push(`graph_memory_association_matrix_history_size{${labels}} ${amStats.historySize}`);
+
+    // v2.4.0 P2-9: M 更新被 R-3 边际效用拒绝的比例
+    const amDenom = amStats.updatesApplied + amStats.updatesRejected;
+    lines.push("# HELP graph_memory_association_matrix_updates_rejected_ratio Fraction of M updates rejected by R-3 marginal utility [0,1].");
+    lines.push("# TYPE graph_memory_association_matrix_updates_rejected_ratio gauge");
+    lines.push(`graph_memory_association_matrix_updates_rejected_ratio{${labels}} ${amDenom ? amStats.updatesRejected / amDenom : 0}`);
   }
 
   // v2.3.0: LLM token 用量（进程累计）
@@ -487,7 +493,52 @@ async function handleMetrics(): Promise<{ status: number; body: string }> {
       const status = breaker.getStatus();
       lines.push(`graph_memory_circuit_breaker_failures_total{${labels},target="${name}"} ${status.failureCount}`);
     }
+    // v2.4.0 P2-9: 熔断器成功率（LLM/Embedding 等下游调用成功率，按 target 区分）
+    lines.push("# HELP graph_memory_circuit_breaker_success_rate Circuit breaker success rate [0,1].");
+    lines.push("# TYPE graph_memory_circuit_breaker_success_rate gauge");
+    for (const [name, breaker] of breakers) {
+      const status = breaker.getStatus();
+      const total = status.successCount + status.failureCount;
+      lines.push(`graph_memory_circuit_breaker_success_rate{${labels},target="${name}"} ${total ? status.successCount / total : 1}`);
+    }
   } catch { /* breaker 指标获取失败不影响 metrics 输出 */ }
+
+  // v2.4.0 P2-9: embed LRU 缓存命中率（LRU + QueryCache 一并覆盖，
+  // QueryCache 命中率已在上面 cacheStats 段输出）
+  try {
+    const { getEmbedCacheStats } = await import("../engine/embed.ts");
+    const embCache = getEmbedCacheStats();
+    if (embCache.length) {
+      lines.push("# HELP graph_memory_embed_cache_hits_total Embedding LRU cache hits (process cumulative).");
+      lines.push("# TYPE graph_memory_embed_cache_hits_total counter");
+      lines.push(`graph_memory_embed_cache_hits_total{${labels}} ${embCache.reduce((s, c) => s + c.hits, 0)}`);
+
+      lines.push("# HELP graph_memory_embed_cache_misses_total Embedding LRU cache misses (process cumulative).");
+      lines.push("# TYPE graph_memory_embed_cache_misses_total counter");
+      lines.push(`graph_memory_embed_cache_misses_total{${labels}} ${embCache.reduce((s, c) => s + c.misses, 0)}`);
+
+      lines.push("# HELP graph_memory_embed_cache_hit_rate Embedding LRU cache hit rate [0,1].");
+      lines.push("# TYPE graph_memory_embed_cache_hit_rate gauge");
+      for (const c of embCache) {
+        lines.push(`graph_memory_embed_cache_hit_rate{${labels},target="${c.cacheKey}"} ${c.hitRate}`);
+      }
+    }
+  } catch { /* embed cache 统计失败不影响 metrics 输出 */ }
+
+  // v2.4.0 P2-9: 各阶段召回延迟分位数（P50/P95/P99）
+  try {
+    const { getAllLatencyMetrics } = await import("../timing.ts");
+    const lat = getAllLatencyMetrics();
+    if (lat.size) {
+      lines.push("# HELP graph_memory_recall_latency_ms Recall latency percentiles per phase.");
+      lines.push("# TYPE graph_memory_recall_latency_ms gauge");
+      for (const [phase, m] of lat) {
+        lines.push(`graph_memory_recall_latency_ms{${labels},phase="${phase}",quantile="0.5"} ${m.p50 ?? 0}`);
+        lines.push(`graph_memory_recall_latency_ms{${labels},phase="${phase}",quantile="0.95"} ${m.p95 ?? 0}`);
+        lines.push(`graph_memory_recall_latency_ms{${labels},phase="${phase}",quantile="0.99"} ${m.p99 ?? 0}`);
+      }
+    }
+  } catch { /* latency 指标获取失败不影响 metrics 输出 */ }
 
   return { status: 200, body: lines.join("\n") + "\n" };
 }

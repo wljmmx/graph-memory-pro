@@ -144,6 +144,28 @@ export function resetAllDistributions(): void {
   }
 }
 
+// v2.4.0 P2-9: 供 /api/metrics 输出各阶段延迟分位数（P50/P95/P99）
+export interface LatencyPhaseMetrics {
+  count: number;
+  p50: number | null;
+  p95: number | null;
+  p99: number | null;
+}
+
+export function getAllLatencyMetrics(): Map<TimingPhase, LatencyPhaseMetrics> {
+  const out = new Map<TimingPhase, LatencyPhaseMetrics>();
+  for (const [phase, c] of collectors) {
+    if (c.count === 0) continue;
+    out.set(phase, {
+      count: c.count,
+      p50: c.percentile(50),
+      p95: c.percentile(95),
+      p99: c.percentile(99),
+    });
+  }
+  return out;
+}
+
 let _timingEnabled = false;
 
 export function setTimingEnabled(enabled: boolean): void {
