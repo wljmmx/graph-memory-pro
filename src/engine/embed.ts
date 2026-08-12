@@ -73,6 +73,19 @@ interface LruCacheEntry {
 const DEFAULT_EMBED_CACHE_SIZE = 256;
 const DEFAULT_EMBED_CACHE_TTL_MS = 10 * 60 * 1000; // 10min（短于 QueryCache 30min，保证嵌入新鲜度）
 
+// P1-6: LRU 缓存键用文本的 64-bit hash 而非原始文本。
+// 原始文本键在长文本/高频写入场景会占用额外内存，hash 键固定为 16 位十六进制串。
+// 采用 FNV-1a 64-bit（JS 用 BigInt 实现），256 条目下碰撞概率 ≈ 4e-15，可忽略。
+function hash64(text: string): string {
+  let h = 0xcbf29ce484222325n;
+  const prime = 0x100000001b3n;
+  for (let i = 0; i < text.length; i++) {
+    h ^= BigInt(text.charCodeAt(i));
+    h = (h * prime) & 0xffffffffffffffffn;
+  }
+  return h.toString(16);
+}
+
 function createLruCache(capacity: number, ttlMs: number) {
   const map = new Map<string, LruCacheEntry>();
   return {
@@ -164,8 +177,10 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
     }
 
     // v2.3.2 阶段二: 命中缓存直接返回，避免重复调用 Ollama
-    if (cache) {
-      const cached = cache.get(text);
+    // P1-6: 缓存键用文本 hash，减少原始文本键的内存占用
+    const cacheKey = cache ? hash64(text) : null;
+    if (cacheKey) {
+      const cached = cache!.get(cacheKey);
       if (cached) return cached;
     }
 
@@ -227,7 +242,7 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
           }
 
           // v2.3.2 阶段二: 成功后写入 LRU 缓存
-          if (cache) cache.set(text, vec);
+          if (cacheKey) cache!.set(cacheKey, vec);
 
           return vec;
         } catch (err) {

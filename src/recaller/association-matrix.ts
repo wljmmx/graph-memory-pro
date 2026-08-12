@@ -247,19 +247,27 @@ export class AssociationMatrix {
   }
 
   /**
-   * 计算更新方向（梯度）
+   * 应用 Hebbian 梯度 + Adam 更新（P0-1 性能优化）
    *
-   * Hebbian 规则：ΔM[i,j] = η · reward · vec[j] · (out[i])
+   * 原理：Hebbian 梯度是 rank-1 外积
+   *   gradM[i,j] = scale · normalized[j] · out[i] · gain[i] · rowScale[i]
+   *             = rowFactor[i] · normalized[j]
+   *   其中 scale = learningRate · reward，rowFactor[i] = scale · out[i] · gain[i] · rowScale[i]
    *
-   * 简化：对于被使用的节点（reward>0），增强 M 对该 query 的同向投影
+   * 原实现先 computeGrad 构造完整 N×N 梯度数组（N=1024 时 4MB），再 applyUpdate
+   * 全量 Adam 更新，每次 feedback 均产生一次 4MB 分配 + 两遍 O(N²) 遍历。
+   * 本实现利用 rank-1 结构，将 forward + 梯度 + Adam 合并为单遍 O(N²) 遍历，
+   * 逐行直接更新 M，避免构造 gradM 数组（省去 4MB 分配与冗余传递），数学结果与原来完全一致。
    */
-  private computeGrad(
-    queryVec: Float32Array,
-    reward: number,
-  ): { gradM: Float32Array; gradBias: Float32Array } {
+  private applyHebbianUpdate(queryVec: Float32Array, reward: number): void {
+    this.t++;
     const N = this.dim;
-    const gradM = new Float32Array(N * N);
-    const gradBias = new Float32Array(N);
+    const { adamBeta1: b1, adamBeta2: b2 } = this.cfg;
+    const eps = 1e-8;
+
+    // Adam 校正系数
+    const biasCorrection1 = 1 - Math.pow(b1, this.t);
+    const biasCorrection2 = 1 - Math.pow(b2, this.t);
 
     // forward pass（已 normalize 的输入）
     const normalized = new Float32Array(N);
@@ -277,64 +285,36 @@ export class AssociationMatrix {
       out[i] = sum * this.gain[i] * this.rowScale[i];
     }
 
-    // Hebbian 梯度：reward · vec[j] · out[i]
-    // 沿 query 方向增强 → outer(queryVec, out) * reward
+    // Hebbian 更新：ΔM[i,j] = rowFactor[i] · normalized[j]（rank-1 外积）
     const scale = this.cfg.learningRate * reward;
     for (let i = 0; i < N; i++) {
       const rowOffset = i * N;
-      const outI = out[i];
-      const gi = this.gain[i] * this.rowScale[i];
-      for (let j = 0; j < N; j++) {
-        gradM[rowOffset + j] = scale * normalized[j] * outI * gi;
-      }
-      gradBias[i] = scale * outI * gi;
-    }
-    return { gradM, gradBias };
-  }
+      const rowFactor = scale * out[i] * (this.gain[i] * this.rowScale[i]);
 
-  /**
-   * 应用 Adam + Momentum 更新
-   */
-  private applyUpdate(gradM: Float32Array, gradBias: Float32Array): void {
-    this.t++;
-    const N = this.dim;
-    const { adamBeta1: b1, adamBeta2: b2 } = this.cfg;
-    const eps = 1e-8;
-    const mu = this.cfg.momentum;
-
-    // Adam 校正系数
-    const biasCorrection1 = 1 - Math.pow(b1, this.t);
-    const biasCorrection2 = 1 - Math.pow(b2, this.t);
-
-    // 更新 M
-    for (let i = 0; i < N * N; i++) {
-      const g = gradM[i];
-      // 一阶矩（带 momentum）
-      this.mW[i] = b1 * this.mW[i] + (1 - b1) * g;
-      // 二阶矩
-      this.vW[i] = b2 * this.vW[i] + (1 - b2) * g * g;
-      // Adam 校正
-      const mHat = this.mW[i] / biasCorrection1;
-      const vHat = this.vW[i] / biasCorrection2;
-      // Momentum 平滑
-      this.M[i] += this.cfg.learningRate * mHat / (Math.sqrt(vHat) + eps);
-      // 数值稳定：限制单步变化
-      if (this.M[i] > 10) this.M[i] = 10;
-      if (this.M[i] < -10) this.M[i] = -10;
-    }
-    // 更新 bias
-    for (let i = 0; i < N; i++) {
-      const g = gradBias[i];
-      this.mBias[i] = b1 * this.mBias[i] + (1 - b1) * g;
-      this.vBias[i] = b2 * this.vBias[i] + (1 - b2) * g * g;
-      const mHat = this.mBias[i] / biasCorrection1;
-      const vHat = this.vBias[i] / biasCorrection2;
-      this.bias[i] += this.cfg.learningRate * mHat / (Math.sqrt(vHat) + eps);
+      // bias 梯度 g = rowFactor
+      const gb = rowFactor;
+      this.mBias[i] = b1 * this.mBias[i] + (1 - b1) * gb;
+      this.vBias[i] = b2 * this.vBias[i] + (1 - b2) * gb * gb;
+      const mbHat = this.mBias[i] / biasCorrection1;
+      const vbHat = this.vBias[i] / biasCorrection2;
+      this.bias[i] += this.cfg.learningRate * mbHat / (Math.sqrt(vbHat) + eps);
       if (this.bias[i] > 10) this.bias[i] = 10;
       if (this.bias[i] < -10) this.bias[i] = -10;
+
+      // M 行更新：g[i,j] = rowFactor · normalized[j]
+      for (let j = 0; j < N; j++) {
+        const idx = rowOffset + j;
+        const g = rowFactor * normalized[j];
+        this.mW[idx] = b1 * this.mW[idx] + (1 - b1) * g;
+        this.vW[idx] = b2 * this.vW[idx] + (1 - b2) * g * g;
+        const mHat = this.mW[idx] / biasCorrection1;
+        const vHat = this.vW[idx] / biasCorrection2;
+        this.M[idx] += this.cfg.learningRate * mHat / (Math.sqrt(vHat) + eps);
+        // 数值稳定：限制单步变化
+        if (this.M[idx] > 10) this.M[idx] = 10;
+        if (this.M[idx] < -10) this.M[idx] = -10;
+      }
     }
-    // mu 没用到变量，保留为参数（避免 TS 未使用警告）
-    void mu;
   }
 
   /**
@@ -392,9 +372,8 @@ export class AssociationMatrix {
       }
     }
 
-    // 应用更新
-    const { gradM, gradBias } = this.computeGrad(vec, reward);
-    this.applyUpdate(gradM, gradBias);
+    // 应用更新（P0-1: 融合 Hebbian 梯度 + Adam，单遍 O(N²)，无 4MB 梯度分配）
+    this.applyHebbianUpdate(vec, reward);
     this.updateCount++;
 
     // 记录样本

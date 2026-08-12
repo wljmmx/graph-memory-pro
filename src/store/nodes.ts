@@ -14,6 +14,9 @@ import {
   recordToNode,
   recordToEdge,
 } from "./schema.ts";
+import { createLogger } from "../logger.ts";
+
+const log = createLogger("store:nodes");
 
 // ─── 节点 CRUD ──────────────────────────────────────────────
 
@@ -166,6 +169,10 @@ export async function upsertNode(
  *   - 仅写入基本字段，embeddingHash 用 computeEmbeddingHash 计算
  *   - 适用于 extractInBackground 后台提取的批量写入场景
  *
+ * P0-2（可观测性）：批量写入本身不归档旧 embedding，但会对比库中旧 hash 与新的
+ * contentHash：若 content 发生变化，记录一条 warn 日志（含 id / label / 新旧 hash），
+ * 便于排查"旧 embedding 未归档是否因 reEmbedNodes 周期任务未运行/失败而丢失"。
+ *
  * @returns 成功写入的节点数
  */
 export async function batchUpsertNodes(
@@ -193,6 +200,32 @@ export async function batchUpsertNodes(
         embeddingHash: computeEmbeddingHash(n.name, n.description, n.content),
       };
     });
+
+    // P0-2: 读取库中这些 id 的旧 embeddingHash，检测 content 变化（仅日志，不阻塞写）
+    try {
+      const ids = rows.map((r) => r.id);
+      const oldRes = await session.run(
+        `MATCH (n:Task|Skill|Event) WHERE n.id IN $ids
+         RETURN n.id AS id, n.embeddingHash AS hash`,
+        { ids },
+      );
+      const oldByHash = new Map<string | null, string>();
+      for (const rec of oldRes.records) {
+        const id = rec.get("id");
+        if (id != null) oldByHash.set(String(id), rec.get("hash") ?? null);
+      }
+      for (const r of rows) {
+        const oldHash = oldByHash.get(r.id);
+        if (oldHash != null && oldHash !== r.embeddingHash) {
+          log.warn(
+            "Batch upsert: content changed (embedding not archived; see reEmbedNodes)",
+            { id: r.id, label: r.label, oldHash, newHash: r.embeddingHash },
+          );
+        }
+      }
+    } catch {
+      // 对比检测失败不影响主写入流程
+    }
 
     // 按 label 分组（UNWIND 无法动态切换 label）
     const byLabel = new Map<string, typeof rows>();
@@ -413,15 +446,20 @@ export async function graphWalk(
     // v2.3.1 性能优化: 加 LIMIT 限制返回节点数，防止图规模大时返回过多节点
     //       导致后续 PPR 排序开销爆炸。默认 200（recallMaxNodes 通常 ≤ 50，留 4× 余量）。
     const relTypes = "USED_SKILL|SOLVED_BY|REQUIRES|PATCHES|CONFLICTS_WITH|CAUSED_BY|LEADS_TO|RELATES_TO";
+    // P2-7: 在 UNWIND 前用 LIMIT 约束路径数量，避免变量长度遍历产生海量路径后
+    // 再由 COLLECT 一次性 UNWIND 造成的中间结果爆炸。maxPaths 取 maxNodes 的 4 倍
+    //（与 v2.3.1 预留 4× 余量一致），足以覆盖 maxNodes 个去重节点，同时封顶 UNWIND 工作量。
+    const maxPaths = Math.max(1, Math.min(maxNodes * 4, 2000));
     const result = await session.run(
       `MATCH path = (start:Task|Skill|Event)-[r:${relTypes}*1..${depth}]-(end:Task|Skill|Event)
        WHERE start.id IN $seedIds
          AND start.status = 'active'
+       WITH path LIMIT toInteger($maxPaths)
        UNWIND nodes(path) AS n
        UNWIND relationships(path) AS rel
        WITH COLLECT(DISTINCT n)[..$maxNodes] AS nodeList, COLLECT(DISTINCT rel)[..$maxNodes] AS relList
        RETURN nodeList, relList`,
-      { seedIds, maxNodes },
+      { seedIds, maxNodes, maxPaths },
     );
     if (!result.records.length) return { nodes: [], edges: [] };
     const row = result.records[0];
