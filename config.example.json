@@ -9,7 +9,7 @@
     "connectionAcquisitionTimeout": 10000
   },
   "llm": {
-    "$comment": "OpenAI-compatible API。使用 Ollama 时设 baseURL 为 http://localhost:11434/v1（必须含 /v1），apiKey 留空；使用 OpenAI 时设 baseURL 为 https://api.openai.com/v1。注：当插件运行在 OpenClaw 容器内且 api.runtime.llm 可用时，会先探测主会话 provider：本地模型（ollama/lmstudio 等）优先用主会话；云端模型才回退到此处的 llm 配置。maxConcurrency 限制并发请求数（Ollama 默认 1 防级联超时，云端可调高）",
+    "$comment": "OpenAI-compatible API，同时支持 Ollama 原生接口。本地 Ollama 推荐设 baseURL 为 http://localhost:11434（不含 /v1，命中默认端口自动走原生 /api/chat，keep_alive 完整支持）；也可用 http://localhost:11434/v1 走 OpenAI 兼容层。注意：原生路径仅在 baseURL 命中默认端口 11434 时触发，若 Ollama 用自定义端口则请用 /v1 兼容路径。使用 OpenAI 时设 baseURL 为 https://api.openai.com/v1。注：当插件运行在 OpenClaw 容器内且 api.runtime.llm 可用时，会先探测主会话 provider：本地模型（ollama/lmstudio 等）优先用主会话；云端模型才回退到此处的 llm 配置。maxConcurrency 限制并发请求数（Ollama 默认 1 防级联超时，云端可调高）",
     "apiKey": "sk-xxx",
     "$comment_apiKey": "v2.3.3 SEC-2: 生产环境请通过环境变量注入（如 OPENAI_API_KEY），不要硬编码到配置文件。此处仅为示例占位",
     "baseURL": "https://api.openai.com/v1",

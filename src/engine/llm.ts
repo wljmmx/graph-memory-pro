@@ -96,7 +96,9 @@ export function createCompleteFn(config?: LlmConfig): CompleteFn | null {
  * 创建 OpenAI-compatible 补全函数
  *
  * 兼容 OpenAI / Ollama OpenAI-compat (/v1/chat/completions) / 其他兼容服务。
- * Ollama 用户须将 baseURL 设为 "http://localhost:11434/v1"（含 /v1）。
+ * 同时支持 Ollama 原生接口：当 baseURL 命中默认端口 11434 且不含 /v1 时，
+ * 自动走原生 /api/chat 端点（见下方 isOllamaNative 检测），keep_alive 完整支持。
+ * 否则使用 OpenAI 兼容端点 ${baseURL}/chat/completions。
  */
 function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
   const apiKey = config.apiKey || "";

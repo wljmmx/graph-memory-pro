@@ -8,7 +8,7 @@
     "connectionAcquisitionTimeout": 10000
   },
   "llm": {
-    "$comment": "Ollama LLM 端点：baseURL 必须含 /v1；Ollama 用法下 apiKey 替换为空字符串；OpenAI 用户改 baseURL 为 https://api.openai.com/v1 并填 sk-xxx",
+    "$comment": "Ollama LLM 端点：本地 Ollama 推荐 baseURL 用 http://localhost:11434（不含 /v1，命中默认端口自动走原生 /api/chat，keep_alive 完整支持）；也可用 http://localhost:11434/v1 走 OpenAI 兼容层。apiKey 留空字符串。OpenAI 用户改 baseURL 为 https://api.openai.com/v1 并填 sk-xxx",
     "apiKey": "your-llm-api-key-here",
     "baseURL": "http://localhost:11434/v1",
     "model": "qwen2.5:7b",

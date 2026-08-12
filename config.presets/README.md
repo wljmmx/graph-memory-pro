@@ -81,8 +81,11 @@
 
 | 端点 | baseURL | 说明 |
 |------|---------|------|
-| LLM | `http://localhost:11434/v1` | **必须含 `/v1`**（OpenAI 兼容路径）|
-| Embedding | `http://localhost:11434` | **不含 `/v1`**（走原生 `/api/embed`，`embed.ts` 会自动剥离 `/v1`）|
+| LLM | `http://localhost:11434` | **推荐**（不含 `/v1`，命中默认端口 11434 自动走 Ollama 原生 `/api/chat`，keep_alive 完整支持）|
+| LLM | `http://localhost:11434/v1` | 可选（含 `/v1`，走 OpenAI 兼容层 `/chat/completions`）|
+| Embedding | `http://localhost:11434` | 原生 `/api/embed`（`embed.ts` 会自动剥离 `/v1`）|
+
+> LLM 的 /v1 说明：插件通过 `isOllamaNative` 自动检测——baseURL 命中 `localhost:11434` / `127.0.0.1:11434` / `0.0.0.0:11434` 且**不含 `/v1`** 时走 Ollama 原生 `/api/chat`；含 `/v1` 或指向其他地址时走 OpenAI 兼容 `/chat/completions`。两种均支持。**注意**：原生路径仅在默认端口 11434 时触发，若 Ollama 用自定义端口，请使用 `/v1` 兼容路径（否则请求 `/chat/completions` 会 404）。
 
 模型选择约定：
 - LLM 模型须为 chat 模型（如 `qwen2.5:7b`、`llama3.1:8b`）
