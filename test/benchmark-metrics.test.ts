@@ -502,7 +502,7 @@ describe("evaluateCase", () => {
     expect(r.f1).toBeCloseTo(0.25, 5);
   });
 
-  it("F1 与 computeF1 独立调用结果一致（多节点拼接）", () => {
+  it("F1 仅用 top1 节点内容计算（v2.3.7），与 computeF1 独立调用一致", () => {
     const tc = makeCase({
       id: "c12",
       expectedAnswer: "deploy service with docker",
@@ -514,10 +514,9 @@ describe("evaluateCase", () => {
     const recall = makeRecallResult(nodes, 250);
     const r = evaluateCase(tc, recall, 30);
 
-    // 复现 evaluateCase 内部 actualText 构造
-    const expectedActualText = nodes
-      .map(n => `${n.name}: ${n.description ?? ""}`)
-      .join(" ");
+    // v2.3.7: actualText 仅取 top1 节点（不再拼接全部召回节点）
+    const top1 = nodes[0];
+    const expectedActualText = `${top1.name}: ${top1.description ?? ""} ${top1.content ?? ""}`;
     expect(r.f1).toBe(computeF1(tc.expectedAnswer, expectedActualText));
     expect(r.tokenEstimate).toBe(250);
     expect(r.latencyMs).toBe(30);

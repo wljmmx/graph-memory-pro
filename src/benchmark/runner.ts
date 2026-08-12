@@ -27,6 +27,7 @@ import { upsertNode, upsertEdge, saveVector, computeEmbeddingHash } from "../sto
 import { getSession } from "../store/db.ts";
 import { withTimeout } from "../utils.ts";
 import { createLogger } from "../logger.ts";
+import { getCircuitBreaker } from "../engine/circuit-breaker.ts";
 
 const log = createLogger("benchmark");
 
@@ -171,6 +172,9 @@ export async function runBenchmark(
 
     log.info(`running ${dataset.name}: ${cases.length} cases`);
 
+    // v2.3.7: 在评测循环开始前记录数据集耗时起点，计算真实评测耗时（修复旧版耗时≈0 的 bug）
+    const datasetStart = Date.now();
+
     for (const testCase of cases) {
       try {
         const caseStart = Date.now();
@@ -200,7 +204,6 @@ export async function runBenchmark(
       }
     }
 
-    const datasetStart = Date.now();
     const report = buildReport(dataset, caseResults, Date.now() - datasetStart);
     reports.push(report);
     log.info(formatReport(report));
@@ -290,14 +293,24 @@ async function buildGraphFromConversation(
           updatedAt: pn.updatedAt ?? now,
         });
         if (embedFn) {
-          try {
-            const text = `${pn.name}: ${pn.description}\n${pn.content.slice(0, 500)}`;
-            const vec = await embedFn(text);
-            if (vec && vec.length > 0) {
-              const hash = computeEmbeddingHash(pn.name, pn.description, pn.content);
-              await saveVector(driver, id, vec, hash);
+          // v2.3.7: 建图嵌入前检查熔断器，OPEN 时跳过，避免持续请求打垮下游（Ollama server busy）
+          const breaker = getCircuitBreaker("embed");
+          if (breaker.allow()) {
+            try {
+              const text = `${pn.name}: ${pn.description}\n${pn.content.slice(0, 500)}`;
+              const vec = await embedFn(text);
+              if (vec && vec.length > 0) {
+                const hash = computeEmbeddingHash(pn.name, pn.description, pn.content);
+                await saveVector(driver, id, vec, hash);
+              }
+              breaker.recordSuccess();
+            } catch {
+              breaker.recordFailure();
+              /* embedding 失败不阻塞建图 */
             }
-          } catch { /* embedding 失败不阻塞建图 */ }
+          } else {
+            log.warn(`buildGraph: embed circuit OPEN, skip embedding for node ${pn.name}`);
+          }
         }
       }
 
@@ -367,14 +380,24 @@ async function buildGraphFromConversation(
         updatedAt: now,
       });
       if (embedFn) {
-        try {
-          const text = `${enode.name}: ${enode.description}\n${enode.content.slice(0, 500)}`;
-          const vec = await embedFn(text);
-          if (vec && vec.length > 0) {
-            const hash = computeEmbeddingHash(enode.name, enode.description, enode.content);
-            await saveVector(driver, id, vec, hash);
+        // v2.3.7: 同 prebuilt 分支，嵌入前检查熔断器
+        const breaker = getCircuitBreaker("embed");
+        if (breaker.allow()) {
+          try {
+            const text = `${enode.name}: ${enode.description}\n${enode.content.slice(0, 500)}`;
+            const vec = await embedFn(text);
+            if (vec && vec.length > 0) {
+              const hash = computeEmbeddingHash(enode.name, enode.description, enode.content);
+              await saveVector(driver, id, vec, hash);
+            }
+            breaker.recordSuccess();
+          } catch {
+            breaker.recordFailure();
+            /* embedding 失败不阻塞建图 */
           }
-        } catch { /* embedding 失败不阻塞建图 */ }
+        } else {
+          log.warn(`buildGraph: embed circuit OPEN, skip embedding for node ${enode.name}`);
+        }
       }
     }
     for (const eedge of result.edges) {

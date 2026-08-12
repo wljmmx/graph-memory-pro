@@ -236,11 +236,13 @@ export function evaluateCase(
   }
 
   // F1（文本匹配）
-  // v2.3.6: actualText 加入 content，提升 F1 对真实召回质量的敏感度
-  //   旧版仅用 name+description，导致 expectedAnswer 中含 content token 的样本 F1 被严重低估
-  const actualText = recallResult.nodes
-    .map(n => `${n.name}: ${n.description ?? ""} ${n.content ?? ""}`)
-    .join(" ");
+  // v2.3.7: 仅使用 top1 节点内容与期望答案比较。
+  //   旧版把全部召回节点 name+description+content 拼接，导致 precision 被大量无关 token 稀释，
+  //   造成 F1 结构性偏低（1~6%）。改为只取最高分节点，precision/recall 均基于该节点，指标更有区分度。
+  const top1 = recallResult.nodes[0] ?? null;
+  const actualText = top1
+    ? `${top1.name}: ${top1.description ?? ""} ${top1.content ?? ""}`
+    : "";
   const f1 = computeF1(testCase.expectedAnswer, actualText);
 
   return {
