@@ -41,5 +41,6 @@
   "autoTuner": { "enabled": false },
   "mcp": { "enabled": false },
   "benchmark": { "enabled": false },
-  "apiServer": { "enabled": false }
+  "apiServer": { "enabled": false },
+  "recall": { "memorySliceChars": 800, "outputFormat": { "enabled": true, "concise": true, "faithful": true } }
 }

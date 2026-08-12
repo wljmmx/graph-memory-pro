@@ -78,14 +78,27 @@ graph-memory-pro 是**记忆底层引擎**，只做"图内"操作：
 
 **P2-1：结构化日志** — 统一 `createLogger(namespace)` 接口，分级 debug/info/warn/error，环境变量 `GM_LOG_LEVEL` 过滤、`GM_LOG_JSON=true` 输出 JSON 行（便于 Loki/ELK 采集），`setTraceId` 跨模块关联请求链路，`setExternalLogger` 注入 OpenClaw SDK logger。已迁移 maintenance + recall + judge 共 44 处 console 调用。
 
+### v2.4.0 检索质量与输出增强（6 项能力）
+
+针对 benchmark 暴露的检索质量 / 长文本匹配 / 输出篡改问题，新增 `recall` 配置段统一控制：
+
+| 点 | 能力 | 配置 | 说明 |
+|---|---|---|---|
+| 1 | 向量缓存 / 分页 | `queryCache`（已有）| LRU + cosine 相似命中短路，`similarityScanLimit` 限制扫描量，减少重复嵌入与全图遍历 |
+| 2 | 记忆切片长度可调 | `recall.memorySliceChars` | 默认 800，替换旧版硬编码 500，避免长描述/内容尾部关键上下文被切断 |
+| 3 | 标准格式化输出 | `recall.outputFormat` | 为系统提示注入「简洁 / 贴近原文 / 减少自由篡改」policy，减少 LLM 自由发挥 |
+| 4 | 时序权重 | `recall.temporalWeight` | 结合节点 validTo/updatedAt 新鲜度做时序衰减，与关联矩阵 M 共同加权，避免过期/冲突节点被排前 |
+| 5 | 多阶段检索 | `recall.multiStage` | 先 FTS 种子 + graphWalk 图邻域筛选候选，再向量相似度排序，减少全局向量搜索干扰 |
+| 6 | 长文本分段嵌入 | `recall.chunking` | 超长文本按 chunkSize（含重叠）切分逐段 embed，分块向量存 `chunkEmbeddings`，提升长文本局部匹配 |
+
 ### 测试覆盖
-- 17 个单元测试文件，435 个用例（Neo4j mock 基础设施，CI 友好）+ 1 个 smoke test 文件（真实 Neo4j 集成）
-- 覆盖全部 5 批次核心功能 + v2.3.2~v2.3.5 全部新增：稳定性修复 S1–S6 / 性能优化 P2-1~P2-4 / 可观测韧性 P3-1~P3-3 / 安全加固 ERR-1/SEC-1/MCP-1/MCP-2 / 架构优化 ARCH-1/CB-1/SDK-1/SDK-2 / 集成测试 TEST-1
-- 运行方式：`npm test`（单元测试 435）/ `npm run test:smoke`（集成测试，需 Neo4j）
+- 25 个单元测试文件，544 个用例（Neo4j mock 基础设施，CI 友好）+ 1 个 smoke test 文件（真实 Neo4j 集成）
+- 覆盖全部 5 批次核心功能 + v2.3.2~v2.3.5 全部新增 + v2.4.0 检索质量增强（chunk/rerank 纯函数 + 输出格式约束）：稳定性修复 S1–S6 / 性能优化 P2-1~P2-4 / 可观测韧性 P3-1~P3-3 / 安全加固 ERR-1/SEC-1/MCP-1/MCP-2 / 架构优化 ARCH-1/CB-1/SDK-1/SDK-2 / 集成测试 TEST-1
+- 运行方式：`npm test`（单元测试 544）/ `npm run test:smoke`（集成测试，需 Neo4j）
 
 ## 版本
 
-**当前版本：2.3.5**
+**当前版本：2.4.0**
 
 ## 安装
 
@@ -95,7 +108,7 @@ npm install @openclaw/graph-memory-pro
 
 ## 配置
 
-在 `openclaw.json` 中配置（32 项配置项，全部可选）：
+在 `openclaw.json` 中配置（含 v2.4.0 `recall` 段，全部可选）：
 
 ```json
 {
@@ -124,7 +137,14 @@ npm install @openclaw/graph-memory-pro
           "conflictResolution": { "enabled": true },
           "edgeWeights": { "enabled": true, "strengthenFactor": 1.1, "decayFactor": 0.95 },
           "benchmark": { "enabled": false, "maxCases": 50 },
-          "autoTuner": { "enabled": false, "regressionThreshold": 0.02 }
+          "autoTuner": { "enabled": false, "regressionThreshold": 0.02 },
+          "recall": {
+            "memorySliceChars": 800,
+            "chunking": { "enabled": false, "chunkSize": 400, "chunkOverlap": 40 },
+            "multiStage": false,
+            "temporalWeight": 0.3,
+            "outputFormat": { "enabled": true, "concise": true, "faithful": true }
+          }
         }
       }
     }
@@ -132,7 +152,7 @@ npm install @openclaw/graph-memory-pro
 }
 ```
 
-完整配置项参见 [openclaw.plugin.json](openclaw.plugin.json) 的 `configSchema`（32 项，含 v2.2.0 MCP）。
+完整配置项参见 [openclaw.plugin.json](openclaw.plugin.json) 的 `configSchema`（含 v2.2.0 MCP 与 v2.4.0 `recall` 检索质量段）。
 
 ## Agent 工具
 
@@ -252,7 +272,7 @@ const { result } = await res.json();
 
 ```json
 {
-  "version": "2.3.5",
+  "version": "2.4.0",
   "timestamp": "2026-08-07T10:00:00.000Z",
   "total": { "calls": 12, "promptTokens": 1234, "completionTokens": 567, "totalTokens": 1801 },
   "byProvider": { "config-llm": { "calls": 8, "totalTokens": 1200 }, "runtime-ollama": { "calls": 4, "totalTokens": 601 } },
@@ -304,6 +324,7 @@ graph_memory_association_matrix_updates_applied{plugin="graph-memory-pro",versio
 | `embeddingModel` | G-4 | 嵌入模型标识 |
 | `topicId`/`domainId` | S-4 | 层次化社区归属 |
 | `supersededBy` | S-2 | 被哪个新版本替代 |
+| `chunkTexts`/`chunkEmbeddings` | v2.4.0 | 长文本分段嵌入的分块文本与分块向量（点6）|
 
 ### 关系类型
 - `USED_SKILL`：TASK → SKILL
@@ -388,10 +409,12 @@ src/
 │   ├── pagerank.ts       # PageRank
 │   └── reembed.ts        # 批量重嵌入（含 G-4 迁移）
 ├── recaller/
-│   ├── recall.ts         # 召回（含 L-1 M 变换 + I-1 缓存）
+│   ├── recall.ts         # 召回（含 L-1 M 变换 + I-1 缓存 + v2.4.0 多阶段检索/时序权重）
 │   ├── query-cache.ts    # I-1 LRU + cosine 缓存
 │   ├── judge.ts          # I-2 LLM 裁判（Tier 1/2/3 策略分发，v2.2.1）
-│   └── association-matrix.ts  # L-1 关联矩阵 + R-3 边际效用
+│   ├── association-matrix.ts  # L-1 关联矩阵 + R-3 边际效用
+│   ├── chunk.ts          # v2.4.0 长文本分段嵌入工具（点2/点6）
+│   └── rerank.ts         # v2.4.0 时序新鲜度 + 综合排序分（点4/点5）
 ├── evolution/
 │   └── auto-tuner.ts     # R-1 EvolveMem 自主调优
 ├── benchmark/
@@ -413,6 +436,7 @@ src/
 │   ├── feedback.ts       # I-3 反馈持久化（v2.2.1 拆分）
 │   ├── community.ts      # 社区管理（v2.2.1 拆分）
 │   ├── vector.ts         # 向量索引（v2.2.1 拆分）
+│   ├── embed-helper.ts   # v2.4.0 统一嵌入辅助（点2/点6：记忆切片 + 分段嵌入）
 │   └── messages.ts       # 消息存储（v2.2.1 拆分）
 ├── logger.ts             # 结构化日志（v2.2.1：createLogger + 分级 + JSON + traceId）
 ├── timing.ts             # 延迟分布统计
@@ -436,6 +460,7 @@ test/
 ├── engine-llm-embed.test.ts     # LLM/Embedding 引擎测试（v2.2.0）
 ├── recall-perf.test.ts           # 召回性能测试（v2.3.1 新增）
 ├── concurrency-stability.test.ts # 并发稳定性 + P2/P3 补充测试（v2.3.2 新增）
+├── chunk-rerank.test.ts          # v2.4.0 分段嵌入 + 时序权重/综合排序纯函数
 └── extract.test.ts              # 三元组抽取测试（v2.2.0）
 ```
 

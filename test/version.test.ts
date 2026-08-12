@@ -10,7 +10,7 @@ describe("VERSION", () => {
     expect(VERSION).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
-  it("导出版本号为 2.3.6", () => {
-    expect(VERSION).toBe("2.3.6");
+  it("导出版本号为 2.4.0", () => {
+    expect(VERSION).toBe("2.4.0");
   });
 });

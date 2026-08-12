@@ -1,7 +1,7 @@
 {
   "id": "graph-memory-pro",
   "name": "Graph Memory Pro",
-  "version": "2.3.6",
+  "version": "2.4.0",
   "description": "Neo4j 知识图谱记忆引擎：三元组提取 + GDS 图算法 + 向量索引 + 双路径召回。无槽位插件，通过 registerMemoryCorpusSupplement 暴露给 memory-core，工具 + 后台服务模式运行。",
   "author": "Ananas <Wywelljob@gmail.com>",
   "license": "MIT",
@@ -769,6 +769,75 @@
           "authToken": {
             "type": "string",
             "default": ""
+          }
+        }
+      },
+      "recall": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "v2.4.0: 检索质量与输出增强（记忆切片长度 / 长文本分段嵌入 / 多阶段检索 / 时序权重 / 标准格式化输出）。",
+        "properties": {
+          "memorySliceChars": {
+            "type": "integer",
+            "default": 800,
+            "minimum": 1,
+            "description": "点2：嵌入文本的记忆切片长度（字符数，默认 800，旧版硬编码 500）。仅作用于嵌入文本构造，不改变节点 content 存储。"
+          },
+          "chunking": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "点6：长文本分段嵌入。启用后嵌入文本超过 chunkSize 会按 chunkSize 切分（含重叠），每段分别 embed 并保存到 chunkEmbeddings，提升长文本局部匹配能力。",
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "default": false
+              },
+              "chunkSize": {
+                "type": "integer",
+                "default": 400,
+                "minimum": 1,
+                "description": "单段字符数（默认 400）"
+              },
+              "chunkOverlap": {
+                "type": "integer",
+                "default": 40,
+                "minimum": 0,
+                "description": "段间重叠字符数（默认 40）"
+              }
+            }
+          },
+          "multiStage": {
+            "type": "boolean",
+            "default": false,
+            "description": "点5：多阶段检索。启用后先通过图关系（FTS 种子 → graphWalk 邻域）筛选候选节点，再在候选中做向量相似度排序，减少全局向量搜索带来的无关节点干扰。"
+          },
+          "temporalWeight": {
+            "type": "number",
+            "default": 0.3,
+            "minimum": 0,
+            "maximum": 1,
+            "description": "点4：时序权重（0~1，默认 0.3）。重排召回结果时结合节点 validTo/updatedAt 新鲜度做时序衰减，与关联矩阵 M 的关联分共同加权，避免过期/冲突节点被错误排前。"
+          },
+          "outputFormat": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "点3：标准格式化输出。为系统提示注入「简洁、贴近原文、减少自由篡改」的输出约束。",
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "default": true
+              },
+              "concise": {
+                "type": "boolean",
+                "default": true,
+                "description": "是否要求简洁（默认 true）"
+              },
+              "faithful": {
+                "type": "boolean",
+                "default": true,
+                "description": "是否要求贴近原文表述（默认 true）"
+              }
+            }
           }
         }
       }

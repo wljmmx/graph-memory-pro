@@ -18,6 +18,12 @@
 | state | ❌ | ✅ | ✅ |
 | causalEdges | ❌ | ✅ | ✅ |
 | feedback | ❌ | ✅ | ✅ |
+| **v2.4.0 检索质量增强** | | | |
+| memorySliceChars（默认 800）| ✅ | ✅ | ✅（默认值，可调大）|
+| outputFormat（标准格式化输出）| ✅ | ✅ | ✅ |
+| temporalWeight（时序权重）| ✅ | ✅ | ✅（默认 0.3）|
+| chunking（长文本分段嵌入）| ❌ | ❌ | ✅ |
+| multiStage（多阶段检索）| ❌ | ❌ | ✅ |
 | **高级图算法** | | | |
 | hierarchicalCommunity | ❌ | ❌ | ✅ |
 | conflictResolution | ❌ | ❌ | ✅ |

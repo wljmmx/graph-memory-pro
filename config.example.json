@@ -1,5 +1,5 @@
 {
-  "$schema": "Graph Memory Pro v2.3.5 配置示例",
+  "$schema": "Graph Memory Pro v2.4.0 配置示例",
   "$comment": "复制为 config.json 后通过 --config 参数传给 npm run benchmark，或填入 openclaw.json plugins.entries.graph-memory-pro.config",
   "neo4j": {
     "uri": "bolt://localhost:37687",
@@ -137,5 +137,13 @@
     "port": 7850,
     "host": "127.0.0.1",
     "authToken": ""
+  },
+  "recall": {
+    "$comment": "v2.4.0: 检索质量与输出增强。memorySliceChars 控制嵌入文本记忆切片长度（默认 800）；chunking 长文本分段嵌入（默认关闭）；multiStage 多阶段检索（默认关闭）；temporalWeight 时序权重（默认 0.3）；outputFormat 标准格式化输出（默认开启）",
+    "memorySliceChars": 800,
+    "chunking": { "enabled": false, "chunkSize": 400, "chunkOverlap": 40 },
+    "multiStage": false,
+    "temporalWeight": 0.3,
+    "outputFormat": { "enabled": true, "concise": true, "faithful": true }
   }
 }

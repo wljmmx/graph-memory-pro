@@ -127,5 +127,12 @@
     "port": 7850,
     "host": "127.0.0.1",
     "authToken": ""
+  },
+  "recall": {
+    "memorySliceChars": 800,
+    "chunking": { "enabled": false, "chunkSize": 400, "chunkOverlap": 40 },
+    "multiStage": false,
+    "temporalWeight": 0.3,
+    "outputFormat": { "enabled": true, "concise": true, "faithful": true }
   }
 }

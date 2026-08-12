@@ -4,6 +4,54 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.4.0] — 2026-08-12
+
+### Added — 检索质量与输出增强（6 项能力）
+
+针对 benchmark 暴露的检索质量 / 长文本匹配 / 输出篡改问题，新增 `recall` 配置段统一控制（[src/types.ts](src/types.ts) `GmConfig.recall`）。
+
+**点1 — 向量缓存 / 分页（减少全图遍历）**
+- 复用 I-1 [query-cache.ts](src/recaller/query-cache.ts)（LRU + cosine 相似命中短路 + `similarityScanLimit` 限制扫描量），避免重复嵌入与全图遍历，无需新增配置。
+
+**点2 — 记忆切片长度配置化**
+- 新增 [src/recaller/chunk.ts](src/recaller/chunk.ts) `buildEmbedTexts`，嵌入文本切片长度由 `recall.memorySliceChars`（默认 800）控制，替换旧版硬编码 500，避免长描述/内容尾部关键上下文被切断。仅作用于嵌入文本构造，不改变节点 content 存储。
+
+**点3 — 标准格式化输出**
+- 新增 [src/format/assemble.ts](src/format/assemble.ts) `buildOutputGuidance`，并接入 `buildSystemPromptAddition` 的 `outputFormat` 参数，为系统提示注入「简洁 / 贴近原文 / 减少自由篡改」policy（`recall.outputFormat`，默认开启，`enabled=false` 可关）。
+
+**点4 — 时序权重 + 关联矩阵 M**
+- 新增 [src/recaller/rerank.ts](src/recaller/rerank.ts) `temporalRecency`（基于 validTo/updatedAt/state 新鲜度，指数衰减）+ `combineScore`（融合向量相似度 / 重要性 / 过时惩罚 / 时序新鲜度）。
+- [src/recaller/recall.ts](src/recaller/recall.ts) `mergeResults` 与多阶段检索均接入 `recall.temporalWeight`（默认 0.3），与关联矩阵 M 的关联分共同加权，避免过期（validTo 过去 / superseded）或冲突（transitional）节点被错误排前。
+
+**点5 — 多阶段检索**
+- [src/recaller/recall.ts](src/recaller/recall.ts) 新增 `recallMultiStage`：Stage 1 先 FTS 种子 → `graphWalk` 图邻域筛选候选节点；Stage 2 在候选集内做向量相似度排序（支持分块向量）+ 综合重排。由 `recall.multiStage` 开启，减少全局向量搜索带来的无关节点干扰。
+
+**点6 — 长文本分段嵌入**
+- 新增 [src/store/embed-helper.ts](src/store/embed-helper.ts) `embedNode` 统一处理记忆切片与分段嵌入；超长文本按 `recall.chunking.chunkSize`（含 `chunkOverlap` 重叠）切分逐段 embed，分块向量存 `chunkEmbeddings` / `chunkTexts`（[src/store/vector.ts](src/store/vector.ts) `saveChunkVectors`），主向量仍写 `embedding` 供向量索引。由 `recall.chunking.enabled` 开启，提升长文本局部匹配能力。
+
+### Changed — 工程
+
+- [src/timing.ts](src/timing.ts) `TimingPhase` 新增 `multi_stage_fts` / `multi_stage_graph_filter` / `recall_multi_stage` 三个阶段。
+- [src/store/schema.ts](src/store/schema.ts) `recordToNode` 反序列化 `chunkTexts` / `chunkEmbeddings`。
+- [config.example.json](config.example.json) / [config.presets/](config.presets/)（minimal/balanced/full）/ [openclaw.plugin.json](openclaw.plugin.json) `configSchema` 新增 `recall` 段（full 开启 chunking + multiStage，balanced/minimal 关闭）。
+
+### Added — 测试
+
+- 新增 [test/chunk-rerank.test.ts](test/chunk-rerank.test.ts) 19 用例（chunkText 分段 / buildEmbedTexts / temporalRecency / combineScore / computeChunkSimilarities / cosineSimilarity）
+- 新增 [test/format-assemble.test.ts](test/format-assemble.test.ts) 3 用例（output policy 默认注入 / enabled=false 关闭 / 仅 faithful）
+- 总测试数 506 → **544**
+
+### Configuration Migration — 配置迁移（v2.3.5 → v2.4.0）
+
+无破坏性变更，现有 v2.3.5 配置无需任何改动。
+
+**新增可选配置**（`recall` 段，全部默认关闭或内置默认值）：
+- `recall.memorySliceChars`（默认 800）：嵌入文本记忆切片长度
+- `recall.chunking.enabled`（默认 false）/ `chunkSize`（400）/ `chunkOverlap`（40）：长文本分段嵌入
+- `recall.multiStage`（默认 false）：多阶段检索
+- `recall.temporalWeight`（默认 0.3）：时序权重
+- `recall.outputFormat.enabled`（默认 true）/ `concise`（true）/ `faithful`（true）：标准格式化输出
+
 ## [2.3.5] — 2026-07-10
 
 ### Changed — 冷启动死循环破除（B1）
