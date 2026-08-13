@@ -78,15 +78,47 @@ export async function ensureSchema(driver: Driver, dimension: number = 1024): Pr
     // v2.3.2 阶段二: 合并为单一多 label 索引（Task|Skill|Event 共用 'embedding' 属性）
     // 旧实现按 label 分离 3 个索引，查询需并行 3 次 session + 合并去重。
     // 新实现单索引跨 3 label 检索，省 2 个 session + 去重逻辑，连接池压力降 2/3。
+    //
+    // v2.4.1 (Neo4j 2026.07+): 添加精细化 HNSW 和量化参数，针对个人 NAS 场景调优。
+    // 配置要点（针对 1024 维 embedding，SSD/内存有限的个人设备）：
+    //  - m=16: 每个 HNSW 节点默认连接数 → 平衡内存占用和召回，默认足够
+    //  - ef_construction=128: 构建时探索深度 → 比默认 100 略高，提升召回，构建慢一点可接受
+    //  - ef_search=64: 查询时探索深度 → 比 48 略高，保证 recall；NAS 查询 QPS 不高可接受
+    //  - vector.quantization.type: 'scalar' → 标量量化压缩约 50% 存储，适合内存有限场景；
+    //          若追求极致精度（向量量少+高 recall）可改 'none'；
+    //          2026.07 起 HFQ/Binary quantization 已 GA，需更省内存可试 'binary'
+    //          （注意：binary 默认 search_expansion_factor 由 2.0 升为 3.0）
+    //
     // 兼容策略：保留创建 3 个旧索引的语句（IF NOT EXISTS 语义，已存在则 no-op），
     //          避免破坏旧环境；查询层优先用合并索引，旧索引仅向后兼容。
     try {
+      // Neo4j 2026.07+ 推荐语法：CREATE VECTOR INDEX 语法支持精细化 OPTIONS.indexConfig
+      // 由于参数是字面量（options 不接受参数），对 dimension 参数内联拼接
+      // 注意键名用下划线 ef_construction / ef_search（点号写法非 Neo4j 键名，会被忽略）
       await session.run(`
-        CALL db.index.vector.createNodeIndex(
-          'gm_node_embedding', ['Task', 'Skill', 'Event'], 'embedding', ${dimension}, 'cosine'
-        )
+        CREATE VECTOR INDEX gm_node_embedding IF NOT EXISTS
+        FOR (n:Task|Skill|Event) ON n.embedding
+        OPTIONS {
+          indexConfig: {
+            \`vector.dimensions\`: ${dimension},
+            \`vector.similarity_function\`: 'cosine',
+            \`vector.quantization.type\`: 'scalar',
+            \`vector.hnsw.m\`: 16,
+            \`vector.hnsw.ef_construction\`: 128,
+            \`vector.hnsw.ef_search\`: 64
+          }
+        }
       `);
-    } catch { /* may exist or version < 5.11 multi-label index */ }
+    } catch {
+      // 兼容老版本 Neo4j（不支持 CREATE VECTOR INDEX 语法或多 label 选项）回落过程化调用
+      try {
+        await session.run(`
+          CALL db.index.vector.createNodeIndex(
+            'gm_node_embedding', ['Task', 'Skill', 'Event'], 'embedding', ${dimension}, 'cosine'
+          )
+        `);
+      } catch { /* may exist or version < 5.11 multi-label index */ }
+    }
     try {
       await session.run(`
         CALL db.index.vector.createNodeIndex(
