@@ -111,13 +111,14 @@
     "importanceFloor": 0.2
   },
   "benchmark": {
-    "$comment": "v2.4.0: 评测会跑真实全链路（建图 + 召回 + 反馈 + 关联矩阵 M 在线学习）。当 associationMatrix.enabled=true 时，benchmark 会创建一份隔离的 M（不加载生产持久化）并在每个样本召回后走真实 processFeedback 反馈训练，使后续召回受益于已学到的 M，从而衡量真实系统的在线学习能力而非静态召回。database：设置不同库名时 benchmark 全部读写切到该库与生产物理隔离（需 Neo4j Enterprise 多库）；不留则与生产同库（依赖 bench- 前缀 + 每次运行前清理做逻辑隔离）",
+    "$comment": "v2.4.0: 评测会跑真实全链路（建图 + 召回 + 反馈 + 关联矩阵 M 在线学习）。当 associationMatrix.enabled=true 时，benchmark 会创建一份隔离的 M（与生产 M 独立持久化，默认 association-matrix-benchmark.json，可用 matrixFile 改名）并在每个样本召回后走真实 processFeedback 反馈训练，使后续召回受益于已学到的 M，从而衡量真实系统的在线学习能力而非静态召回。database：设置不同库名时 benchmark 全部读写切到该库与生产物理隔离（需 Neo4j Enterprise 多库）；不留则与生产同库（依赖 bench- 前缀 + 每次运行前清理 + :Benchmark 标签 + 流程作用域开关做逻辑隔离）",
     "enabled": false,
     "dataDir": "",
     "maxCases": 0,
     "buildGraph": true,
     "caseTimeoutMs": 30000,
-    "database": ""
+    "database": "",
+    "matrixFile": "association-matrix-benchmark.json"
   },
   "autoTuner": {
     "enabled": false,

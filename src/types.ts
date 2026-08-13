@@ -263,6 +263,9 @@ export interface GmConfig {
     /** v2.4.0: benchmark 专用数据库（默认与生产一致，即 neo4j.database）。
      *  设置不同库名时 benchmark 全部读写切到该库，与生产物理隔离（需 Neo4j Enterprise 多库）。 */
     database?: string;
+    /** v2.4.1: benchmark 专属关联矩阵 M 文件名（默认 association-matrix-benchmark.json）。
+     *  与生产 M（association-matrix.json）独立持久化，实现两个流程 M 隔离。 */
+    matrixFile?: string;
   };
 
   /** R-1 自主调优 EvolveMem（默认关闭） */

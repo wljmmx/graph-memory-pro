@@ -25,7 +25,8 @@ import type { CompleteFn } from "../engine/llm.ts";
 import type { EmbedFn, BatchEmbedFn } from "../engine/embed.ts";
 import { upsertNode, upsertEdge } from "../store/store.ts";
 import { embedNode, embedNodeBatch, type BatchEmbedNodeItem } from "../store/embed-helper.ts";
-import { getSession } from "../store/db.ts";
+import { getSession, withFlowScope } from "../store/db.ts";
+import type { AssociationMatrix } from "../recaller/association-matrix.ts";
 import { withTimeout } from "../utils.ts";
 import { createLogger } from "../logger.ts";
 import { getCircuitBreaker } from "../engine/circuit-breaker.ts";
@@ -172,21 +173,35 @@ export async function runBenchmark(
   // 3. 逐样本评测
   const reports: BenchmarkReport[] = [];
 
-  // v2.4.0: 全链路——真实训练一份隔离的关联矩阵 M（benchmarks 专用，不加载生产持久化）
+  // v2.4.1: 关联矩阵 M 的流程隔离（benchmark 全流程只对 benchmark 记录 + 写 benchmark M）
   //
-  // 此前 benchmark 仅做「注入 prebuilt 节点 + 静态召回」，从不训练 M、也不跑反馈，
-  // 无法衡量真实系统的「在线学习」部分。这里：
-  //   - 若 cfg.associationMatrix.enabled 为 true（与生产一致的开头），创建一份全新的 M
-  //     （不恢复持久化，隔离于生产），并注入 JudgeManager，走真实反馈链路。
-  //   - 评测期间每次 recall 后调用 recaller.processFeedback(...)（真实 judge → 反馈落库 →
-  //     incrementFeedback → updateAssociationMatrix），使后续 recall 受益于已学到的 M。
-  //   - 这样 benchmark 衡量的是「真实全链路（建图 + 召回 + 反馈 + M 在线学习）」而非静态召回。
+  // 两个流程数据处理互相隔离：
+  //   - 生产流程：写正式数据（查询排除 :Benchmark 节点），写/读生产 M（association-matrix.json）
+  //   - benchmark 流程：只对 benchmark 记录做全流程（查询命中 :Benchmark 节点），写/读
+  //     benchmark 专属 M（association-matrix-benchmark.json），与生产 M 独立持久化
+  //
+  // 实现要点：
+  //   - 进入评测前记录生产 M 引用，评测期间用独立 benchmark M；评测结束恢复生产 M，
+  //     避免污染共享 Recaller 实例。
+  //   - 评测整体包在 withFlowScope("benchmark") 中，使查询不过滤 :Benchmark 节点。
   let trainM = false;
+  let evalM: AssociationMatrix | null = null;
+  let benchMatrixPath: string | null = null;
+  const prodM = recaller.getAssociationMatrix(); // 生产 M（评测后恢复）
   if (cfg.associationMatrix?.enabled === true && cfg.embedding?.dimensions) {
     try {
       const { createAssociationMatrix } = await import("../recaller/association-matrix.ts");
-      recaller.setAssociationMatrix(createAssociationMatrix(cfg.embedding.dimensions, cfg));
+      const { loadAssociationMatrix, saveAssociationMatrix, getDefaultBaseDir } = await import("../recaller/association-matrix-persist.ts");
+      const { join } = await import("node:path");
+      // benchmark 专属 M 文件（与生产 association-matrix.json 隔离）
+      const benchFileName = cfg.benchmark?.matrixFile ?? "association-matrix-benchmark.json";
+      benchMatrixPath = join(getDefaultBaseDir(), benchFileName);
+      evalM = createAssociationMatrix(cfg.embedding.dimensions, cfg);
+      // 从 benchmark 专属文件恢复（若存在），隔离于生产 M
+      await loadAssociationMatrix(evalM, { path: benchMatrixPath });
+      recaller.setAssociationMatrix(evalM);
       trainM = true;
+      log.info(`benchmark: isolated association-matrix enabled (dim=${cfg.embedding.dimensions}, persistPath=${benchMatrixPath})`);
     } catch (err) {
       log.warn(`benchmark: association-matrix init failed (${(err as Error)?.message ?? err}), run without M`);
     }
@@ -200,62 +215,81 @@ export async function runBenchmark(
     }
   }
 
-  for (const dataset of targetDatasets) {
-    const cases = maxCases > 0 ? dataset.cases.slice(0, maxCases) : dataset.cases;
-    const caseResults: CaseResult[] = [];
+  // 评测全程运行在 benchmark 作用域：查询命中 benchmark 节点，生产数据不受影响
+  try {
+    await withFlowScope("benchmark", async () => {
+      for (const dataset of targetDatasets) {
+        const cases = maxCases > 0 ? dataset.cases.slice(0, maxCases) : dataset.cases;
+        const caseResults: CaseResult[] = [];
 
-    log.info(`running ${dataset.name}: ${cases.length} cases`);
+        log.info(`running ${dataset.name}: ${cases.length} cases`);
 
-    // v2.3.7: 在评测循环开始前记录数据集耗时起点，计算真实评测耗时（修复旧版耗时≈0 的 bug）
-    const datasetStart = Date.now();
+        // v2.3.7: 在评测循环开始前记录数据集耗时起点，计算真实评测耗时（修复旧版耗时≈0 的 bug）
+        const datasetStart = Date.now();
 
-    for (const testCase of cases) {
-      try {
-        const caseStart = Date.now();
-        // 带超时的召回
-        const recallResult = await withTimeout(
-          recaller.recall(testCase.query),
-          caseTimeoutMs,
-        );
-        const latencyMs = Date.now() - caseStart;
-
-        const caseResult = evaluateCase(testCase, recallResult, latencyMs);
-        caseResults.push(caseResult);
-
-        // v2.4.0: 真实反馈训练 M（不阻塞评测；仅当 M 已启用且召回到节点时）
-        if (trainM && recallResult.nodes.length > 0) {
+        for (const testCase of cases) {
           try {
-            await recaller.processFeedback(
-              testCase.query,
-              recallResult.nodes,
-              testCase.expectedAnswer ?? "",
-              testCase.id,
-              { sync: true },
+            const caseStart = Date.now();
+            // 带超时的召回
+            const recallResult = await withTimeout(
+              recaller.recall(testCase.query),
+              caseTimeoutMs,
             );
+            const latencyMs = Date.now() - caseStart;
+
+            const caseResult = evaluateCase(testCase, recallResult, latencyMs);
+            caseResults.push(caseResult);
+
+            // v2.4.0: 真实反馈训练 benchmark M（不阻塞评测；仅当 M 已启用且召回到节点时）
+            if (trainM && recallResult.nodes.length > 0) {
+              try {
+                await recaller.processFeedback(
+                  testCase.query,
+                  recallResult.nodes,
+                  testCase.expectedAnswer ?? "",
+                  testCase.id,
+                  { sync: true },
+                );
+              } catch {
+                /* 反馈失败不影响评测 */
+              }
+            }
           } catch {
-            /* 反馈失败不影响评测 */
+            // 超时或失败的样本记为未命中
+            caseResults.push({
+              caseId: testCase.id,
+              dataset: testCase.dataset,
+              category: testCase.category,
+              hitAt1: false,
+              hitAt3: false,
+              reciprocalRank: 0,
+              f1: 0,
+              latencyMs: caseTimeoutMs,
+              tokenEstimate: 0,
+              recalledNodes: 0,
+            });
           }
         }
-      } catch {
-        // 超时或失败的样本记为未命中
-        caseResults.push({
-          caseId: testCase.id,
-          dataset: testCase.dataset,
-          category: testCase.category,
-          hitAt1: false,
-          hitAt3: false,
-          reciprocalRank: 0,
-          f1: 0,
-          latencyMs: caseTimeoutMs,
-          tokenEstimate: 0,
-          recalledNodes: 0,
-        });
+
+        const report = buildReport(dataset, caseResults, Date.now() - datasetStart);
+        reports.push(report);
+        log.info(formatReport(report));
+      }
+    });
+  } finally {
+    // v2.4.1: 写 benchmark M（独立文件，隔离于生产）并恢复生产 M
+    if (trainM && evalM && benchMatrixPath) {
+      try {
+        const { saveAssociationMatrix } = await import("../recaller/association-matrix-persist.ts");
+        await saveAssociationMatrix(evalM, { path: benchMatrixPath });
+      } catch (err) {
+        log.warn(`benchmark: persist benchmark association-matrix failed: ${(err as Error)?.message ?? err}`);
       }
     }
-
-    const report = buildReport(dataset, caseResults, Date.now() - datasetStart);
-    reports.push(report);
-    log.info(formatReport(report));
+    // 恢复生产 M（若 runner 在插件进程内被调用，避免污染共享 Recaller）
+    if (recaller.getAssociationMatrix() !== prodM) {
+      recaller.setAssociationMatrix(prodM as AssociationMatrix);
+    }
   }
 
   // 4. 汇总

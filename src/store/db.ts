@@ -19,6 +19,40 @@ let _effectiveMaxPoolSize = DEFAULT_MAX_CONNECTION_POOL_SIZE;
 //      benchmark 通过 withDatabase() 临时切换到隔离的 benchmarks 数据库，避免污染生产。
 let _activeDatabase = "neo4j";
 
+// v2.4.1: 流程作用域开关（数据查询隔离）。
+//   - "production": 正式流程，所有查询排除 :Benchmark 标签节点（生产数据纯净）
+//   - "benchmark":  基准流程，查询不过滤 :Benchmark（评测只需命中 benchmark 节点）
+//   benchmark 通过 withFlowScope("benchmark") 临时切换，结束后恢复 production。
+export type FlowScope = "production" | "benchmark";
+let _flowScope: FlowScope = "production";
+
+/** 获取当前流程作用域（默认 production） */
+export function getFlowScope(): FlowScope {
+  return _flowScope;
+}
+
+/** 设置流程作用域（基准/生产），调用方负责在 finally 中恢复 */
+export function setFlowScope(scope: FlowScope): void {
+  _flowScope = scope;
+}
+
+/**
+ * v2.4.1: 在指定流程作用域上下文中执行 fn，结束后恢复原作用域。
+ *
+ * 与 withDatabase 配合实现"两个流程数据处理互相隔离"：
+ *   - 生产流程：scope=production → 查询排除 :Benchmark 节点，写生产 M
+ *   - benchmark 流程：scope=benchmark → 查询命中 :Benchmark 节点，写 benchmark M
+ */
+export async function withFlowScope<T>(scope: FlowScope, fn: () => Promise<T>): Promise<T> {
+  const prev = _flowScope;
+  _flowScope = scope;
+  try {
+    return await fn();
+  } finally {
+    _flowScope = prev;
+  }
+}
+
 // v2.3.2 阶段三: 应用层 Session 计数 — 跟踪在途会话数（不等于 driver 内部活跃连接，但可反映并发压力）
 let _activeSessions = 0;
 let _totalSessionsCreated = 0;
