@@ -316,17 +316,26 @@ export async function startMcpServer(
       "gm_reembed",
       {
         title: "Re-embed Nodes",
-        description: "Batch re-embed nodes with missing/empty embeddings.",
+        description: "Batch re-embed nodes with missing/empty embeddings. Pass clear=true to first wipe all nodes/edges in the active database (for 'clear then re-import' rebuild flows).",
         inputSchema: {
           batchSize: z.number().int().positive().max(200).optional().describe("Batch size (default 50, max 200)"),
+          clear: z.boolean().optional().describe("If true, wipe all nodes/edges in the active database first (destructive)"),
         },
-        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
       },
-      async ({ batchSize }: { batchSize?: number }) => {
+      async ({ batchSize, clear }: { batchSize?: number; clear?: boolean }) => {
         if (!embed) {
           return { content: [{ type: "text", text: "Embed function not configured" }] };
         }
         try {
+          if (clear === true) {
+            const { clearAllNodes } = await import("../store/nodes.ts");
+            const cleared = await clearAllNodes(driver);
+            return {
+              content: [{ type: "text", text: `Cleared ${cleared} nodes. Re-run your import, then invoke gm_reembed.` }],
+              structuredContent: asStructured({ cleared, note: "database cleared; re-run import then reembed" }),
+            };
+          }
           const result = await withTimeout(() => reEmbedNodes(driver, embed, batchSize ?? 50, cfg.embedding?.model, undefined, batchEmbed), 120_000, "gm_reembed");
           return {
             content: [{ type: "text", text: `Re-embedded ${result.reEmbedded}/${result.totalScanned} nodes, ${result.failed} failed, ${result.durationMs}ms` }],

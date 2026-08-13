@@ -17,7 +17,7 @@ import { parseArgs } from "node:util";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { initDriver, verifyWithRetry, closeDriver } from "../store/db.ts";
+import { initDriver, verifyWithRetry, closeDriver, withDatabase } from "../store/db.ts";
 import { ensureSchema } from "../store/store.ts";
 import { Recaller } from "../recaller/recall.ts";
 import { createCompleteFn } from "../engine/llm.ts";
@@ -172,8 +172,12 @@ async function main(): Promise<void> {
 
   // 2. 初始化 schema
   const embedDim = cfg.embedding?.dimensions ?? 1024;
+
+  // v2.4.0: benchmark 专用数据库（默认与生产一致；设置 cfg.benchmark.database 时物理隔离，
+  //         需 Neo4j Enterprise 多库）。ensureSchema + runBenchmark 全部在该库上下文中执行。
+  const benchDatabase = cfg.benchmark?.database ?? cfg.neo4j.database ?? "neo4j";
   try {
-    await ensureSchema(driver, embedDim);
+    await withDatabase(benchDatabase, () => ensureSchema(driver, embedDim));
   } catch (err) {
     console.warn(`Schema init failed: ${err}`);
   }
@@ -188,9 +192,9 @@ async function main(): Promise<void> {
   const recaller = new Recaller(driver, cfg);
   if (embed) recaller.setEmbedFn(embed);
 
-  // 5. 运行 Benchmark
+  // 5. 运行 Benchmark（在该单元中切换到 benchmark 专用数据库，结束后自动恢复）
   try {
-    const result = await runBenchmark(recaller, driver, cfg, {
+    const result = await withDatabase(benchDatabase, () => runBenchmark(recaller, driver, cfg, {
       datasets: datasets,
       dataDir,
       maxCases,
@@ -199,7 +203,7 @@ async function main(): Promise<void> {
       llm: llm ?? undefined,
       embedFn: embed ?? undefined,
       batchEmbedFn: batchEmbed ?? undefined,
-    });
+    }));
 
     console.log("");
     console.log(formatAggregateReport(result));

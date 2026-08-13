@@ -1156,6 +1156,12 @@ async function handleReembed(params: Record<string, unknown>): Promise<{ status:
   try {
     const { reEmbedNodes } = await import("../graph/reembed.ts");
     const batchSize = (params?.batchSize ?? 50) as number;
+    // v2.4.0: 可选 clear=true 时先清空当前数据库全部节点/边，配合重新导入获得正确时序
+    if (params?.clear === true) {
+      const { clearAllNodes } = await import("../store/nodes.ts");
+      const cleared = await clearAllNodes(_driver);
+      return { status: 200, body: { cleared, reEmbedded: 0, note: "database cleared; re-run import then reembed" } };
+    }
     // v2.4.0: 传入 _batchEmbed，正式流程重嵌入工具启用批量嵌入（缓解 Ollama 503）
     const result = await reEmbedNodes(_driver, _embed, batchSize, _cfg.embedding?.model, undefined, _batchEmbed ?? undefined);
     return { status: 200, body: result };

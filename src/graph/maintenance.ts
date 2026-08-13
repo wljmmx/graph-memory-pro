@@ -29,6 +29,7 @@ import { computeImportanceScores } from "./maintenance/importance.ts";
 import { resolveConflicts } from "./maintenance/conflict.ts";
 import { adjustEdgeWeights } from "./maintenance/edge-weights.ts";
 import { applyReverseMemory } from "./maintenance/reverse-memory.ts";
+import { backfillTimestamps, type TimestampBackfillResult } from "./maintenance/timestamp-backfill.ts";
 
 // ── Barrel：重新导出子模块公共 API（保持向后兼容） ──────────────
 export { computeStalenessScores } from "./maintenance/staleness.ts";
@@ -37,6 +38,7 @@ export { computeImportanceScores, type ImportanceConfig } from "./maintenance/im
 export { resolveConflicts, type ConflictResolutionConfig } from "./maintenance/conflict.ts";
 export { adjustEdgeWeights, type EdgeWeightsConfig } from "./maintenance/edge-weights.ts";
 export { applyReverseMemory, type ReverseMemoryConfig } from "./maintenance/reverse-memory.ts";
+export { backfillTimestamps, type TimestampBackfillResult } from "./maintenance/timestamp-backfill.ts";
 
 export interface RepairEdgeResult {
   relatesToCreated: number;
@@ -87,6 +89,8 @@ export interface MaintenanceResult {
   reverseMemory?: { watchlistAdded: number; watchlistRemoved: number; decayed: number };
   /** G-4 嵌入版本迁移结果（Phase 11，v2.1.2 第四批补全） */
   embeddingMigration?: { distribution: Map<string, number>; cleared: number; migrated: number };
+  /** v2.4.0: 时序字段回填结果（Phase 4b） */
+  timestampBackfill?: TimestampBackfillResult;
   durationMs: number;
 }
 
@@ -145,6 +149,7 @@ export async function runMaintenance(
   let edgeWeightsResult: { scanned: number; strengthened: number; decayed: number } | undefined;
   let reverseMemoryResult: { watchlistAdded: number; watchlistRemoved: number; decayed: number } | undefined;
   let migrationResultValue: { distribution: Map<string, number>; cleared: number; migrated: number } | undefined;
+  let timestampBackfillResult: TimestampBackfillResult | undefined;
 
   try {
     // ── Phase 0: Derive RELATES_TO from MENTIONS co-occurrence ──
@@ -214,6 +219,18 @@ export async function runMaintenance(
         log.warn("community summaries failed", { error: String(err) });
       }
     }
+
+    // ── Phase 4b: 时序字段回填（v2.4.0，默认开启） ──
+    // 必须在 Phase 5 过时衰减 / Phase 7 重要性之前执行，保证 updatedAt 有效。
+    if (cfg?.timestampBackfill?.enabled !== false) {
+      try {
+        timestampBackfillResult = await backfillTimestamps(driver);
+        log.info("timestamp backfill", { scanned: timestampBackfillResult.scanned, backfilled: timestampBackfillResult.backfilled });
+      } catch (err) {
+        log.warn("timestamp backfill failed", { error: String(err) });
+      }
+    }
+    _lockTimestamp = Date.now(); // refresh lock
 
     // ── Phase 5: S-14 Staleness 重算（v2.1.2，默认开启） ──
     if (cfg?.staleness?.enabled !== false) {

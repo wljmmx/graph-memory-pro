@@ -10,6 +10,8 @@ export interface Neo4jConfig {
   maxConnectionPoolSize?: number;
   /** v2.3.5: 连接获取超时（毫秒，默认 10000） */
   connectionAcquisitionTimeout?: number;
+  /** v2.4.0: 目标数据库名（默认 neo4j）。生产数据写入该库；需 Neo4j Enterprise 多库支持 */
+  database?: string;
 }
 
 export interface LlmConfig {
@@ -89,6 +91,11 @@ export interface GmConfig {
     threshold?: number;
     /** heuristic 规则模式 / llm 模式 */
     mode?: "heuristic" | "llm";
+  };
+
+  /** v2.4.0: 时序字段回填（Maintenance Phase 4b，默认开启） */
+  timestampBackfill?: {
+    enabled?: boolean;
   };
 
   /** S-5 因果边提取（默认开启，单轮即可识别因果链） */
@@ -253,6 +260,9 @@ export interface GmConfig {
     buildGraph?: boolean;
     /** 单样本超时（ms） */
     caseTimeoutMs?: number;
+    /** v2.4.0: benchmark 专用数据库（默认与生产一致，即 neo4j.database）。
+     *  设置不同库名时 benchmark 全部读写切到该库，与生产物理隔离（需 Neo4j Enterprise 多库）。 */
+    database?: string;
   };
 
   /** R-1 自主调优 EvolveMem（默认关闭） */

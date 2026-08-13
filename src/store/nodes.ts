@@ -503,6 +503,23 @@ export async function getNodeCount(driver: Driver): Promise<number> {
   }
 }
 
+/**
+ * v2.4.0: 清空当前激活数据库中的全部节点与边（破坏性）。
+ *
+ * 用途：配合"清理后重新导入"流程，让历史数据按新写入逻辑（含正确时序字段）重建，
+ * 从而获得正确的时序/过时/重要性数据。
+ * 注意：仅作用于当前激活数据库（getSession 的 database），生产环境请谨慎使用。
+ */
+export async function clearAllNodes(driver: Driver): Promise<number> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run("MATCH (n) DETACH DELETE n RETURN count(n) AS c");
+    return result.records[0]?.get("c")?.toNumber?.() ?? 0;
+  } finally {
+    await session.close();
+  }
+}
+
 export async function getNodesByType(
   driver: Driver,
   type: string,

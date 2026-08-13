@@ -15,6 +15,9 @@ let _driver: Driver | null = null;
 let _config: Neo4jConfig | null = null;
 // v2.3.5: 记录实际生效的 maxPoolSize，供 getPoolMetrics 返回真实值（而非硬编码 50）
 let _effectiveMaxPoolSize = DEFAULT_MAX_CONNECTION_POOL_SIZE;
+// v2.4.0: 当前会话目标数据库。默认取配置 cfg.database（缺省 neo4j），
+//      benchmark 通过 withDatabase() 临时切换到隔离的 benchmarks 数据库，避免污染生产。
+let _activeDatabase = "neo4j";
 
 // v2.3.2 阶段三: 应用层 Session 计数 — 跟踪在途会话数（不等于 driver 内部活跃连接，但可反映并发压力）
 let _activeSessions = 0;
@@ -44,6 +47,7 @@ export function getDriver(): Driver | null {
 export function initDriver(cfg: Neo4jConfig): Driver {
   closeDriver();
   _config = cfg;
+  _activeDatabase = cfg.database ?? "neo4j";
   _driver = createDriver(cfg);
   return _driver;
 }
@@ -108,11 +112,13 @@ export function isNeo4j5Plus(version: string | null): boolean {
  * 调用方负责 `await session.close()`
  *
  * v2.3.2 阶段三: 包装 close() 做应用层 Session 计数（_activeSessions 递减）
+ * v2.4.0: 支持显式传入 database；缺省使用当前激活数据库（_activeDatabase，可被 withDatabase 切换）
  */
-export function getSession(driver: Driver): Session {
+export function getSession(driver: Driver, database?: string): Session {
+  const db = database ?? _activeDatabase;
   const session = driver.session({
     defaultAccessMode: neo4j.session.WRITE,
-    database: "neo4j",
+    database: db,
   });
   _activeSessions++;
   _totalSessionsCreated++;
@@ -125,6 +131,30 @@ export function getSession(driver: Driver): Session {
     }
   }) as typeof session.close;
   return session;
+}
+
+/**
+ * v2.4.0: 获取当前激活数据库名（默认 neo4j）。
+ */
+export function getActiveDatabase(): string {
+  return _activeDatabase;
+}
+
+/**
+ * v2.4.0: 在指定数据库上下文中执行 fn，执行结束后恢复原数据库。
+ *
+ * 用途：benchmark 运行时临时切换到隔离的 benchmarks 数据库，避免污染生产数据。
+ * 注意：所有经 getSession(driver) 创建的写会话都会继承该数据库名。
+ * 需 Neo4j Enterprise 多库支持；Community 单库时请保持与生产一致（依赖 bench- 前缀 + 清理做逻辑隔离）。
+ */
+export async function withDatabase<T>(database: string, fn: () => Promise<T>): Promise<T> {
+  const prev = _activeDatabase;
+  _activeDatabase = database;
+  try {
+    return await fn();
+  } finally {
+    _activeDatabase = prev;
+  }
 }
 
 /**
