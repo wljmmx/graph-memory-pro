@@ -21,7 +21,7 @@ import { initDriver, verifyWithRetry, closeDriver } from "../store/db.ts";
 import { ensureSchema } from "../store/store.ts";
 import { Recaller } from "../recaller/recall.ts";
 import { createCompleteFn } from "../engine/llm.ts";
-import { createEmbedFn } from "../engine/embed.ts";
+import { createEmbedFn, createBatchEmbedFn } from "../engine/embed.ts";
 import { runBenchmark, formatAggregateReport } from "./runner.ts";
 import { resolveBenchmarkDataDir } from "./dataDir.ts";
 import type { GmConfig } from "../types.ts";

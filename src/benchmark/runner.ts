@@ -22,9 +22,9 @@ import { evaluateCase, buildReport, formatReport } from "./types.ts";
 import { loadAllDatasets, getBuiltinSampleDataset } from "./datasets.ts";
 import { Extractor } from "../extractor/extract.ts";
 import type { CompleteFn } from "../engine/llm.ts";
-import type { EmbedFn } from "../engine/embed.ts";
+import type { EmbedFn, BatchEmbedFn } from "../engine/embed.ts";
 import { upsertNode, upsertEdge } from "../store/store.ts";
-import { embedNode } from "../store/embed-helper.ts";
+import { embedNode, embedNodeBatch, type BatchEmbedNodeItem } from "../store/embed-helper.ts";
 import { getSession } from "../store/db.ts";
 import { withTimeout } from "../utils.ts";
 import { createLogger } from "../logger.ts";
@@ -45,6 +45,8 @@ export interface BenchmarkOptions {
   caseTimeoutMs?: number;
   /** 嵌入函数（建图时为节点生成 embedding，避免 benchmark 偏向 FTS） */
   embedFn?: EmbedFn;
+  /** 批量嵌入函数（v2.4.0）：建图时对节点批量 embed，显著减少 HTTP 请求数，缓解 Ollama 503 */
+  batchEmbedFn?: BatchEmbedFn;
   /** LLM 完成函数（建图谱时需要） */
   llm?: CompleteFn;
 }
@@ -86,6 +88,7 @@ export async function runBenchmark(
     caseTimeoutMs = 30_000,
     llm,
     embedFn,
+    batchEmbedFn,
   } = opts;
 
   // 1. 加载数据集
@@ -141,6 +144,7 @@ export async function runBenchmark(
             llm ?? null,
             testCase,
             embedFn,
+            batchEmbedFn,
           );
         } else if (!hasPrebuilt && !extractor) {
           log.warn(`buildGraph: case ${testCase.id} has no prebuiltNodes and LLM unavailable — skip graph build`);
@@ -267,6 +271,7 @@ async function buildGraphFromConversation(
   llm: CompleteFn | null,
   testCase: BenchmarkCase,
   embedFn?: EmbedFn,
+  batchEmbedFn?: BatchEmbedFn,
 ): Promise<void> {
   try {
     const now = Date.now();
@@ -274,6 +279,8 @@ async function buildGraphFromConversation(
 
     // v2.3.5: 优先写 prebuiltNodes（不经过 LLM，结果确定）
     if (testCase.prebuiltNodes && testCase.prebuiltNodes.length > 0) {
+      // v2.4.0: 先将节点全部写入，再统一批量 embed（减少请求数，缓解 Ollama 503）
+      const embedCandidates: BatchEmbedNodeItem[] = [];
       for (const pn of testCase.prebuiltNodes) {
         // v2.3.5 fix: 使用确定性 id（case id + node name 哈希），避免多次 benchmark 运行
         // 造成同名节点重复堆积，也保证 MERGE 时真正"更新"而非"插入新的"
@@ -293,24 +300,33 @@ async function buildGraphFromConversation(
           createdAt: pn.createdAt ?? now,
           updatedAt: pn.updatedAt ?? now,
         });
-        if (embedFn) {
-          // v2.3.7: 建图嵌入前检查熔断器，OPEN 时跳过，避免持续请求打垮下游（Ollama server busy）
-          const breaker = getCircuitBreaker("embed");
-          if (breaker.allow()) {
-            try {
-              await embedNode(driver, embedFn, id, {
-                name: pn.name,
-                description: pn.description,
-                content: pn.content,
-              });
-              breaker.recordSuccess();
-            } catch {
-              breaker.recordFailure();
-              /* embedding 失败不阻塞建图 */
+        if (batchEmbedFn || embedFn) {
+          embedCandidates.push({
+            nodeId: id,
+            params: { name: pn.name, description: pn.description, content: pn.content },
+          });
+        }
+      }
+
+      if (embedCandidates.length > 0) {
+        // v2.3.7: 建图嵌入前检查熔断器，OPEN 时跳过，避免持续请求打垮下游（Ollama server busy）
+        const breaker = getCircuitBreaker("embed");
+        if (breaker.allow()) {
+          try {
+            if (batchEmbedFn) {
+              await embedNodeBatch(driver, batchEmbedFn, embedCandidates);
+            } else if (embedFn) {
+              for (const item of embedCandidates) {
+                await embedNode(driver, embedFn, item.nodeId, item.params);
+              }
             }
-          } else {
-            log.warn(`buildGraph: embed circuit OPEN, skip embedding for node ${pn.name}`);
+            breaker.recordSuccess();
+          } catch {
+            breaker.recordFailure();
+            /* embedding 失败不阻塞建图 */
           }
+        } else {
+          log.warn(`buildGraph: embed circuit OPEN, skip embedding for ${embedCandidates.length} nodes (case ${testCase.id})`);
         }
       }
 
@@ -363,6 +379,8 @@ async function buildGraphFromConversation(
       return;
     }
 
+    // v2.4.0: 先写节点，再统一批量 embed（减少请求数，缓解 Ollama 503）
+    const embedCandidates: BatchEmbedNodeItem[] = [];
     for (const enode of result.nodes) {
       const id = `bench-${now}-${Math.random().toString(36).slice(2, 8)}`;
       nodeIdMap.set(enode.name, id);
@@ -379,24 +397,32 @@ async function buildGraphFromConversation(
         createdAt: now,
         updatedAt: now,
       });
-      if (embedFn) {
-        // v2.3.7: 同 prebuilt 分支，嵌入前检查熔断器
-        const breaker = getCircuitBreaker("embed");
-        if (breaker.allow()) {
-          try {
-            await embedNode(driver, embedFn, id, {
-              name: enode.name,
-              description: enode.description,
-              content: enode.content,
-            });
-            breaker.recordSuccess();
-          } catch {
-            breaker.recordFailure();
-            /* embedding 失败不阻塞建图 */
+      if (batchEmbedFn || embedFn) {
+        embedCandidates.push({
+          nodeId: id,
+          params: { name: enode.name, description: enode.description, content: enode.content },
+        });
+      }
+    }
+    if (embedCandidates.length > 0) {
+      // v2.3.7: 同 prebuilt 分支，嵌入前检查熔断器
+      const breaker = getCircuitBreaker("embed");
+      if (breaker.allow()) {
+        try {
+          if (batchEmbedFn) {
+            await embedNodeBatch(driver, batchEmbedFn, embedCandidates);
+          } else if (embedFn) {
+            for (const item of embedCandidates) {
+              await embedNode(driver, embedFn, item.nodeId, item.params);
+            }
           }
-        } else {
-          log.warn(`buildGraph: embed circuit OPEN, skip embedding for node ${enode.name}`);
+          breaker.recordSuccess();
+        } catch {
+          breaker.recordFailure();
+          /* embedding 失败不阻塞建图 */
         }
+      } else {
+        log.warn(`buildGraph: embed circuit OPEN, skip embedding for ${embedCandidates.length} nodes (case ${testCase.id})`);
       }
     }
     for (const eedge of result.edges) {
