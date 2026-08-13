@@ -8,11 +8,12 @@
  */
 
 import type { Driver } from "neo4j-driver";
-import type { GmConfig, GmNode, GmEdge } from "../types.ts";
+import type { GmConfig, GmNode, GmEdge, GmMessage } from "../types.ts";
 import type { CompleteFn } from "../engine/llm.ts";
 import type { Extractor } from "../extractor/extract.ts";
 import { upsertNode, batchUpsertNodes, upsertEdge, batchUpsertEdges } from "../store/store.ts";
 import { getCircuitBreaker } from "../engine/circuit-breaker.ts";
+import { getSessionMessages } from "../store/messages.ts";
 
 /**
  * 后台三元组提取：从最近会话消息中提取实体/关系写入 Neo4j。
@@ -117,4 +118,57 @@ export async function extractInBackground(
   if (extracted > 0) {
     logger?.info?.(`[graph-memory-pro] background extractor: ${extracted} turns processed`);
   }
+}
+
+/**
+ * v2.4.1: 从 Neo4j 已存储的会话消息（:GmMessage）重建三级节点（TASK/SKILL/EVENT）。
+ *
+ * 场景：会话记录已经导入/存储在 Neo4j（通过 saveMessage 写入 :GmMessage 节点），
+ * 需要按已有记录重新跑 LLM 提取，重建生产图谱的三级节点。
+ *
+ * 流程：
+ *   1. 按 sessionKey 读取该会话最近的 N 条消息（getSessionMessages）
+ *   2. 将消息对（user / assistant）配对为 extractor 输入
+ *   3. 复用 extractInBackground 的核心提取+写入逻辑重建节点
+ *
+ * 注意：仅对本次未处理过的会话生效（通过 lastProcessedTurn 跳过已重建的轮次），
+ * 避免重复提取造成节点堆积。生产流程节点不带 :Benchmark 标签，与 benchmark 隔离。
+ */
+export async function rebuildGraphFromStoredMessages(
+  extractor: Extractor | null,
+  driver: Driver | null,
+  llm: CompleteFn | null,
+  cfg: GmConfig | null,
+  logger: { debug?(...args: unknown[]): void; info?(...args: unknown[]): void },
+  sessionKey: string,
+  limit = 50,
+  lastProcessedTurn = 0,
+): Promise<number> {
+  if (!extractor || !driver || !llm) return 0;
+  const messages = await getSessionMessages(driver, sessionKey, limit);
+  if (messages.length === 0) return 0;
+
+  // 按 turnIndex 升序，跳过已处理的轮次
+  const ordered = [...messages].filter((m) => (m.turnIndex ?? 0) > lastProcessedTurn);
+  if (ordered.length === 0) return 0;
+
+  // 配对 user/assistant（允许 user 后缺 assistant 时跳过该轮）
+  const pairs: Array<{ user: string; assistant: string }> = [];
+  let i = 0;
+  while (i < ordered.length) {
+    const cur = ordered[i];
+    if (cur.role === "user") {
+      const next = ordered[i + 1];
+      if (next && next.role === "assistant") {
+        pairs.push({ user: cur.content, assistant: next.content });
+        i += 2;
+        continue;
+      }
+    }
+    i += 1;
+  }
+
+  if (pairs.length === 0) return 0;
+  await extractInBackground(extractor, driver, llm, cfg, logger, pairs);
+  return pairs.length;
 }

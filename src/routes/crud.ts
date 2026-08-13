@@ -105,6 +105,7 @@ export function getRoutes(): RouteHandler[] {
     { method: "DELETE", path: "/api/ops/cache", handler: handleClearCache },
     { method: "POST", path: "/api/ops/reconnect", handler: handleReconnect },
     { method: "GET", path: "/api/ops/services", handler: handleServiceStatus },
+    { method: "POST", path: "/api/extract/rebuild", handler: handleRebuildFromMessages },
   ];
 }
 
@@ -115,6 +116,40 @@ async function handleStatus(): Promise<{ status: number; body: unknown }> {
     return { status: 200, body: { status: "connected", version: VERSION } };
   } catch (err: unknown) {
     return { status: 503, body: { status: "disconnected", error: (err as Error).message } };
+  }
+}
+
+/**
+ * v2.4.1: 根据 Neo4j 中已存储的会话消息（:GmMessage）重建三级节点。
+ * POST /api/extract/rebuild
+ * body: { sessionKey: string, limit?: number, lastProcessedTurn?: number }
+ */
+async function handleRebuildFromMessages(params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
+  if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
+  if (!_llm) return { status: 503, body: { error: "LLM not configured" } };
+  const sessionKey = params.sessionKey;
+  if (typeof sessionKey !== "string" || sessionKey.length === 0) {
+    return { status: 400, body: { error: "sessionKey is required (string)" } };
+  }
+  const limit = safeParseInt(params.limit as string, 50, 1000);
+  const lastProcessedTurn = safeParseInt(params.lastProcessedTurn as string, 0, 1_000_000);
+  try {
+    const { Extractor } = await import("../extractor/extract.ts");
+    const extractor = new Extractor(_driver);
+    const { rebuildGraphFromStoredMessages } = await import("../services/extract-service.ts");
+    const processed = await rebuildGraphFromStoredMessages(
+      extractor,
+      _driver,
+      _llm,
+      _cfg,
+      console,
+      sessionKey,
+      limit,
+      lastProcessedTurn,
+    );
+    return { status: 200, body: { processedPairs: processed, message: "rebuild completed" } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
   }
 }
 

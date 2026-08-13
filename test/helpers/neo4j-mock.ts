@@ -29,6 +29,8 @@ export class MockInteger {
 /** 将普通对象包装为支持 .toNumber() 的 record */
 export function mockRecord(fields: Record<string, any>): any {
   return {
+    // v2.4.1: 暴露原始字段，支持 `r.get("m").properties` 这类直接属性访问
+    ...fields,
     get(key: string): any {
       const v = fields[key];
       if (v == null) return null;
