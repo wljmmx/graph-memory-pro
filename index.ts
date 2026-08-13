@@ -180,7 +180,7 @@ async function getOrCreateDriver(cfg: GmConfig, logger: LoggerLike): Promise<Dri
 
     // v2.3.5: 核实实际 Neo4j 版本，记录日志并告警 power() 等 5.x 函数可用性
     try {
-      const { getNeo4jVersion, isNeo4j5Plus } = await import("./src/store/db.ts");
+      const { getNeo4jVersion, isNeo4j5Plus, getNeo4jEdition, supportsMultipleDatabases, setCachedEdition } = await import("./src/store/db.ts");
       const neo4jVersion = await getNeo4jVersion(d);
       log.info(`Neo4j version detected: ${neo4jVersion ?? "(unknown)"} (5.x+ supports power(): ${isNeo4j5Plus(neo4jVersion)})`);
       logger?.info?.(`[graph-memory-pro] Neo4j version detected: ${neo4jVersion ?? "(unknown)"}`);
@@ -188,7 +188,17 @@ async function getOrCreateDriver(cfg: GmConfig, logger: LoggerLike): Promise<Dri
         log.warn(`Neo4j ${neo4jVersion} < 5.x: power(), vector indexes, and other 5.x-only features are unavailable`);
         logger?.warn?.(`[graph-memory-pro] Neo4j ${neo4jVersion} < 5.x: power()/vector-index unavailable — external plugins using power() will fail`);
       }
-    } catch { /* 版本检测失败不阻塞连接 */ }
+
+      // v2.4.1: 检测 Neo4j 版本代号（Enterprise/Community），条件启用企业版特性
+      const edition = await getNeo4jEdition(d);
+      setCachedEdition(edition);
+      const multiDb = supportsMultipleDatabases(edition);
+      log.info(`Neo4j edition detected: ${edition ?? "(unknown)"} (multi-database isolation: ${multiDb ? "enabled" : "not available — falling back to logical isolation"})`);
+      logger?.info?.(`[graph-memory-pro] Neo4j edition: ${edition ?? "unknown"}${multiDb ? " (multi-database isolation enabled)" : " (multi-database isolation NOT available — using logical isolation)"}`);
+      if (edition === "Community") {
+        logger?.info?.(`[graph-memory-pro] Community edition: vector index advanced HNSW/quantization options limited; database-level isolation unavailable`);
+      }
+    } catch { /* 版本/代号检测失败不阻塞连接 */ }
 
     return d;
   } catch (err) {

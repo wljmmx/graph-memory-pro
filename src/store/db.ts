@@ -26,6 +26,25 @@ let _activeDatabase = "neo4j";
 export type FlowScope = "production" | "benchmark";
 let _flowScope: FlowScope = "production";
 
+// v2.4.1: 缓存的 Neo4j 版本代号，供 withDatabase / schema 等在企业版/社区版间做不同行为。
+// 初始 null 表示"未检测/未知"，业务方按保守处理（社区版行为）。
+let _cachedEdition: Neo4jEdition = null;
+
+/** 获取缓存的 Neo4j 版本代号 */
+export function getCachedEdition(): Neo4jEdition {
+  return _cachedEdition;
+}
+
+/** 设置缓存的 Neo4j 版本代号（由 index.ts 连接检测后调用） */
+export function setCachedEdition(edition: Neo4jEdition): void {
+  _cachedEdition = edition;
+}
+
+/** 判断缓存的 edition 是否支持多数据库物理隔离 */
+export function cachedEditionSupportsMultiDb(): boolean {
+  return _cachedEdition === "Enterprise";
+}
+
 /** 获取当前流程作用域（默认 production） */
 export function getFlowScope(): FlowScope {
   return _flowScope;
@@ -141,6 +160,48 @@ export function isNeo4j5Plus(version: string | null): boolean {
   return parseInt(m[1], 10) >= 5;
 }
 
+/** Neo4j 版本代号（Enterprise / Community）；未知时为 null */
+export type Neo4jEdition = "Enterprise" | "Community" | null;
+
+/**
+ * v2.4.1: 检测连接的 Neo4j 版本代号（CALL dbms.components() YIELD edition）。
+ *
+ * 用途：区分企业版 / 社区版，条件启用仅企业版可用的特性：
+ *   - 多数据库隔离（withDatabase 切库）—— 仅 Enterprise 支持
+ *   - 精细 HNSW / 量化向量索引参数 —— Enterprise 与新版 Community 均部分支持，
+ *     由调用方结合版本进一步判断
+ *
+ * 返回 "Enterprise" / "Community"，检测失败返回 null（不阻塞，调用方按保守处理）。
+ */
+export async function getNeo4jEdition(driver: Driver): Promise<Neo4jEdition> {
+  const session = driver.session({ defaultAccessMode: neo4j.session.READ });
+  try {
+    const result = await session.run(
+      "CALL dbms.components() YIELD name, edition WHERE name = 'Neo4j Kernel' RETURN edition",
+    );
+    const edition = result.records[0]?.get("edition");
+    const s = edition ? String(edition).toLowerCase() : "";
+    if (s.includes("enterprise")) return "Enterprise";
+    if (s.includes("community")) return "Community";
+    return null;
+  } catch {
+    // dbms.components() 可能因权限或 server 版本不可用，静默失败
+    return null;
+  } finally {
+    await session.close();
+  }
+}
+
+/**
+ * v2.4.1: 判断是否支持多数据库物理隔离（withDatabase 切库）。
+ *
+ * 多库能力仅 Neo4j Enterprise 提供；Community 单库不支持。
+ * 与 getNeo4jEdition 配合使用：edition 未知时按不支持处理（保守，回落逻辑隔离）。
+ */
+export function supportsMultipleDatabases(edition: Neo4jEdition): boolean {
+  return edition === "Enterprise";
+}
+
 /**
  * 获取一个 Neo4j 会话
  * 调用方负责 `await session.close()`
@@ -179,9 +240,16 @@ export function getActiveDatabase(): string {
  *
  * 用途：benchmark 运行时临时切换到隔离的 benchmarks 数据库，避免污染生产数据。
  * 注意：所有经 getSession(driver) 创建的写会话都会继承该数据库名。
- * 需 Neo4j Enterprise 多库支持；Community 单库时请保持与生产一致（依赖 bench- 前缀 + 清理做逻辑隔离）。
+ *
+ * v2.4.1: 企业版识别。Community/未知 edition 不支持多数据库物理隔离，
+ * 此时不切换 _activeDatabase（避免对不存在库发起连接报错），直接执行 fn，
+ * 依赖 bench- 前缀 + :Benchmark 标签做逻辑隔离。
  */
 export async function withDatabase<T>(database: string, fn: () => Promise<T>): Promise<T> {
+  // Community/未知 edition：不支持多库，跳过切库（逻辑隔离兜底）
+  if (!cachedEditionSupportsMultiDb()) {
+    return fn();
+  }
   const prev = _activeDatabase;
   _activeDatabase = database;
   try {

@@ -7,7 +7,7 @@
 import type { Driver, Node, Relationship } from "neo4j-driver";
 import { createHash } from "crypto";
 import type { GmNode, GmEdge, EdgeType } from "../types.ts";
-import { getSession } from "./db.ts";
+import { getSession, getCachedEdition } from "./db.ts";
 
 // ─── 共享工具 ───────────────────────────────────────────────
 
@@ -89,26 +89,49 @@ export async function ensureSchema(driver: Driver, dimension: number = 1024): Pr
     //          2026.07 起 HFQ/Binary quantization 已 GA，需更省内存可试 'binary'
     //          （注意：binary 默认 search_expansion_factor 由 2.0 升为 3.0）
     //
+    // v2.4.1 企业版识别：CREATE VECTOR INDEX ... OPTIONS 的精细 HNSW/量化参数
+    // 在 Community 上支持有限（量化/HFQ 等部分选项不可用）。因此：
+    //   - Enterprise：尝试带精细 OPTIONS 的 CREATE VECTOR INDEX 语法
+    //   - Community/未知：使用不带 OPTIONS 的基础 CREATE VECTOR INDEX 语法
+    //   - 两者失败均回落过程化调用，保证可用性
+    //
     // 兼容策略：保留创建 3 个旧索引的语句（IF NOT EXISTS 语义，已存在则 no-op），
     //          避免破坏旧环境；查询层优先用合并索引，旧索引仅向后兼容。
+    const edition = getCachedEdition();
+    const isEnterprise = edition === "Enterprise";
     try {
       // Neo4j 2026.07+ 推荐语法：CREATE VECTOR INDEX 语法支持精细化 OPTIONS.indexConfig
       // 由于参数是字面量（options 不接受参数），对 dimension 参数内联拼接
       // 注意键名用下划线 ef_construction / ef_search（点号写法非 Neo4j 键名，会被忽略）
-      await session.run(`
-        CREATE VECTOR INDEX gm_node_embedding IF NOT EXISTS
-        FOR (n:Task|Skill|Event) ON n.embedding
-        OPTIONS {
-          indexConfig: {
-            \`vector.dimensions\`: ${dimension},
-            \`vector.similarity_function\`: 'cosine',
-            \`vector.quantization.type\`: 'scalar',
-            \`vector.hnsw.m\`: 16,
-            \`vector.hnsw.ef_construction\`: 128,
-            \`vector.hnsw.ef_search\`: 64
+      if (isEnterprise) {
+        // Enterprise：启用精细 HNSW + 量化参数
+        await session.run(`
+          CREATE VECTOR INDEX gm_node_embedding IF NOT EXISTS
+          FOR (n:Task|Skill|Event) ON n.embedding
+          OPTIONS {
+            indexConfig: {
+              \`vector.dimensions\`: ${dimension},
+              \`vector.similarity_function\`: 'cosine',
+              \`vector.quantization.type\`: 'scalar',
+              \`vector.hnsw.m\`: 16,
+              \`vector.hnsw.ef_construction\`: 128,
+              \`vector.hnsw.ef_search\`: 64
+            }
           }
-        }
-      `);
+        `);
+      } else {
+        // Community/未知：基础多 label 向量索引（不启用量化/HNSW 精细选项）
+        await session.run(`
+          CREATE VECTOR INDEX gm_node_embedding IF NOT EXISTS
+          FOR (n:Task|Skill|Event) ON n.embedding
+          OPTIONS {
+            indexConfig: {
+              \`vector.dimensions\`: ${dimension},
+              \`vector.similarity_function\`: 'cosine'
+            }
+          }
+        `);
+      }
     } catch {
       // 兼容老版本 Neo4j（不支持 CREATE VECTOR INDEX 语法或多 label 选项）回落过程化调用
       try {
