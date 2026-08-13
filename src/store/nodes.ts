@@ -24,10 +24,13 @@ export async function upsertNode(
   driver: Driver,
   node: GmNode,
   cfg?: GmConfig,
+  extraLabels?: string[],
 ): Promise<void> {
   const session = getSession(driver);
   try {
     const label = typeToLabel(node.type);
+    // v2.4.0: 附加业务标签（如 benchmark 节点打 :Benchmark），用于在生产查询中隔离
+    const extraLabelStr = (extraLabels ?? []).map((l) => `:${l}`).join("");
 
     // v2.3.1 P0-4 性能优化: 三步合并为单条 Cypher
     // 旧实现（3 次串行 session.run）：
@@ -97,7 +100,7 @@ export async function upsertNode(
     const hasNewHistory = newHistoryJson !== null;
 
     await session.run(
-      `MERGE (n:${label} {id: $id})
+      `MERGE (n:${label}${extraLabelStr} {id: $id})
        SET n.name = $name,
            n.description = $description,
            n.content = $content,
@@ -318,7 +321,7 @@ export async function searchNodes(
           const result = await session.run(
             `CALL db.index.fulltext.queryNodes($indexName, $query, { limit: toInteger($limit) })
              YIELD node AS n, score
-             WHERE n.status = 'active' OR n.status IS NULL
+             WHERE (n.status = 'active' OR n.status IS NULL) AND NOT n:Benchmark
              RETURN n, score`,
             { indexName, query, limit },
           );
@@ -350,7 +353,7 @@ export async function searchNodes(
     const session = getSession(driver);
     try {
       const result = await session.run(
-        `MATCH (n:Task|Skill|Event|ConversationMessage) WHERE (n.status = 'active' OR n.status IS NULL)
+        `MATCH (n:Task|Skill|Event|ConversationMessage) WHERE (n.status = 'active' OR n.status IS NULL) AND NOT n:Benchmark
          AND (
             n.name CONTAINS $query
             OR n.description CONTAINS $query
@@ -387,7 +390,7 @@ export async function vectorSearchWithScore(
       const result = await session.run(
         `CALL db.index.vector.queryNodes($indexName, toInteger($topK), $vec)
          YIELD node, score
-         WITH node, score WHERE node.status = 'active'
+         WITH node, score WHERE node.status = 'active' AND NOT node:Benchmark
          RETURN node, score
          ORDER BY score DESC`,
         { indexName: MERGED_INDEX, vec, topK },
@@ -410,7 +413,7 @@ export async function vectorSearchWithScore(
           const result = await s.run(
             `CALL db.index.vector.queryNodes($indexName, toInteger($topK), $vec)
              YIELD node, score
-             WITH node, score WHERE node.status = 'active'
+             WITH node, score WHERE node.status = 'active' AND NOT node:Benchmark
              RETURN node, score
              ORDER BY score DESC`,
             { indexName, vec, topK },
@@ -468,6 +471,8 @@ export async function graphWalk(
       `MATCH path = (start:Task|Skill|Event)-[r:${relTypes}*1..${depth}]-(end:Task|Skill|Event)
        WHERE start.id IN $seedIds
          AND start.status = 'active'
+         AND NOT start:Benchmark
+         AND NOT end:Benchmark
        WITH path LIMIT toInteger($maxPaths)
        UNWIND nodes(path) AS n
        UNWIND relationships(path) AS rel
@@ -495,7 +500,7 @@ export async function getNodeCount(driver: Driver): Promise<number> {
     // v2.3.5 修复: status 过滤兼容 NULL（与 searchNodes 一致），
     // 旧数据或导入数据可能没有 status 属性
     const result = await session.run(
-      "MATCH (n:Task|Skill|Event) WHERE n.status = 'active' OR n.status IS NULL RETURN count(n) AS c",
+      "MATCH (n:Task|Skill|Event) WHERE (n.status = 'active' OR n.status IS NULL) AND NOT n:Benchmark RETURN count(n) AS c",
     );
     return result.records[0]?.get("c")?.toNumber?.() ?? 0;
   } finally {
@@ -533,8 +538,8 @@ export async function getNodesByType(
     // v2.3.5 修复: status 过滤兼容 NULL（与 searchNodes 一致），
     // 旧数据或导入数据可能没有 status 属性
     const q = limit
-      ? `MATCH (n:${label}) WHERE n.status = 'active' OR n.status IS NULL RETURN n ORDER BY n.validatedCount DESC LIMIT toInteger($limit)`
-      : `MATCH (n:${label}) WHERE n.status = 'active' OR n.status IS NULL RETURN n ORDER BY n.validatedCount DESC`;
+      ? `MATCH (n:${label}) WHERE (n.status = 'active' OR n.status IS NULL) AND NOT n:Benchmark RETURN n ORDER BY n.validatedCount DESC LIMIT toInteger($limit)`
+      : `MATCH (n:${label}) WHERE (n.status = 'active' OR n.status IS NULL) AND NOT n:Benchmark RETURN n ORDER BY n.validatedCount DESC`;
     const result = await session.run(q, { limit: limit ?? 0 });
     return result.records.map((r) => recordToNode(r.get("n"))).filter((n): n is GmNode => n !== null);
   } finally {
@@ -552,7 +557,7 @@ export async function getTopNodes(
     // 旧数据或导入数据可能没有 status 属性
     const result = await session.run(
       `MATCH (n:Task|Skill|Event)
-       WHERE n.status = 'active' OR n.status IS NULL
+       WHERE (n.status = 'active' OR n.status IS NULL) AND NOT n:Benchmark
        RETURN n
        ORDER BY n.pagerank DESC, n.validatedCount DESC
        LIMIT toInteger($limit)`,

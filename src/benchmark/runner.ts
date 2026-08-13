@@ -343,7 +343,7 @@ async function buildGraphFromConversation(
           validatedCount: pn.validatedCount ?? 0,
           createdAt: pn.createdAt ?? now,
           updatedAt: pn.updatedAt ?? now,
-        });
+        }, undefined, ["Benchmark"]);
         if (batchEmbedFn || embedFn) {
           embedCandidates.push({
             nodeId: id,
@@ -440,7 +440,7 @@ async function buildGraphFromConversation(
         validatedCount: 0,
         createdAt: now,
         updatedAt: now,
-      });
+      }, undefined, ["Benchmark"]);
       if (batchEmbedFn || embedFn) {
         embedCandidates.push({
           nodeId: id,
