@@ -23,7 +23,7 @@ import {
   markDirty, getDirtyNodeIds, clearDirty,
 } from "../graph/incremental-maintenance.ts";
 import type { CompleteFn } from "../engine/llm.ts";
-import type { EmbedFn } from "../engine/embed.ts";
+import type { EmbedFn, BatchEmbedFn } from "../engine/embed.ts";
 import type { Recaller } from "../recaller/recall.ts";
 import { VERSION } from "../version.ts";
 
@@ -31,6 +31,7 @@ let _driver: Driver | null = null;
 let _cfg: GmConfig | null = null;
 let _llm: CompleteFn | null = null;
 let _embed: EmbedFn | null = null;
+let _batchEmbed: BatchEmbedFn | null = null;
 let _recaller: Recaller | null = null;
 
 export function initRoutes(
@@ -39,11 +40,13 @@ export function initRoutes(
   llm?: CompleteFn,
   embed?: EmbedFn,
   recaller?: Recaller,
+  batchEmbed?: BatchEmbedFn,
 ): void {
   _driver = driver;
   _cfg = cfg;
   _llm = llm ?? null;
   _embed = embed ?? null;
+  _batchEmbed = batchEmbed ?? null;
   _recaller = recaller ?? null;
 }
 
@@ -1153,7 +1156,8 @@ async function handleReembed(params: Record<string, unknown>): Promise<{ status:
   try {
     const { reEmbedNodes } = await import("../graph/reembed.ts");
     const batchSize = (params?.batchSize ?? 50) as number;
-    const result = await reEmbedNodes(_driver, _embed, batchSize, _cfg.embedding?.model);
+    // v2.4.0: 传入 _batchEmbed，正式流程重嵌入工具启用批量嵌入（缓解 Ollama 503）
+    const result = await reEmbedNodes(_driver, _embed, batchSize, _cfg.embedding?.model, undefined, _batchEmbed ?? undefined);
     return { status: 200, body: result };
   } catch (err: unknown) {
     return { status: 500, body: { error: (err as Error).message } };

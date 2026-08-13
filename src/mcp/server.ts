@@ -21,7 +21,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import type { GmConfig } from "../types.ts";
 import type { CompleteFn } from "../engine/llm.ts";
-import type { EmbedFn } from "../engine/embed.ts";
+import type { EmbedFn, BatchEmbedFn } from "../engine/embed.ts";
 import type { Recaller } from "../recaller/recall.ts";
 import {
   upsertNode, findById, searchNodes, getTopNodes, getNodesByType,
@@ -60,6 +60,7 @@ export async function startMcpServer(
   llm?: CompleteFn,
   embed?: EmbedFn,
   recaller?: Recaller,
+  batchEmbed?: BatchEmbedFn,
 ): Promise<McpServerHandle> {
   const port = cfg.mcp?.port ?? 7800;
   const host = cfg.mcp?.host ?? "127.0.0.1";
@@ -326,7 +327,7 @@ export async function startMcpServer(
           return { content: [{ type: "text", text: "Embed function not configured" }] };
         }
         try {
-          const result = await withTimeout(() => reEmbedNodes(driver, embed, batchSize ?? 50, cfg.embedding?.model), 120_000, "gm_reembed");
+          const result = await withTimeout(() => reEmbedNodes(driver, embed, batchSize ?? 50, cfg.embedding?.model, undefined, batchEmbed), 120_000, "gm_reembed");
           return {
             content: [{ type: "text", text: `Re-embedded ${result.reEmbedded}/${result.totalScanned} nodes, ${result.failed} failed, ${result.durationMs}ms` }],
             structuredContent: asStructured(result),

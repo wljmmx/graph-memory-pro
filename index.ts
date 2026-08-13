@@ -677,7 +677,7 @@ async function doGatewayInit(api: any, logger: LoggerLike): Promise<void> {
       _apiServerDriver = driver;
       try {
         const { initRoutes } = await import("./src/routes/crud.ts");
-        initRoutes(driver, _cfg, _llm ?? undefined, _embed ?? undefined, _recaller ?? undefined);
+        initRoutes(driver, _cfg, _llm ?? undefined, _embed ?? undefined, _recaller ?? undefined, _batchEmbed ?? undefined);
         logger?.info?.("[graph-memory-pro] gateway components re-injected into API routes");
       } catch (err) {
         logger?.warn?.(`[graph-memory-pro] component re-injection failed: ${err}`);
@@ -687,7 +687,7 @@ async function doGatewayInit(api: any, logger: LoggerLike): Promise<void> {
       logger?.info?.("[graph-memory-pro] API server already started, re-injecting components (LLM/Embed/Recaller)");
       try {
         const { initRoutes } = await import("./src/routes/crud.ts");
-        initRoutes(driver, _cfg, _llm ?? undefined, _embed ?? undefined, _recaller ?? undefined);
+        initRoutes(driver, _cfg, _llm ?? undefined, _embed ?? undefined, _recaller ?? undefined, _batchEmbed ?? undefined);
         logger?.info?.("[graph-memory-pro] components re-injected into API routes");
       } catch (err) {
         logger?.warn?.(`[graph-memory-pro] component re-injection failed: ${err}`);
@@ -1182,6 +1182,7 @@ export default definePluginEntry({
               _llm ?? undefined,
               _embed ?? undefined,
               _recaller ?? undefined,
+              _batchEmbed ?? undefined,
             );
             // v2.3.3 MCP-1: 启动后健康探测，确认 server 真正就绪（非仅 listen 成功）
             const port = _cfg.mcp?.port ?? 7800;

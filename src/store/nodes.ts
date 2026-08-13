@@ -196,6 +196,14 @@ export async function batchUpsertNodes(
         validatedCount: n.validatedCount,
         createdAt: neo4j.int(n.createdAt),
         updatedAt: neo4j.int(n.updatedAt),
+        // v2.4.0: 与 upsertNode 语义对齐，批量导入也补齐时序/来源/状态默认值，
+        // 避免历史/批量导入节点 recordedAt/validFrom 等为空导致时序检索失真
+        recordedAt: neo4j.int(n.recordedAt ?? n.createdAt),
+        validFrom: neo4j.int(n.validFrom ?? n.createdAt),
+        source: n.source ?? "experience",
+        state: n.state ?? "current",
+        stalenessScore: n.stalenessScore ?? 0.0,
+        importanceScore: n.importanceScore ?? 0.0,
         embeddingModel: n.embeddingModel ?? null,
         embeddingHash: computeEmbeddingHash(n.name, n.description, n.content),
       };
@@ -249,6 +257,12 @@ export async function batchUpsertNodes(
              n.validatedCount = row.validatedCount,
              n.createdAt = row.createdAt,
              n.updatedAt = row.updatedAt,
+             n.recordedAt = COALESCE(row.recordedAt, row.createdAt),
+             n.validFrom = COALESCE(row.validFrom, row.createdAt),
+             n.source = COALESCE(row.source, 'experience'),
+             n.state = COALESCE(row.state, 'current'),
+             n.stalenessScore = COALESCE(row.stalenessScore, 0.0),
+             n.importanceScore = COALESCE(row.importanceScore, 0.0),
              n.embeddingModel = row.embeddingModel,
              n.embeddingHash = row.embeddingHash
          RETURN count(n) AS c`,
