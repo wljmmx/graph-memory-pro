@@ -1446,43 +1446,57 @@ async function handleSchema(): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
   try {
     // 查询节点标签和计数
-    const { getSession } = await import("../store/db.ts");
-    const session = getSession(_driver);
-    try {
-      const labelResult = await session.run(
-        `CALL db.labels() YIELD label
-         RETURN label`,
+    const { getActiveDatabase } = await import("../store/db.ts");
+    const database = getActiveDatabase();
+    // v2.4.1: 并发 → 串行 + executeQuery。
+    //   修复：旧实现用同一 session 并发多次 session.run()，在 Neo4j 下同一 session 不允许在途
+    //   并发事务，会抛 "Cannot have concurrent transactions on the same session"。
+    //   driver.executeQuery 每次自动走独立隐式事务（autocommit），可安全串行多次调用；
+    //   for...of await 消除并发在途查询。
+    //   注：neo4j-driver v6 的 executeQuery 仅存在于 Driver 上（session.executeQuery 运行时不存在），
+    //   故用 _driver.executeQuery 并显式传激活库名，保持与 getSession 的库绑定一致。
+    //   标签/类型用反引号包裹，防止含特殊字符的标识符破坏 Cypher。
+    const nodeTypes: { label: string; count: number }[] = [];
+    const labelResult = await _driver.executeQuery(
+      `CALL db.labels() YIELD label RETURN label`,
+      {},
+      { database },
+    );
+    for (const rec of labelResult.records) {
+      const label = rec.get("label");
+      const countResult = await _driver.executeQuery(
+        `MATCH (n:\`${label}\`) RETURN count(n) AS cnt`,
+        {},
+        { database },
       );
-      const nodeTypes = await Promise.all(labelResult.records.map(async (rec) => {
-        const label = rec.get("label");
-        const countResult = await session.run(`MATCH (n:${label}) RETURN count(n) AS cnt`);
-        const count = countResult.records[0]?.get("cnt")?.toNumber?.() ?? 0;
-        return { label, count };
-      }));
-
-      const relResult = await session.run(
-        `CALL db.relationshipTypes() YIELD relationshipType
-         RETURN relationshipType`,
-      );
-      const edgeTypes = await Promise.all(relResult.records.map(async (rec) => {
-        const type = rec.get("relationshipType");
-        const countResult = await session.run(`MATCH ()-[r:${type}]->() RETURN count(r) AS cnt`);
-        const count = countResult.records[0]?.get("cnt")?.toNumber?.() ?? 0;
-        return { type, count };
-      }));
-
-      return {
-        status: 200,
-        body: {
-          nodeTypes: nodeTypes.filter(n => !n.label.startsWith("_")),
-          edgeTypes: edgeTypes.filter(e => !e.type.startsWith("_")),
-          indexingModels: _cfg?.embedding?.model ?? null,
-          vectorDimension: _cfg?.embedding?.dimensions ?? null,
-        },
-      };
-    } finally {
-      await session.close();
+      nodeTypes.push({ label, count: countResult.records[0]?.get("cnt")?.toNumber?.() ?? 0 });
     }
+
+    const edgeTypes: { type: string; count: number }[] = [];
+    const relResult = await _driver.executeQuery(
+      `CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType`,
+      {},
+      { database },
+    );
+    for (const rec of relResult.records) {
+      const type = rec.get("relationshipType");
+      const countResult = await _driver.executeQuery(
+        `MATCH ()-[r:\`${type}\`]->() RETURN count(r) AS cnt`,
+        {},
+        { database },
+      );
+      edgeTypes.push({ type, count: countResult.records[0]?.get("cnt")?.toNumber?.() ?? 0 });
+    }
+
+    return {
+      status: 200,
+      body: {
+        nodeTypes: nodeTypes.filter(n => !n.label.startsWith("_")),
+        edgeTypes: edgeTypes.filter(e => !e.type.startsWith("_")),
+        indexingModels: _cfg?.embedding?.model ?? null,
+        vectorDimension: _cfg?.embedding?.dimensions ?? null,
+      },
+    };
   } catch (err: unknown) {
     return { status: 500, body: { error: (err as Error).message } };
   }
