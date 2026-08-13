@@ -108,6 +108,7 @@
     "importanceFloor": 0.2
   },
   "benchmark": {
+    "$comment": "v2.4.0: 评测会跑真实全链路（建图 + 召回 + 反馈 + 关联矩阵 M 在线学习）。当 associationMatrix.enabled=true 时，benchmark 会创建一份隔离的 M（不加载生产持久化）并在每个样本召回后走真实 processFeedback 反馈训练，使后续召回受益于已学到的 M，从而衡量真实系统的在线学习能力而非静态召回",
     "enabled": false,
     "dataDir": "",
     "maxCases": 0,

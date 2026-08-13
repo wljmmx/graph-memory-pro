@@ -171,6 +171,35 @@ export async function runBenchmark(
 
   // 3. 逐样本评测
   const reports: BenchmarkReport[] = [];
+
+  // v2.4.0: 全链路——真实训练一份隔离的关联矩阵 M（benchmarks 专用，不加载生产持久化）
+  //
+  // 此前 benchmark 仅做「注入 prebuilt 节点 + 静态召回」，从不训练 M、也不跑反馈，
+  // 无法衡量真实系统的「在线学习」部分。这里：
+  //   - 若 cfg.associationMatrix.enabled 为 true（与生产一致的开头），创建一份全新的 M
+  //     （不恢复持久化，隔离于生产），并注入 JudgeManager，走真实反馈链路。
+  //   - 评测期间每次 recall 后调用 recaller.processFeedback(...)（真实 judge → 反馈落库 →
+  //     incrementFeedback → updateAssociationMatrix），使后续 recall 受益于已学到的 M。
+  //   - 这样 benchmark 衡量的是「真实全链路（建图 + 召回 + 反馈 + M 在线学习）」而非静态召回。
+  let trainM = false;
+  if (cfg.associationMatrix?.enabled === true && cfg.embedding?.dimensions) {
+    try {
+      const { createAssociationMatrix } = await import("../recaller/association-matrix.ts");
+      recaller.setAssociationMatrix(createAssociationMatrix(cfg.embedding.dimensions, cfg));
+      trainM = true;
+    } catch (err) {
+      log.warn(`benchmark: association-matrix init failed (${(err as Error)?.message ?? err}), run without M`);
+    }
+  }
+  if (cfg.judge?.enabled !== false && !recaller.getJudgeManager()) {
+    try {
+      const { JudgeManager } = await import("../recaller/judge.ts");
+      recaller.setJudgeManager(new JudgeManager(cfg.judge, llm ?? undefined));
+    } catch {
+      /* judge 不可用则跳过反馈训练 */
+    }
+  }
+
   for (const dataset of targetDatasets) {
     const cases = maxCases > 0 ? dataset.cases.slice(0, maxCases) : dataset.cases;
     const caseResults: CaseResult[] = [];
@@ -192,6 +221,21 @@ export async function runBenchmark(
 
         const caseResult = evaluateCase(testCase, recallResult, latencyMs);
         caseResults.push(caseResult);
+
+        // v2.4.0: 真实反馈训练 M（不阻塞评测；仅当 M 已启用且召回到节点时）
+        if (trainM && recallResult.nodes.length > 0) {
+          try {
+            await recaller.processFeedback(
+              testCase.query,
+              recallResult.nodes,
+              testCase.expectedAnswer ?? "",
+              testCase.id,
+              { sync: true },
+            );
+          } catch {
+            /* 反馈失败不影响评测 */
+          }
+        }
       } catch {
         // 超时或失败的样本记为未命中
         caseResults.push({

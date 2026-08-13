@@ -23,9 +23,9 @@ import { Type } from "typebox";
 import type { Driver } from "neo4j-driver";
 import type { GmConfig, GmNode, NodeType } from "./src/types.ts";
 import type { CompleteFn } from "./src/engine/llm.ts";
-import type { EmbedFn } from "./src/engine/embed.ts";
+import type { EmbedFn, BatchEmbedFn } from "./src/engine/embed.ts";
 import { createCompleteFn, createRuntimeCompleteFn } from "./src/engine/llm.ts";
-import { createEmbedFn } from "./src/engine/embed.ts";
+import { createEmbedFn, createBatchEmbedFn } from "./src/engine/embed.ts";
 import { initDriver, closeDriver, verifyWithRetry, getDriver, setDriver as setDbDriver } from "./src/store/db.ts";
 import { ensureSchema, getNodeCount, getEdgeCount, searchNodes, upsertNode, findById } from "./src/store/store.ts";
 import { Extractor } from "./src/extractor/extract.ts";
@@ -78,6 +78,8 @@ let _driver: Driver | null = null;
 let _cfg: GmConfig | null = null;
 let _llm: CompleteFn | null = null;
 let _embed: EmbedFn | null = null;
+// v2.4.0: 批量嵌入（正式流程全量重嵌入/模型迁移时一次请求携带多个文本，缓解 Ollama 503）
+let _batchEmbed: BatchEmbedFn | null = null;
 let _extractor: Extractor | null = null;
 let _recaller: Recaller | null = null;
 let _extractorTimer: ReturnType<typeof setInterval> | null = null;
@@ -393,6 +395,7 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
     if (!_embed && cfg.embedding) {
       try {
         _embed = createEmbedFn(cfg.embedding);
+        _batchEmbed = createBatchEmbedFn(cfg.embedding);
         log.info("self-init: Embedding initialized");
       } catch (err) {
         log.warn(`self-init: Embedding init failed: ${err}`);
@@ -621,6 +624,7 @@ async function doGatewayInit(api: any, logger: LoggerLike): Promise<void> {
     }
   }
   _embed = _cfg.embedding ? createEmbedFn(_cfg.embedding) : null;
+  _batchEmbed = _cfg.embedding ? createBatchEmbedFn(_cfg.embedding) : null;
 
   // 4. 初始化 Recaller / Extractor
   _recaller = new Recaller(driver, _cfg);
@@ -1144,7 +1148,7 @@ export default definePluginEntry({
           _maintenanceRunning = true;
           try {
             logger?.info?.("[graph-memory-pro] background maintenance start");
-            const result = await runMaintenance(_driver, _cfg, _llm ?? undefined, _embed ?? undefined);
+            const result = await runMaintenance(_driver, _cfg, _llm ?? undefined, _embed ?? undefined, _batchEmbed ?? undefined);
             logger?.info?.(`[graph-memory-pro] maintenance done: ${result.dedup.merged} merged, ${result.community.count} communities`);
           } catch (err) {
             logger?.warn?.(`[graph-memory-pro] maintenance error: ${err}`);
@@ -1361,7 +1365,7 @@ export default definePluginEntry({
             getNodeCount(_driver),
             getEdgeCount(_driver),
           ]);
-          const result = await runMaintenance(_driver, _cfg, _llm ?? undefined, _embed ?? undefined);
+          const result = await runMaintenance(_driver, _cfg, _llm ?? undefined, _embed ?? undefined, _batchEmbed ?? undefined);
 
           // v2.1.2 G-5: 维护后追加健康报告
           let healthReport: GraphHealthReport | null = null;
@@ -1457,7 +1461,8 @@ export default definePluginEntry({
         }
         try {
           // 传入 embeddingModel，避免清空所有节点的 embeddingModel 字段（G-4 修复）
-          const result = await reEmbedNodes(_driver, _embed, 50, _cfg.embedding?.model);
+          // v2.4.0: 传入 batchEmbedFn，正式流程全量重嵌入启用批量（缓解 Ollama 503）
+          const result = await reEmbedNodes(_driver, _embed, 50, _cfg.embedding?.model, undefined, _batchEmbed ?? undefined);
           const lines = [
             "Re-Embed done",
             `Scanned: ${result.totalScanned} nodes`,

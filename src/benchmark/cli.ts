@@ -181,6 +181,8 @@ async function main(): Promise<void> {
   // 3. 初始化 LLM / Embed
   const llm = createCompleteFn(cfg.llm);
   const embed = cfg.embedding ? createEmbedFn(cfg.embedding) : null;
+  // v2.4.0: 批量嵌入（建图时一次请求携带多个文本，减少请求数，缓解 Ollama 503）
+  const batchEmbed = cfg.embedding ? createBatchEmbedFn(cfg.embedding) : null;
 
   // 4. 初始化 Recaller
   const recaller = new Recaller(driver, cfg);
@@ -196,6 +198,7 @@ async function main(): Promise<void> {
       caseTimeoutMs,
       llm: llm ?? undefined,
       embedFn: embed ?? undefined,
+      batchEmbedFn: batchEmbed ?? undefined,
     });
 
     console.log("");

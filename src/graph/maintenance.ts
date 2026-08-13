@@ -13,7 +13,7 @@
 import type { Driver } from "neo4j-driver";
 import type { GmConfig } from "../types.ts";
 import type { CompleteFn } from "../engine/llm.ts";
-import type { EmbedFn } from "../engine/embed.ts";
+import type { EmbedFn, BatchEmbedFn } from "../engine/embed.ts";
 import { computeGlobalPageRank, type GlobalPageRankResult } from "./pagerank.ts";
 import { detectCommunities, detectHierarchicalCommunities, summarizeCommunities, type CommunityResult } from "./community.ts";
 import { dedup, type DedupResult } from "./dedup.ts";
@@ -116,7 +116,7 @@ function releaseLock(): void {
 }
 
 export async function runMaintenance(
-  driver: Driver, cfg: GmConfig, llm?: CompleteFn, embedFn?: EmbedFn,
+  driver: Driver, cfg: GmConfig, llm?: CompleteFn, embedFn?: EmbedFn, batchEmbedFn?: BatchEmbedFn,
 ): Promise<MaintenanceResult> {
   if (!tryAcquireLock()) {
     log.info("maintenance already running, skip");
@@ -330,7 +330,7 @@ export async function runMaintenance(
     if (cfg?.evolvableEmbedding?.enabled !== false && cfg?.embedding?.model && embedFn) {
       try {
         const { detectAndMigrateEmbeddings } = await import("./reembed.ts");
-        const migrationResult = await detectAndMigrateEmbeddings(driver, embedFn, cfg.embedding.model);
+        const migrationResult = await detectAndMigrateEmbeddings(driver, embedFn, cfg.embedding.model, batchEmbedFn);
         if (migrationResult.cleared > 0 || migrationResult.migrationTriggered) {
           log.info(
             "embedding-migration",

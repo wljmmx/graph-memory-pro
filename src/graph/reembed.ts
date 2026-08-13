@@ -1,7 +1,7 @@
 import type { Driver } from "neo4j-driver";
-import type { EmbedFn } from "../engine/embed.ts";
+import type { EmbedFn, BatchEmbedFn } from "../engine/embed.ts";
 import type { GmConfig } from "../types.ts";
-import { embedNode } from "../store/embed-helper.ts";
+import { embedNode, embedNodeBatch, type BatchEmbedNodeItem } from "../store/embed-helper.ts";
 
 export interface ReEmbedResult {
   totalScanned: number;
@@ -17,8 +17,9 @@ export async function reEmbedNodes(
   batchSize = 50,
   embeddingModel?: string,
   cfg?: GmConfig,
+  batchEmbedFn?: BatchEmbedFn,
 ): Promise<ReEmbedResult> {
-  if (!embedFn) {
+  if (!embedFn && !batchEmbedFn) {
     return { totalScanned: 0, reEmbedded: 0, failed: 0, skipped: 1, durationMs: 0 };
   }
 
@@ -48,6 +49,37 @@ export async function reEmbedNodes(
         // Reset failure counter on successful query
         consecutiveFailures = 0;
 
+        // v2.4.0: 批量嵌入——一次请求携带多个节点文本，显著减少 HTTP 请求数，
+        // 降低本地 Ollama 请求队列压力（503 maximum pending 触发概率）。
+        // 优先走 batchEmbedFn；未注入时回退到单文本 embedNode（向后兼容）。
+        if (batchEmbedFn) {
+          const items: BatchEmbedNodeItem[] = [];
+          for (const rec of nodes) {
+            const nodeId = rec.get("id") as string;
+            const name = rec.get("name") || "";
+            const desc = rec.get("description") || "";
+            const content = rec.get("content") || "";
+            if (!name.trim() && !desc.trim() && !content.trim()) {
+              continue;
+            }
+            items.push({
+              nodeId,
+              params: {
+                name,
+                description: desc,
+                content,
+                embeddingModel: embeddingModel ?? undefined,
+              },
+            });
+          }
+          totalScanned += nodes.length;
+          const embedded = await embedNodeBatch(driver, batchEmbedFn, items, cfg);
+          reEmbedded += embedded;
+          skipped += nodes.length - embedded;
+          await new Promise((r) => setTimeout(r, 200));
+          continue;
+        }
+
         for (const rec of nodes) {
           try {
             const nodeId = rec.get("id") as string;
@@ -62,7 +94,7 @@ export async function reEmbedNodes(
             }
 
             // v2.4.0 点2/点6: 通过 embedNode 统一处理记忆切片长度与长文本分段嵌入
-            const vectors = await embedNode(driver, embedFn, nodeId, {
+            const vectors = await embedNode(driver, embedFn!, nodeId, {
               name,
               description: desc,
               content,
@@ -137,6 +169,7 @@ export async function detectAndMigrateEmbeddings(
   driver: Driver,
   embedFn: EmbedFn | undefined,
   configuredModel?: string,
+  batchEmbedFn?: BatchEmbedFn,
 ): Promise<MigrationResult & { reEmbed?: ReEmbedResult }> {
   if (!configuredModel) {
     return {
@@ -200,8 +233,8 @@ export async function detectAndMigrateEmbeddings(
     }
 
     // 触发全量重嵌入（清空的节点会被 reEmbedNodes 重新嵌入）
-    if (embedFn) {
-      const reEmbed = await reEmbedNodes(driver, embedFn, 50, configuredModel);
+    if (embedFn || batchEmbedFn) {
+      const reEmbed = await reEmbedNodes(driver, embedFn, 50, configuredModel, undefined, batchEmbedFn);
       return {
         configuredModel,
         modelDistribution,
