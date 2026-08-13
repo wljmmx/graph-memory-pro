@@ -143,6 +143,16 @@ export function getEmbedCacheStats(): EmbedCacheStats[] {
 }
 
 /**
+ * v2.4.0: 清空模块级 embed 状态（LRU 缓存 + 共享信号量 + 命中率统计）。
+ * 用途：测试隔离（避免跨用例共享缓存导致断言失真），以及运行期配置变更后重置缓存。
+ */
+export function clearEmbedCacheAll(): void {
+  _embedCacheHandles.clear();
+  _semaphores.clear();
+  _embedCacheStats.clear();
+}
+
+/**
  * 清洗 baseURL：去除反引号、首尾空格、尾部斜杠
  * 防止 markdown 代码块标记 ` ` 误入 JSON 配置
  */

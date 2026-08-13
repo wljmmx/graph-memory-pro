@@ -18,7 +18,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createCompleteFn, createRuntimeCompleteFn, __test__ } from "../src/engine/llm.ts";
-import { createEmbedFn } from "../src/engine/embed.ts";
+import { createEmbedFn, clearEmbedCacheAll } from "../src/engine/embed.ts";
 
 /** 构造一个最小可用的 mock Response（避免依赖真实 Response 构造器） */
 function mockResponse(body: unknown, init: { ok?: boolean; status?: number } = {}): Response {
@@ -650,6 +650,8 @@ describe("createEmbedFn", () => {
   let fetchSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
+    // v2.4.0: 清空模块级 embed LRU 缓存，避免跨用例共享缓存导致断言失真
+    clearEmbedCacheAll();
     fetchSpy = vi.spyOn(globalThis, "fetch");
   });
 
