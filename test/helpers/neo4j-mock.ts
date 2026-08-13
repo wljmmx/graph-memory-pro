@@ -60,6 +60,17 @@ export interface MockSession {
   close(): Promise<void>;
 }
 
+export interface MockQueryResult {
+  records: any[];
+}
+
+/** executeQuery 的调用记录 */
+export interface ExecuteQueryCall {
+  query: string;
+  params: Record<string, any>;
+  config: Record<string, any>;
+}
+
 export interface MockDriver {
   /** 创建 session */
   session(): MockSession;
@@ -73,6 +84,21 @@ export interface MockDriver {
   queueResults(results: any[][]): void;
   /** 当前 session 实例 */
   _currentSession: MockSession | null;
+  /**
+   * v2.4.1: 模拟 driver.executeQuery（autocommit 独立事务）。
+   * 记录每次调用，按队列顺序返回结果。
+   */
+  executeQuery(
+    query: string,
+    params?: Record<string, any>,
+    config?: Record<string, any>,
+  ): Promise<MockQueryResult>;
+  /** 获取所有 executeQuery 调用记录 */
+  getExecuteQueryCalls(): ExecuteQueryCall[];
+  /** 预置 executeQuery 返回结果队列 */
+  queueExecuteQueryResult(records: any[]): void;
+  /** 预置多个 executeQuery 返回结果 */
+  queueExecuteQueryResults(results: any[][]): void;
 }
 
 /** 创建 MockSession */
@@ -101,6 +127,8 @@ export function mockSession(initialResults: any[] = []): MockSession {
 
 /** 创建 MockDriver */
 export function mockDriver(): MockDriver {
+  const executeQueryQueue: any[] = [];
+  const executeQueryCalls: ExecuteQueryCall[] = [];
   let currentSession: MockSession | null = null;
   const driver: MockDriver = {
     _currentSession: null,
@@ -122,6 +150,26 @@ export function mockDriver(): MockDriver {
     queueResults(results: any[][]) {
       if (!currentSession) currentSession = mockSession();
       currentSession.resultQueue = [...results];
+    },
+    async executeQuery(
+      query: string,
+      params: Record<string, any> = {},
+      config: Record<string, any> = {},
+    ) {
+      executeQueryCalls.push({ query, params, config });
+      const r = executeQueryQueue.shift();
+      return {
+        records: Array.isArray(r) ? r.map(mockRecord) : [],
+      };
+    },
+    getExecuteQueryCalls() {
+      return executeQueryCalls;
+    },
+    queueExecuteQueryResult(records: any[]) {
+      executeQueryQueue.push(records);
+    },
+    queueExecuteQueryResults(results: any[][]) {
+      executeQueryQueue.push(...results);
     },
   };
   return driver;

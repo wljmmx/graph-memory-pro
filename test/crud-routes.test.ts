@@ -621,3 +621,108 @@ describe("handleAssociationMatrixState", () => {
     expect(result.body.enabled).toBe(false);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════
+// handleSchema — 图谱结构自省（v2.4.1 并发→串行修复）
+// ═══════════════════════════════════════════════════════════════
+
+describe("handleSchema /api/schema", () => {
+  it("1. 未连接 driver → 503", async () => {
+    initRoutes(null as any, baseConfig);
+    const handler = findHandler("/api/schema");
+    const result = await handler({});
+    expect(result.status).toBe(503);
+  });
+
+  it("2. 全部通过 driver.executeQuery 串行调用（不再复用同一 session 并发 run）", async () => {
+    const driver = mockDriver() as any;
+    initRoutes(driver, baseConfig);
+
+    // 预置 executeQuery 队列：
+    //   0: db.labels() → 2 个标签
+    //   1: count(Task) → 3
+    //   2: count(Skill) → 5
+    //   3: db.relationshipTypes() → 1 个类型
+    //   4: count(REL) → 7
+    driver.queueExecuteQueryResults([
+      [{ label: "Task" }, { label: "Skill" }],
+      [{ cnt: 3 }],
+      [{ cnt: 5 }],
+      [{ relationshipType: "REL" }],
+      [{ cnt: 7 }],
+    ]);
+
+    const handler = findHandler("/api/schema");
+    const result = await handler({});
+
+    expect(result.status).toBe(200);
+    const calls = driver.getExecuteQueryCalls();
+    // 1(labels) + 2(count) + 1(relTypes) + 1(count) = 5 次 executeQuery
+    expect(calls).toHaveLength(5);
+
+    // 每个标签/类型的计数查询都显式传 database（保持与 getSession 库绑定一致）
+    for (const c of calls) {
+      expect(c.config.database).toBeDefined();
+    }
+
+    // 结果正确组装
+    expect(result.body.nodeTypes).toEqual([
+      { label: "Task", count: 3 },
+      { label: "Skill", count: 5 },
+    ]);
+    expect(result.body.edgeTypes).toEqual([{ type: "REL", count: 7 }]);
+  });
+
+  it("3. 标签/类型用反引号包裹，防止特殊字符破坏 Cypher", async () => {
+    const driver = mockDriver() as any;
+    initRoutes(driver, baseConfig);
+
+    driver.queueExecuteQueryResults([
+      [{ label: "Task-特殊:标签" }],   // 含 - : 等特殊字符
+      [{ cnt: 1 }],
+      [{ relationshipType: "REL.TO" }],
+      [{ cnt: 2 }],
+    ]);
+
+    const handler = findHandler("/api/schema");
+    await handler({});
+
+    const calls = driver.getExecuteQueryCalls();
+    // 计数查询：标签/类型被反引号包裹
+    expect(calls[1].query).toBe("MATCH (n:`Task-特殊:标签`) RETURN count(n) AS cnt");
+    expect(calls[3].query).toBe("MATCH ()-[r:`REL.TO`]->() RETURN count(r) AS cnt");
+  });
+
+  it("4. 过滤下划线前缀的内部标签/类型", async () => {
+    const driver = mockDriver() as any;
+    initRoutes(driver, baseConfig);
+
+    driver.queueExecuteQueryResults([
+      [{ label: "Task" }, { label: "_internal" }],
+      [{ cnt: 3 }],
+      [{ cnt: 9 }],
+      [{ relationshipType: "_meta" }],
+      [{ cnt: 0 }],
+    ]);
+
+    const handler = findHandler("/api/schema");
+    const result = await handler({});
+
+    expect(result.status).toBe(200);
+    expect(result.body.nodeTypes).toEqual([{ label: "Task", count: 3 }]);
+    expect(result.body.edgeTypes).toEqual([]);
+  });
+
+  it("5. 查询抛错 → 500（不产生未处理异常）", async () => {
+    const driver = mockDriver() as any;
+    initRoutes(driver, baseConfig);
+    // 让 executeQuery 抛错
+    driver.executeQuery = async () => {
+      throw new Error("db down");
+    };
+    const handler = findHandler("/api/schema");
+    const result = await handler({});
+    expect(result.status).toBe(500);
+    expect(result.body.error).toBe("db down");
+  });
+});
