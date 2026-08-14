@@ -8,7 +8,7 @@
  */
 
 import type { Driver } from "neo4j-driver";
-import type { GmConfig, GmNode, GmEdge, GmMessage, ExtractResult } from "../types.ts";
+import type { GmConfig, GmNode, GmEdge, GmMessage, ExtractResult, NodeType } from "../types.ts";
 import type { CompleteFn } from "../engine/llm.ts";
 import type { Extractor } from "../extractor/extract.ts";
 import { upsertNode, batchUpsertNodes, upsertEdge, batchUpsertEdges } from "../store/store.ts";
@@ -56,14 +56,17 @@ export async function extractInBackground(
         const now = Date.now();
 
         // v2.3.1 P0-3 性能优化: 批量 upsert 节点（UNWIND + MERGE）
+        // v2.4.1 统一: 与重建流程共用确定性 id（gn-hash(type|name)）+ type 大写归一，
+        // 使两条流程 MERGE 命中同一节点实现更新，而非各写一套重复节点。
         const nodeIdMap = new Map<string, string>();
         const nodesToWrite: GmNode[] = [];
         for (const enode of result.nodes) {
-          const id = `auto-${now}-${Math.random().toString(36).slice(2, 8)}`;
+          const normalizedType = enode.type.toUpperCase() as NodeType;
+          const id = deterministicNodeId(normalizedType, enode.name);
           nodeIdMap.set(enode.name, id);
           nodesToWrite.push({
             id,
-            type: enode.type,
+            type: normalizedType,
             name: enode.name,
             description: enode.description,
             content: enode.content,
@@ -367,13 +370,16 @@ export async function rebuildSessionMessages(
       const now = Date.now();
       const nodeIdMap = new Map<string, string>();
       for (const enode of res.nodes) {
-        const id = deterministicNodeId(enode.type, enode.name);
+        // v2.4.1 统一: type 大写归一后再 hash，与普通流程（extractInBackground）id 对齐，
+        // 保证重建能命中普通流程已建的节点并更新，而非新建重复。
+        const normalizedType = enode.type.toUpperCase() as NodeType;
+        const id = deterministicNodeId(normalizedType, enode.name);
         nodeIdMap.set(enode.name, id);
         if (seenNodeIds.has(id)) continue;
         seenNodeIds.add(id);
         pendingNodes.push({
           id,
-          type: enode.type,
+          type: normalizedType,
           name: enode.name,
           description: enode.description,
           content: enode.content,
