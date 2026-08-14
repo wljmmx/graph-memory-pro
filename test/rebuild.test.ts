@@ -257,6 +257,51 @@ describe("rebuildSessionMessages", () => {
     expect(llm).not.toHaveBeenCalled();
   });
 
+  it("v2.4.1 回归: turnIndex 全 0（导入数据常见）也能配对，不再 0/0", async () => {
+    const driver = mockDriver();
+    // 全部 turnIndex=0 —— 旧实现 `0 > 0` 恒 false 导致所有对被过滤（全量 0/0 的根因）
+    driver.queueResults([
+      [
+        pageMsg("m1", 0, "user", "构建 API"),
+        pageMsg("m2", 0, "assistant", "用 OpenAPI 实现"),
+        pageMsg("m3", 0, "user", "部署"),
+        pageMsg("m4", 0, "assistant", "执行部署"),
+      ],
+      [{ c: 1 }],
+      [{ c: 0 }],
+    ]);
+
+    const llm = makeMockLlm(JSON.stringify({ nodes: SAMPLE_NODES, edges: SAMPLE_EDGES }));
+    const extractor = new Extractor(driver as any);
+
+    const result = await rebuildSessionMessages(extractor, driver as any, llm, null, console, "s1");
+
+    expect(result.processedPairs).toBe(2);
+    expect(result.totalPairs).toBe(2);
+    expect(llm).toHaveBeenCalledTimes(2);
+  });
+
+  it("v2.4.1 回归: role 变体（USER/Human/model）也能配对", async () => {
+    const driver = mockDriver();
+    driver.queueResults([
+      [
+        pageMsg("m1", 1, "USER", "构建 API"),
+        pageMsg("m2", 2, "model", "用 OpenAPI 实现"),
+      ],
+      [{ c: 1 }],
+      [{ c: 0 }],
+    ]);
+
+    const llm = makeMockLlm(JSON.stringify({ nodes: SAMPLE_NODES, edges: SAMPLE_EDGES }));
+    const extractor = new Extractor(driver as any);
+
+    const result = await rebuildSessionMessages(extractor, driver as any, llm, null, console, "s1");
+
+    expect(result.processedPairs).toBe(1);
+    expect(result.totalPairs).toBe(1);
+    expect(llm).toHaveBeenCalledTimes(1);
+  });
+
   it("缺依赖（driver/llm）→ 返回 0", async () => {
     const driver = mockDriver();
     const extractor = new Extractor(driver as any);
@@ -266,7 +311,8 @@ describe("rebuildSessionMessages", () => {
 
   it("结合进度文件断点续传 → 跳过已处理轮次", async () => {
     const driver = mockDriver();
-    // lastProcessedTurn=2 → 只重建 turn 3/4 这一对
+    // v2.4.1 语义: lastProcessedTurn = 已处理到的对序号（按 (createdAt,id) 顺序，1 起）
+    // 记 1 → 跳过第 1 对，只重建第 2 对（m3/m4）
     driver.queueResults([
       [
         pageMsg("m1", 1, "user", "旧"),
@@ -280,7 +326,7 @@ describe("rebuildSessionMessages", () => {
 
     const progressPath = `${process.env.TMPDIR ?? "/tmp"}/gm-rebuild-progress-${Date.now()}-${Math.random().toString(36).slice(2)}.json`;
     const { writeFile } = await import("node:fs/promises");
-    await writeFile(progressPath, JSON.stringify({ sessionKey: "s1", lastProcessedTurn: 2, processedPairs: 1, totalPairs: 2 }), "utf-8");
+    await writeFile(progressPath, JSON.stringify({ sessionKey: "s1", lastProcessedTurn: 1, processedPairs: 1, totalPairs: 2 }), "utf-8");
 
     const llm = makeMockLlm(JSON.stringify({ nodes: SAMPLE_NODES, edges: SAMPLE_EDGES }));
     const extractor = new Extractor(driver as any);
@@ -295,13 +341,13 @@ describe("rebuildSessionMessages", () => {
     expect(result.processedPairs).toBe(1);
     expect(result.totalPairs).toBe(1);
     expect(llm).toHaveBeenCalledTimes(1);
-    expect(lastInfo?.lastProcessedTurn).toBe(4);
+    expect(lastInfo?.lastProcessedTurn).toBe(2);
 
     // 完成后进度文件标记 done
     const { readFile, unlink } = await import("node:fs/promises");
     const saved = JSON.parse(await readFile(progressPath, "utf-8"));
     expect(saved.status).toBe("done");
-    expect(saved.lastProcessedTurn).toBe(4);
+    expect(saved.lastProcessedTurn).toBe(2);
     await unlink(progressPath).catch(() => undefined);
   });
 });

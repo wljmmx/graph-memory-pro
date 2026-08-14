@@ -13,7 +13,7 @@ import type { CompleteFn } from "../engine/llm.ts";
 import type { Extractor } from "../extractor/extract.ts";
 import { upsertNode, batchUpsertNodes, upsertEdge, batchUpsertEdges } from "../store/store.ts";
 import { getCircuitBreaker } from "../engine/circuit-breaker.ts";
-import { getSessionMessages, getSessionMessagesPage, listAllSessionKeys } from "../store/messages.ts";
+import { getSessionMessages, getSessionMessagesPageTolerant, listAllSessionKeys } from "../store/messages.ts";
 import { heuristicExtract } from "../extractor/extract.ts";
 
 /**
@@ -154,18 +154,22 @@ export async function rebuildGraphFromStoredMessages(
   const messages = await getSessionMessages(driver, sessionKey, limit);
   if (messages.length === 0) return 0;
 
-  // 按 turnIndex 升序，跳过已处理的轮次
-  const ordered = [...messages].filter((m) => (m.turnIndex ?? 0) > lastProcessedTurn);
+  // v2.4.1 修复: turnIndex 全 0/缺失（导入数据常见）时 `> lastProcessedTurn` 会过滤掉全部消息，
+  // 此时不做轮次过滤（重跑由确定性 id 幂等去重兜底）。
+  const maxTurn = messages.reduce((mx, m) => Math.max(mx, m.turnIndex ?? 0), 0);
+  const ordered = maxTurn > 0
+    ? messages.filter((m) => (m.turnIndex ?? 0) > lastProcessedTurn)
+    : messages;
   if (ordered.length === 0) return 0;
 
-  // 配对 user/assistant（允许 user 后缺 assistant 时跳过该轮）
+  // 配对 user/assistant（v2.4.1: role 归一化，兼容 USER/Human/model 等导入变体）
   const pairs: Array<{ user: string; assistant: string }> = [];
   let i = 0;
   while (i < ordered.length) {
     const cur = ordered[i];
-    if (cur.role === "user") {
+    if (normRole(cur.role) === "user") {
       const next = ordered[i + 1];
-      if (next && next.role === "assistant") {
+      if (next && normRole(next.role) === "assistant") {
         pairs.push({ user: cur.content, assistant: next.content });
         i += 2;
         continue;
@@ -211,8 +215,20 @@ export interface RebuildOptions {
 interface RebuildPair {
   user: string;
   assistant: string;
-  /** 该对的轮次（取 assistant 的 turnIndex），用于断点续传 */
+  /** 该对的序号（按 (createdAt,id) 顺序的合成序号，1 起），用于断点续传。
+   * v2.4.1 修复: 不再用 turnIndex——导入数据常为 0/缺失，`0 > 0` 恒 false 曾导致全部 0/0。 */
   lastTurn: number;
+}
+
+/**
+ * v2.4.1: 消息 role 归一化。导入数据的 role 可能是 USER/Human/model/AI 等变体，
+ * 严格 === "user"/"assistant" 会配不上对导致 0 对。归一为 user/assistant/空。
+ */
+function normRole(role: unknown): "user" | "assistant" | "" {
+  const r = String(role ?? "").trim().toLowerCase();
+  if (["user", "human", "用户", "client"].includes(r)) return "user";
+  if (["assistant", "ai", "model", "bot", "gpt", "助手", "system-assistant"].includes(r)) return "assistant";
+  return "";
 }
 
 /** 确定性哈希（FNV-1a 32bit），用于幂等节点 id */
@@ -420,24 +436,34 @@ export async function rebuildSessionMessages(
   };
 
   // 流式：键集分页读取 + 即时配对 + 按窗口处理（不整会话全量载入）
-  let afterCreatedAt = -1;
-  let afterId = "";
-  let pendingUser: { content: string; turn: number } | null = null;
+  // v2.4.1 修复: 配对/断点不再依赖 turnIndex（导入数据常为 0/缺失，`0 > 0` 恒 false
+  // 曾导致所有会话 0/0 pairs）；改用按 (createdAt,id) 顺序的合成序号 seq（1 起，确定性，
+  // 重跑稳定），断点语义 = 已处理到的对序号。role 做归一化，兼容 USER/Human/model 等变体。
+  let after: { createdAt: number | string; id: string } | null = null;
+  let pairSeq = 0;                       // 本次扫描中已形成的对序号（含被断点跳过的）
+  let pendingUser: { content: string } | null = null;
   const windowBuf: RebuildPair[] = [];
+  let pages = 0;
   for (;;) {
-    const page = await getSessionMessagesPage(driver, sessionKey, afterCreatedAt, afterId, pageSize);
-    if (page.length === 0) break;
-    for (const m of page) {
-      if (m.role === "user") {
+    // v2.4.1 护栏: 防御数据异常（键集不前进/超大表）导致死循环
+    if (++pages > 100_000) {
+      logger?.info?.(`[graph-memory-pro] rebuild page guard hit for ${sessionKey}, stop at page ${pages}`);
+      break;
+    }
+    const { rows } = await getSessionMessagesPageTolerant(driver, sessionKey, after, pageSize);
+    if (rows.length === 0) break;
+    for (const m of rows) {
+      const role = normRole(m.role);
+      if (role === "user") {
         if (pendingUser) {
-          const pair: RebuildPair = { user: pendingUser.content, assistant: "", lastTurn: pendingUser.turn };
-          if (pair.lastTurn > lastProcessedTurn) { windowBuf.push(pair); totalPairs++; }
+          pairSeq++;
+          if (pairSeq > lastProcessedTurn) { windowBuf.push({ user: pendingUser.content, assistant: "", lastTurn: pairSeq }); totalPairs++; }
         }
-        pendingUser = { content: m.content, turn: m.turnIndex };
-      } else if (m.role === "assistant") {
+        pendingUser = { content: m.content };
+      } else if (role === "assistant") {
         if (pendingUser) {
-          const pair: RebuildPair = { user: pendingUser.content, assistant: m.content, lastTurn: m.turnIndex };
-          if (pair.lastTurn > lastProcessedTurn) { windowBuf.push(pair); totalPairs++; }
+          pairSeq++;
+          if (pairSeq > lastProcessedTurn) { windowBuf.push({ user: pendingUser.content, assistant: m.content, lastTurn: pairSeq }); totalPairs++; }
           pendingUser = null;
         }
       }
@@ -445,10 +471,11 @@ export async function rebuildSessionMessages(
     while (windowBuf.length >= concurrency) {
       await processWindow(windowBuf.splice(0, concurrency));
     }
-    const last = page[page.length - 1];
-    afterCreatedAt = last.createdAt;
-    afterId = last.id;
-    if (page.length < pageSize) break;
+    const last = rows[rows.length - 1];
+    // v2.4.1 护栏: 键集未前进（同页重复）则终止，避免死循环
+    if (after && String(after.createdAt) === String(last.createdAt) && after.id === last.id) break;
+    after = { createdAt: last.createdAt, id: last.id };
+    if (rows.length < pageSize) break;
   }
   // 处理尾部不足一个窗口的剩余对
   while (windowBuf.length) {
@@ -577,6 +604,18 @@ export async function rebuildAllSessions(
   // v2.4.1: LLM 熔断器，worker 级预检，避免熔断 session 被误记为完成（totalPairs=0 → -1）
   const llmBreaker = getCircuitBreaker("llm");
 
+  // v2.4.1: 进度文件磁盘写入节流——此前每 session 全量重写整个 sessions map（JSON 随会话数
+  // 线性膨胀），2600+ 会话时 IO 放大严重，慢盘上表现为"跑一批后卡死"。改为 ≥2s 才落盘一次，
+  // 结束时兜底写最终进度。
+  let lastDiskWrite = 0;
+  const persistProgress = async (force = false) => {
+    if (!progressPath) return;
+    const now = Date.now();
+    if (!force && now - lastDiskWrite < 2000) return;
+    lastDiskWrite = now;
+    await writeAllProgress(progressPath, progress!);
+  };
+
   const record = async (key: string, r: { processedPairs: number; totalPairs: number; lastProcessedTurn: number }) => {
     results[key] = r;
     processedSessions++;
@@ -587,7 +626,7 @@ export async function rebuildAllSessions(
       // 避免无产出的 session（如纯 memory 子会话）在续跑时被重复尝试。
       const done = r.totalPairs === 0 || (r.processedPairs > 0 && r.processedPairs >= r.totalPairs);
       const mark = done ? -1 : r.lastProcessedTurn;
-      const p: RebuildAllProgress = {
+      progress = {
         totalSessions,
         processedSessions,
         totalPairs,
@@ -597,10 +636,14 @@ export async function rebuildAllSessions(
         sessions: { ...(progress?.sessions ?? {}), [key]: mark },
         updatedAt: new Date().toISOString(),
       };
-      progress = p;
-      await writeAllProgress(progressPath, p);
+      await persistProgress();
     }
-    logger?.info?.(`[graph-memory-pro] rebuilt session ${key}: ${r.processedPairs}/${r.totalPairs} pairs`);
+    // v2.4.1: 心跳日志——每 100 个 session 汇报一次进度，区分"在跑"与"卡死"
+    if (processedSessions % 100 === 0) {
+      logger?.info?.(`[graph-memory-pro] rebuild-all progress: ${processedSessions}/${totalSessions} sessions, ${processedPairs} pairs, ${failedSessions} failed`);
+    } else {
+      logger?.info?.(`[graph-memory-pro] rebuilt session ${key}: ${r.processedPairs}/${r.totalPairs} pairs`);
+    }
   };
 
   // 工作协程池：并发处理多个 session
@@ -634,6 +677,9 @@ export async function rebuildAllSessions(
   };
   const workers = Array.from({ length: sessionConcurrency }, () => worker());
   await Promise.all(workers);
+
+  // v2.4.1: 结束时兜底强制落盘最终进度（节流期间可能落后于内存态）
+  await persistProgress(true);
 
   // v2.4.1: 完成汇总日志，明确反馈"已结束"，避免看不到完成状态
   logger?.info?.(

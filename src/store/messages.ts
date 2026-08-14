@@ -114,6 +114,57 @@ export async function getSessionMessagesPage(
 }
 
 /**
+ * v2.4.1: 类型容错的键集分页。导入的数据可能绕过 saveMessage 直写，
+ * createdAt 可能是 integer（saveMessage）或 string（ISO，外部导入）。
+ * 与 int 参数比较时 string 恒为 null → 全部行被过滤 → 会话恒 0 对。
+ * 本函数首页不带 WHERE（同时探测 createdAt 实际类型），后续页按实际类型分页。
+ */
+export async function getSessionMessagesPageTolerant(
+  driver: Driver,
+  sessionKey: string,
+  after: { createdAt: number | string; id: string } | null,
+  limit: number,
+): Promise<{ rows: Array<{ id: string; role: string; content: string; createdAt: number | string }>; createdAtIsString: boolean }> {
+  const session = getSession(driver);
+  try {
+    const result = after === null
+      ? await session.run(
+        `MATCH (m:GmMessage {sessionKey: $sessionKey})
+         RETURN m
+         ORDER BY m.createdAt ASC, m.id ASC
+         LIMIT toInteger($limit)`,
+        { sessionKey, limit },
+      )
+      : await session.run(
+        `MATCH (m:GmMessage {sessionKey: $sessionKey})
+         WHERE m.createdAt > $afterCreatedAt
+            OR (m.createdAt = $afterCreatedAt AND m.id > $afterId)
+         RETURN m
+         ORDER BY m.createdAt ASC, m.id ASC
+         LIMIT toInteger($limit)`,
+        {
+          sessionKey,
+          afterCreatedAt: typeof after.createdAt === "number" ? neo4j.int(after.createdAt) : after.createdAt,
+          afterId: after.id,
+          limit,
+        },
+      );
+    const rows = result.records.map((r) => {
+      const props = r.get("m").properties;
+      return {
+        id: String(props.id ?? ""),
+        role: String(props.role ?? ""),
+        content: String(props.content ?? ""),
+        createdAt: (props.createdAt?.toNumber?.() ?? props.createdAt ?? 0) as number | string,
+      };
+    });
+    return { rows, createdAtIsString: rows.length > 0 && typeof rows[0].createdAt === "string" };
+  } finally {
+    await session.close();
+  }
+}
+
+/**
  * v2.4.1: 枚举所有出现过的会话 key（用于批量重建遍历全部会话）。
  */
 export async function listAllSessionKeys(driver: Driver): Promise<string[]> {
