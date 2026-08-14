@@ -483,6 +483,8 @@ interface RebuildAllProgress {
   processedSessions: number;
   totalPairs: number;
   processedPairs: number;
+  /** v2.4.1: 处理失败的 session 数，供 API 层与断点文件反馈闭环 */
+  failedSessions: number;
   done: boolean;
   /** 每个 session 上次处理到的轮次，用于续跑 */
   sessions: Record<string, number>;
@@ -570,6 +572,7 @@ export async function rebuildAllSessions(
         processedSessions,
         totalPairs,
         processedPairs,
+        failedSessions,
         done: processedSessions >= totalSessions,
         sessions: { ...(progress?.sessions ?? {}), [key]: mark },
         updatedAt: new Date().toISOString(),

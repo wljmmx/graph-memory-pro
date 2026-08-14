@@ -223,9 +223,11 @@ async function handleRebuildAll(params: Record<string, unknown>): Promise<{ stat
       { mode, sessionConcurrency, concurrency, limitSessions, pageSize, writeBatchSize, progressPath },
     );
     const llmOutputTokens = Math.max(0, (await usageCompletionTokens()) - llmBefore);
+    // v2.4.1: 有 session 处理失败时返回 207（部分成功），调用方据此提示可断点续跑
+    const failed = (result as { failedSessions?: number }).failedSessions ?? 0;
     return {
-      status: 200,
-      body: { ...result, llmOutputTokens, llmHasOutput: llmOutputTokens > 0, message: "rebuild-all completed" },
+      status: failed > 0 ? 207 : 200,
+      body: { ...result, llmOutputTokens, llmHasOutput: llmOutputTokens > 0, message: failed > 0 ? `rebuild-all completed with ${failed} failed session(s)` : "rebuild-all completed" },
     };
   } catch (err: unknown) {
     return { status: 500, body: { error: (err as Error).message } };
