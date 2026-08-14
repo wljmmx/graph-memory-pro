@@ -479,12 +479,13 @@ export interface RebuildAllOptions extends RebuildOptions {
    * 避免遍历数万个无产出（无 user/assistant 对）的记忆会话导致卡慢） */
   includeMemorySessions?: boolean;
   /** v2.4.1: 自定义排除的 sessionKey 子串。提供则替换默认排除列表。
-   * 默认排除 `:active-memory:` 与 `dreaming-narrative-rem`（内部记忆/叙事 agent 会话，无对话对）。 */
+   * 默认排除 `:active-memory:` 与 `dreaming-narrative` 前缀（内部记忆/叙事 agent 会话，无对话对）。 */
   excludeSessionKeySubstrings?: string[];
 }
 
-/** v2.4.1: 默认排除的内部记忆/叙事 agent 会话子串（无 user/assistant 对话对，重建必然 0 产出） */
-const DEFAULT_EXCLUDE_SESSION_SUBSTRINGS = [":active-memory:", "dreaming-narrative-rem"];
+/** v2.4.1: 默认排除的内部记忆/叙事 agent 会话子串（无 user/assistant 对话对，重建必然 0 产出）。
+ * 用通用前缀 dreaming-narrative 覆盖 rem/light 等所有变体。 */
+const DEFAULT_EXCLUDE_SESSION_SUBSTRINGS = [":active-memory:", "dreaming-narrative"];
 
 /** 全局进度状态（rebuild-all 用） */
 interface RebuildAllProgress {
