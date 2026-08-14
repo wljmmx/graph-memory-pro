@@ -63,7 +63,8 @@ export async function extractInBackground(
         for (const enode of result.nodes) {
           const normalizedType = enode.type.toUpperCase() as NodeType;
           const id = deterministicNodeId(normalizedType, enode.name);
-          nodeIdMap.set(enode.name, id);
+          // v2.4.1: 以规范化名（小写去空格）建索引，供边引用名容错匹配
+          nodeIdMap.set(normName(enode.name), id);
           nodesToWrite.push({
             id,
             type: normalizedType,
@@ -90,8 +91,9 @@ export async function extractInBackground(
         // v2.3.1 P0-3: 批量 upsert 边
         const edgesToWrite: GmEdge[] = [];
         for (const eedge of result.edges) {
-          const fromId = nodeIdMap.get(eedge.fromName);
-          const toId = nodeIdMap.get(eedge.toName);
+          // v2.4.1: 边引用名用规范化匹配，避免大小写/空格差异导致 0 条边
+          const fromId = nodeIdMap.get(normName(eedge.fromName));
+          const toId = nodeIdMap.get(normName(eedge.toName));
           if (!fromId || !toId) continue;
           edgesToWrite.push({
             id: `edge-${now}-${Math.random().toString(36).slice(2, 8)}`,
@@ -221,6 +223,15 @@ function hashString(s: string): string {
     h = Math.imul(h, 0x01000193);
   }
   return (h >>> 0).toString(16);
+}
+
+/**
+ * v2.4.1: 节点名规范化，用于边引用名与节点 name 的容错匹配。
+ * LLM 返回的 edge.fromName/toName 常与节点 name 存在大小写/空格/标点差异，
+ * 直接精确匹配会全部落空导致 0 条边。统一转为小写并去空白作匹配 key。
+ */
+function normName(s: string): string {
+  return (s ?? "").trim().toLowerCase().replace(/\s+/g, "");
 }
 
 function deterministicNodeId(type: string, name: string): string {
@@ -374,7 +385,8 @@ export async function rebuildSessionMessages(
         // 保证重建能命中普通流程已建的节点并更新，而非新建重复。
         const normalizedType = enode.type.toUpperCase() as NodeType;
         const id = deterministicNodeId(normalizedType, enode.name);
-        nodeIdMap.set(enode.name, id);
+        // v2.4.1: 同时以规范化名（小写去空格）建索引，供边引用名容错匹配
+        nodeIdMap.set(normName(enode.name), id);
         if (seenNodeIds.has(id)) continue;
         seenNodeIds.add(id);
         pendingNodes.push({
@@ -393,8 +405,9 @@ export async function rebuildSessionMessages(
         });
       }
       for (const eedge of res.edges) {
-        const fromId = nodeIdMap.get(eedge.fromName);
-        const toId = nodeIdMap.get(eedge.toName);
+        // v2.4.1: 边引用名用规范化匹配，避免大小写/空格差异导致 0 条边
+        const fromId = nodeIdMap.get(normName(eedge.fromName));
+        const toId = nodeIdMap.get(normName(eedge.toName));
         if (!fromId || !toId) continue;
         pendingEdges.push({
           id: `ge-${hashString(fromId + "|" + toId + "|" + eedge.type)}`,
