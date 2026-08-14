@@ -475,6 +475,9 @@ export interface RebuildAllOptions extends RebuildOptions {
   sessionConcurrency?: number;
   /** 最多处理多少个 session（调试/分批用，默认 0 = 全部） */
   limitSessions?: number;
+  /** v2.4.1: 是否包含内部记忆子会话（默认 false=过滤含 `:active-memory:` 的 key，
+   * 避免遍历数万个无产出（无 user/assistant 对）的记忆会话导致卡慢） */
+  includeMemorySessions?: boolean;
 }
 
 /** 全局进度状态（rebuild-all 用） */
@@ -545,7 +548,10 @@ export async function rebuildAllSessions(
   if (progressPath) progress = await readAllProgress(progressPath);
 
   const keys = await listAllSessionKeys(driver);
-  const targets = limitSessions > 0 ? keys.slice(0, limitSessions) : keys;
+  // v2.4.1: 默认过滤内部记忆子会话（`:active-memory:`），它们无 user/assistant 对话对，
+  // 重建对其必然 0 产出，遍历会拖慢进度。`includeMemorySessions: true` 时才包含。
+  const filtered = opts.includeMemorySessions ? keys : keys.filter((k) => !k.includes(":active-memory:"));
+  const targets = limitSessions > 0 ? filtered.slice(0, limitSessions) : filtered;
   const totalSessions = targets.length;
 
   const results: Record<string, { processedPairs: number; totalPairs: number }> = {};
