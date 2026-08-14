@@ -51,6 +51,11 @@ export async function ensureSchema(driver: Driver, dimension: number = 1024): Pr
     await session.run(
       "CREATE INDEX gm_message_session IF NOT EXISTS FOR (m:GmMessage) ON (m.sessionKey)"
     );
+    // v2.4.1: 消息键集分页复合索引（sessionKey, createdAt, id），
+    // 加速 11 万级消息的 getSessionMessagesPage 重建分页，避免全表扫描 + 排序导致卡死。
+    await session.run(
+      "CREATE INDEX gm_message_session_ctime IF NOT EXISTS FOR (m:GmMessage) ON (m.sessionKey, m.createdAt, m.id)"
+    );
 
     // FULLTEXT 索引：用于全文搜索（替代 CONTAINS）
     try {

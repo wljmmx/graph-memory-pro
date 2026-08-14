@@ -245,6 +245,9 @@ function readRebuildProgress(path: string): Promise<{ sessionKey: string; lastPr
         (text) => {
           try {
             const j = JSON.parse(text);
+            // v2.4.1: 校验 kind，避免与 rebuild-all 的全局进度文件格式混用
+            // 兼容旧格式（无 kind 字段，仅有 sessionKey/lastProcessedTurn）
+            if (j.kind !== undefined && j.kind !== "session") return null;
             return { sessionKey: String(j.sessionKey ?? ""), lastProcessedTurn: Number(j.lastProcessedTurn ?? 0) || 0 };
           } catch {
             return null;
@@ -258,7 +261,7 @@ function readRebuildProgress(path: string): Promise<{ sessionKey: string; lastPr
 
 function writeRebuildProgress(path: string, data: Record<string, unknown>): Promise<void> {
   return import("node:fs/promises").then((fs) =>
-    fs.writeFile(path, JSON.stringify(data)).catch(() => undefined),
+    fs.writeFile(path, JSON.stringify({ kind: "session", version: 2, updatedAt: new Date().toISOString(), ...data })).catch(() => undefined),
   );
 }
 
@@ -298,73 +301,55 @@ export async function rebuildSessionMessages(
     if (saved && saved.sessionKey === sessionKey) lastProcessedTurn = saved.lastProcessedTurn || 0;
   }
 
-  // 1) 键集分页流式读取全部消息并配对
-  const pairs: RebuildPair[] = [];
-  {
-    let afterCreatedAt = -1;
-    let afterId = "";
-    let pendingUser: { content: string; turn: number } | null = null;
-    for (;;) {
-      const page = await getSessionMessagesPage(driver, sessionKey, afterCreatedAt, afterId, pageSize);
-      if (page.length === 0) break;
-      for (const m of page) {
-        if (m.role === "user") {
-          if (pendingUser) pairs.push({ user: pendingUser.content, assistant: "", lastTurn: pendingUser.turn });
-          pendingUser = { content: m.content, turn: m.turnIndex };
-        } else if (m.role === "assistant") {
-          if (pendingUser) {
-            pairs.push({ user: pendingUser.content, assistant: m.content, lastTurn: m.turnIndex });
-            pendingUser = null;
-          }
-        }
-      }
-      const last = page[page.length - 1];
-      afterCreatedAt = last.createdAt;
-      afterId = last.id;
-      if (page.length < pageSize) break;
-    }
-  }
-
-  const todo = pairs.filter((p) => p.lastTurn > lastProcessedTurn);
-  const totalPairs = todo.length;
-  if (totalPairs === 0) return { processedPairs: 0, totalPairs, lastProcessedTurn };
-
-  // 2) 并发提取 + 合并批量写
-  let processed = 0;
-  let lastTurn = lastProcessedTurn;
-  let pendingNodes: GmNode[] = [];
-  let pendingEdges: GmEdge[] = [];
-  const seenNodeIds = new Set<string>();
-
   // v2.4.1: 按模式选择提取函数（llm=调用 LLM；heuristic=规则快速提取，不调 LLM）
-  // 外层已保证 mode="llm" 时 extractor/llm 非空，此处提前取出非空引用供闭包使用
   const llmExtractor = extractor!;
   const extractOne: (p: RebuildPair) => Promise<ExtractResult> =
     mode === "heuristic"
       ? (p) => Promise.resolve(heuristicExtract(p.user, p.assistant))
       : (p) => llmExtractor.extract(llm!, p.user, p.assistant);
 
+  // v2.4.1: 流式处理，内存占用 O(pageSize + concurrency + writeBatchSize)，
+  // 而非把整会话的全部对一次性载入内存（11 万级数据下避免内存爆满）。
+  let processed = 0;      // 已处理对数
+  let lastTurn = lastProcessedTurn;
+  let totalPairs = 0;     // 本次（断点过滤后）可处理对数
+  let pendingNodes: GmNode[] = [];
+  let pendingEdges: GmEdge[] = [];
+  const seenNodeIds = new Set<string>();
+  // v2.4.1: 边去重，避免同一 (from,to,type) 在会话内重复累积导致 pendingEdges 膨胀
+  const seenEdgeIds = new Set<string>();
+
+  // v2.4.1: 批量写；失败自动回退逐条 upsert，保证节点/边不因单批失败而丢失
   const flush = async () => {
-    let wroteNodes = 0;
-    let wroteEdges = 0;
     if (pendingNodes.length) {
-      try { wroteNodes = await batchUpsertNodes(driver, pendingNodes); }
-      catch (e) { logger?.debug?.(`[graph-memory-pro] rebuild batchUpsertNodes failed: ${e}`); }
+      try { await batchUpsertNodes(driver, pendingNodes); }
+      catch (e) {
+        logger?.debug?.(`[graph-memory-pro] rebuild batchUpsertNodes failed, fallback single: ${e}`);
+        await Promise.allSettled(pendingNodes.map((n) => upsertNode(driver, n, cfg ?? undefined)));
+      }
     }
     if (pendingEdges.length) {
-      try { wroteEdges = await batchUpsertEdges(driver, pendingEdges); }
-      catch (e) { logger?.debug?.(`[graph-memory-pro] rebuild batchUpsertEdges failed: ${e}`); }
+      try { await batchUpsertEdges(driver, pendingEdges); }
+      catch (e) {
+        logger?.debug?.(`[graph-memory-pro] rebuild batchUpsertEdges failed, fallback single: ${e}`);
+        await Promise.allSettled(pendingEdges.map((ed) => upsertEdge(driver, ed)));
+      }
     }
     pendingNodes = [];
     pendingEdges = [];
     seenNodeIds.clear();
-    return { wroteNodes, wroteEdges };
+    seenEdgeIds.clear();
   };
 
-  for (let i = 0; i < todo.length; i += concurrency) {
-    const window = todo.slice(i, i + concurrency);
-    const results = await Promise.allSettled(window.map((p) => extractOne(p)));
+  const writeProgress = async (status: string) => {
+    if (opts.progressPath) {
+      await writeRebuildProgress(opts.progressPath, { sessionKey, lastProcessedTurn: lastTurn, processedPairs: processed, totalPairs, status });
+    }
+  };
 
+  // 并发提取一个窗口 + 累积 + 按需 flush
+  const processWindow = async (window: RebuildPair[]) => {
+    const results = await Promise.allSettled(window.map((p) => extractOne(p)));
     let windowTurn = lastTurn;
     for (let k = 0; k < window.length; k++) {
       const p = window[k];
@@ -385,7 +370,7 @@ export async function rebuildSessionMessages(
         // 保证重建能命中普通流程已建的节点并更新，而非新建重复。
         const normalizedType = enode.type.toUpperCase() as NodeType;
         const id = deterministicNodeId(normalizedType, enode.name);
-        // v2.4.1: 同时以规范化名（小写去空格）建索引，供边引用名容错匹配
+        // v2.4.1: 同时以规范化名建索引，供边引用名容错匹配
         nodeIdMap.set(normName(enode.name), id);
         if (seenNodeIds.has(id)) continue;
         seenNodeIds.add(id);
@@ -409,8 +394,11 @@ export async function rebuildSessionMessages(
         const fromId = nodeIdMap.get(normName(eedge.fromName));
         const toId = nodeIdMap.get(normName(eedge.toName));
         if (!fromId || !toId) continue;
+        const eid = `ge-${hashString(fromId + "|" + toId + "|" + eedge.type)}`;
+        if (seenEdgeIds.has(eid)) continue;
+        seenEdgeIds.add(eid);
         pendingEdges.push({
-          id: `ge-${hashString(fromId + "|" + toId + "|" + eedge.type)}`,
+          id: eid,
           type: eedge.type,
           fromId,
           toId,
@@ -422,23 +410,53 @@ export async function rebuildSessionMessages(
         });
       }
     }
-
     lastTurn = windowTurn;
     processed += window.length;
-
     if (pendingNodes.length >= writeBatchSize || pendingEdges.length >= writeBatchSize) {
       await flush();
     }
-    if (opts.progressPath && (i % (concurrency * 20) === 0 || i + concurrency >= todo.length)) {
-      await writeRebuildProgress(opts.progressPath, { sessionKey, lastProcessedTurn: lastTurn, processedPairs: processed, totalPairs });
-    }
+    await writeProgress("running");
     opts.onProgress?.({ processedPairs: processed, totalPairs, lastProcessedTurn: lastTurn });
+  };
+
+  // 流式：键集分页读取 + 即时配对 + 按窗口处理（不整会话全量载入）
+  let afterCreatedAt = -1;
+  let afterId = "";
+  let pendingUser: { content: string; turn: number } | null = null;
+  const windowBuf: RebuildPair[] = [];
+  for (;;) {
+    const page = await getSessionMessagesPage(driver, sessionKey, afterCreatedAt, afterId, pageSize);
+    if (page.length === 0) break;
+    for (const m of page) {
+      if (m.role === "user") {
+        if (pendingUser) {
+          const pair: RebuildPair = { user: pendingUser.content, assistant: "", lastTurn: pendingUser.turn };
+          if (pair.lastTurn > lastProcessedTurn) { windowBuf.push(pair); totalPairs++; }
+        }
+        pendingUser = { content: m.content, turn: m.turnIndex };
+      } else if (m.role === "assistant") {
+        if (pendingUser) {
+          const pair: RebuildPair = { user: pendingUser.content, assistant: m.content, lastTurn: m.turnIndex };
+          if (pair.lastTurn > lastProcessedTurn) { windowBuf.push(pair); totalPairs++; }
+          pendingUser = null;
+        }
+      }
+    }
+    while (windowBuf.length >= concurrency) {
+      await processWindow(windowBuf.splice(0, concurrency));
+    }
+    const last = page[page.length - 1];
+    afterCreatedAt = last.createdAt;
+    afterId = last.id;
+    if (page.length < pageSize) break;
+  }
+  // 处理尾部不足一个窗口的剩余对
+  while (windowBuf.length) {
+    await processWindow(windowBuf.splice(0, concurrency));
   }
 
   await flush();
-  if (opts.progressPath) {
-    await writeRebuildProgress(opts.progressPath, { sessionKey, lastProcessedTurn: lastTurn, processedPairs: processed, totalPairs, status: "done" });
-  }
+  await writeProgress("done");
   logger?.info?.(`[graph-memory-pro] rebuild complete: ${processed}/${totalPairs} pairs`);
   return { processedPairs: processed, totalPairs, lastProcessedTurn: lastTurn };
 }
@@ -474,7 +492,13 @@ interface RebuildAllProgress {
 function readAllProgress(path: string): Promise<RebuildAllProgress | null> {
   return import("node:fs/promises").then(
     (fs) => fs.readFile(path, "utf-8").then((t) => {
-      try { return JSON.parse(t) as RebuildAllProgress; } catch { return null; }
+      try {
+        const j = JSON.parse(t) as RebuildAllProgress;
+        // v2.4.1: 校验 kind，避免与单 session 进度文件格式混用
+        const raw = JSON.parse(t) as Record<string, unknown>;
+        if (raw.kind !== undefined && raw.kind !== "all") return null;
+        return j;
+      } catch { return null; }
     }).catch(() => null),
     () => null,
   );
@@ -482,7 +506,7 @@ function readAllProgress(path: string): Promise<RebuildAllProgress | null> {
 
 function writeAllProgress(path: string, data: RebuildAllProgress): Promise<void> {
   return import("node:fs/promises").then((fs) =>
-    fs.writeFile(path, JSON.stringify(data)).catch(() => undefined),
+    fs.writeFile(path, JSON.stringify({ kind: "all", version: 2, ...data })).catch(() => undefined),
   );
 }
 
