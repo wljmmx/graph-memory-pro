@@ -149,6 +149,8 @@ async function handleRebuildFromMessages(params: Record<string, unknown>): Promi
     const { Extractor } = await import("../extractor/extract.ts");
     const extractor = new Extractor(_driver);
     const { rebuildSessionMessages } = await import("../services/extract-service.ts");
+    // v2.4.1: 记录本次 rebuild 期间 LLM 的输出 token 数（判断 LLM 是否有真实输出）
+    const llmBefore = await usageCompletionTokens();
     const result = await rebuildSessionMessages(
       extractor,
       _driver,
@@ -158,9 +160,26 @@ async function handleRebuildFromMessages(params: Record<string, unknown>): Promi
       sessionKey,
       { concurrency, pageSize, writeBatchSize, progressPath, mode },
     );
-    return { status: 200, body: { ...result, mode, message: "rebuild completed" } };
+    const llmOutputTokens = Math.max(0, (await usageCompletionTokens()) - llmBefore);
+    return {
+      status: 200,
+      body: { ...result, mode, llmOutputTokens, llmHasOutput: llmOutputTokens > 0, message: "rebuild completed" },
+    };
   } catch (err: unknown) {
     return { status: 500, body: { error: (err as Error).message } };
+  }
+}
+
+/**
+ * v2.4.1: 读取 extract 用途累计的 LLM 输出 token 数（completionTokens）。
+ * 用于在 rebuild 接口返回里展示「本次调用期间 LLM 有没有真实输出」。
+ */
+async function usageCompletionTokens(): Promise<number> {
+  try {
+    const { getUsageStats } = await import("../store/usage.ts");
+    return getUsageStats().byPurpose.extract?.completionTokens ?? 0;
+  } catch {
+    return 0;
   }
 }
 
@@ -193,6 +212,8 @@ async function handleRebuildAll(params: Record<string, unknown>): Promise<{ stat
     const { Extractor } = await import("../extractor/extract.ts");
     const extractor = new Extractor(_driver);
     const { rebuildAllSessions } = await import("../services/extract-service.ts");
+    // v2.4.1: 记录本次 rebuild-all 期间 LLM 的输出 token 数（判断 LLM 是否有真实输出）
+    const llmBefore = await usageCompletionTokens();
     const result = await rebuildAllSessions(
       extractor,
       _driver,
@@ -201,7 +222,11 @@ async function handleRebuildAll(params: Record<string, unknown>): Promise<{ stat
       console,
       { mode, sessionConcurrency, concurrency, limitSessions, pageSize, writeBatchSize, progressPath },
     );
-    return { status: 200, body: { ...result, message: "rebuild-all completed" } };
+    const llmOutputTokens = Math.max(0, (await usageCompletionTokens()) - llmBefore);
+    return {
+      status: 200,
+      body: { ...result, llmOutputTokens, llmHasOutput: llmOutputTokens > 0, message: "rebuild-all completed" },
+    };
   } catch (err: unknown) {
     return { status: 500, body: { error: (err as Error).message } };
   }
