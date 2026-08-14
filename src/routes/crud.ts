@@ -120,9 +120,9 @@ async function handleStatus(): Promise<{ status: number; body: unknown }> {
 }
 
 /**
- * v2.4.1: 根据 Neo4j 中已存储的会话消息（:GmMessage）重建三级节点。
+ * v2.4.1: 根据 Neo4j 中已存储的会话消息（:GmMessage）高性能重建三级节点。
  * POST /api/extract/rebuild
- * body: { sessionKey: string, limit?: number, lastProcessedTurn?: number }
+ * body: { sessionKey, concurrency?, pageSize?, writeBatchSize?, progressPath?, lastProcessedTurn? }
  */
 async function handleRebuildFromMessages(params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
@@ -131,23 +131,26 @@ async function handleRebuildFromMessages(params: Record<string, unknown>): Promi
   if (typeof sessionKey !== "string" || sessionKey.length === 0) {
     return { status: 400, body: { error: "sessionKey is required (string)" } };
   }
-  const limit = safeParseInt(params.limit as string, 50, 1000);
-  const lastProcessedTurn = safeParseInt(params.lastProcessedTurn as string, 0, 1_000_000);
+  const concurrency = safeParseInt(params.concurrency as string, 16, 128);
+  const pageSize = safeParseInt(params.pageSize as string, 2000, 20000);
+  const writeBatchSize = safeParseInt(params.writeBatchSize as string, 500, 5000);
+  const progressPath = typeof params.progressPath === "string" && params.progressPath.length > 0
+    ? params.progressPath
+    : undefined;
   try {
     const { Extractor } = await import("../extractor/extract.ts");
     const extractor = new Extractor(_driver);
-    const { rebuildGraphFromStoredMessages } = await import("../services/extract-service.ts");
-    const processed = await rebuildGraphFromStoredMessages(
+    const { rebuildSessionMessages } = await import("../services/extract-service.ts");
+    const result = await rebuildSessionMessages(
       extractor,
       _driver,
       _llm,
       _cfg,
       console,
       sessionKey,
-      limit,
-      lastProcessedTurn,
+      { concurrency, pageSize, writeBatchSize, progressPath },
     );
-    return { status: 200, body: { processedPairs: processed, message: "rebuild completed" } };
+    return { status: 200, body: { ...result, message: "rebuild completed" } };
   } catch (err: unknown) {
     return { status: 500, body: { error: (err as Error).message } };
   }

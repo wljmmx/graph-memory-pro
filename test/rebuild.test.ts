@@ -15,7 +15,7 @@
 import { describe, it, expect, vi } from "vitest";
 import type { CompleteFn } from "../src/engine/llm.ts";
 import { Extractor } from "../src/extractor/extract.ts";
-import { rebuildGraphFromStoredMessages } from "../src/services/extract-service.ts";
+import { rebuildGraphFromStoredMessages, rebuildSessionMessages } from "../src/services/extract-service.ts";
 import { mockDriver, MockInteger } from "./helpers/neo4j-mock.ts";
 
 function makeMockLlm(reply: string): CompleteFn {
@@ -162,5 +162,116 @@ describe("rebuildGraphFromStoredMessages", () => {
       0,
     );
     expect(processedNoLlm).toBe(0);
+  });
+});
+
+// ============================================================
+// rebuildSessionMessages（高性能批量重建）
+// ============================================================
+
+/** 构造 getSessionMessagesPage 返回的消息记录（升序，供配对） */
+function pageMsg(id: string, turnIndex: number, role: string, content: string): { m: unknown } {
+  return {
+    m: {
+      properties: {
+        id,
+        sessionKey: "s1",
+        turnIndex: new MockInteger(turnIndex),
+        role,
+        content,
+        createdAt: new MockInteger(1000 + turnIndex),
+      },
+    },
+  };
+}
+
+describe("rebuildSessionMessages", () => {
+  it("读取全部消息并并发配对 → 返回 processedPairs 并合并批量写", async () => {
+    const driver = mockDriver();
+    // 第 1 次 session.run：getSessionMessagesPage 返回 4 条消息（ASC）
+    // 第 2/3 次：batchUpsertNodes / batchUpsertEdges 的 RETURN count
+    driver.queueResults([
+      [
+        pageMsg("m1", 1, "user", "构建 API"),
+        pageMsg("m2", 2, "assistant", "用 OpenAPI"),
+        pageMsg("m3", 3, "user", "部署"),
+        pageMsg("m4", 4, "assistant", "执行部署"),
+      ],
+      [{ c: 2 }],
+      [{ c: 1 }],
+    ]);
+
+    const llm = makeMockLlm(JSON.stringify({ nodes: SAMPLE_NODES, edges: SAMPLE_EDGES }));
+    const extractor = new Extractor(driver as any);
+
+    const result = await rebuildSessionMessages(extractor, driver as any, llm, null, console, "s1", { concurrency: 16 });
+
+    expect(result.processedPairs).toBe(2);
+    expect(result.totalPairs).toBe(2);
+    // 应触发批量写（session.run 调用：1 次读取 + 2 次批量写）
+    const calls = driver.getAllRunCalls();
+    expect(calls.length).toBeGreaterThanOrEqual(3);
+    expect(calls[0].query).toContain("GmMessage");
+  });
+
+  it("无 user/assistant 配对 → 返回 0，不调用 LLM", async () => {
+    const driver = mockDriver();
+    driver.queueResults([[pageMsg("m1", 1, "assistant", "只有助手消息")]]);
+
+    const llm = makeMockLlm(JSON.stringify({ nodes: [], edges: [] }));
+    const extractor = new Extractor(driver as any);
+
+    const result = await rebuildSessionMessages(extractor, driver as any, llm, null, console, "s1");
+
+    expect(result.processedPairs).toBe(0);
+    expect(llm).not.toHaveBeenCalled();
+  });
+
+  it("缺依赖（driver/llm）→ 返回 0", async () => {
+    const driver = mockDriver();
+    const extractor = new Extractor(driver as any);
+    const result = await rebuildSessionMessages(extractor, null, null, null, console, "s1");
+    expect(result.processedPairs).toBe(0);
+  });
+
+  it("结合进度文件断点续传 → 跳过已处理轮次", async () => {
+    const driver = mockDriver();
+    // lastProcessedTurn=2 → 只重建 turn 3/4 这一对
+    driver.queueResults([
+      [
+        pageMsg("m1", 1, "user", "旧"),
+        pageMsg("m2", 2, "assistant", "旧回"),
+        pageMsg("m3", 3, "user", "新"),
+        pageMsg("m4", 4, "assistant", "新回"),
+      ],
+      [{ c: 1 }],
+      [{ c: 0 }],
+    ]);
+
+    const progressPath = `${process.env.TMPDIR ?? "/tmp"}/gm-rebuild-progress-${Date.now()}-${Math.random().toString(36).slice(2)}.json`;
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(progressPath, JSON.stringify({ sessionKey: "s1", lastProcessedTurn: 2, processedPairs: 1, totalPairs: 2 }), "utf-8");
+
+    const llm = makeMockLlm(JSON.stringify({ nodes: SAMPLE_NODES, edges: SAMPLE_EDGES }));
+    const extractor = new Extractor(driver as any);
+
+    let lastInfo: any = null;
+    const result = await rebuildSessionMessages(extractor, driver as any, llm, null, console, "s1", {
+      concurrency: 16,
+      progressPath,
+      onProgress: (info) => { lastInfo = info; },
+    });
+
+    expect(result.processedPairs).toBe(1);
+    expect(result.totalPairs).toBe(1);
+    expect(llm).toHaveBeenCalledTimes(1);
+    expect(lastInfo?.lastProcessedTurn).toBe(4);
+
+    // 完成后进度文件标记 done
+    const { readFile, unlink } = await import("node:fs/promises");
+    const saved = JSON.parse(await readFile(progressPath, "utf-8"));
+    expect(saved.status).toBe("done");
+    expect(saved.lastProcessedTurn).toBe(4);
+    await unlink(progressPath).catch(() => undefined);
   });
 });

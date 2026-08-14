@@ -70,6 +70,49 @@ export async function getSessionMessages(
   }
 }
 
+/**
+ * v2.4.1: 按 (createdAt, id) 键集分页读取会话消息，升序返回。
+ * 用于大批量重建（11万级）时流式读取，避免单次 LIMIT 拉全量。
+ */
+export async function getSessionMessagesPage(
+  driver: Driver,
+  sessionKey: string,
+  afterCreatedAt: number,
+  afterId: string,
+  limit: number,
+): Promise<GmMessage[]> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(
+      `MATCH (m:GmMessage {sessionKey: $sessionKey})
+       WHERE m.createdAt > $afterCreatedAt
+          OR (m.createdAt = $afterCreatedAt AND m.id > $afterId)
+       RETURN m
+       ORDER BY m.createdAt ASC, m.id ASC
+       LIMIT toInteger($limit)`,
+      {
+        sessionKey,
+        afterCreatedAt: neo4j.int(afterCreatedAt),
+        afterId,
+        limit,
+      },
+    );
+    return result.records.map((r) => {
+      const props = r.get("m").properties;
+      return {
+        id: props.id,
+        sessionKey: props.sessionKey,
+        turnIndex: props.turnIndex?.toNumber?.() ?? 0,
+        role: props.role,
+        content: props.content,
+        createdAt: props.createdAt?.toNumber?.() ?? 0,
+      } as GmMessage;
+    });
+  } finally {
+    await session.close();
+  }
+}
+
 export async function getRecentDistinctMessages(
   driver: Driver,
   sessionKey: string,

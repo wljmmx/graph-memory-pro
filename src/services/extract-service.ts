@@ -13,7 +13,7 @@ import type { CompleteFn } from "../engine/llm.ts";
 import type { Extractor } from "../extractor/extract.ts";
 import { upsertNode, batchUpsertNodes, upsertEdge, batchUpsertEdges } from "../store/store.ts";
 import { getCircuitBreaker } from "../engine/circuit-breaker.ts";
-import { getSessionMessages } from "../store/messages.ts";
+import { getSessionMessages, getSessionMessagesPage } from "../store/messages.ts";
 
 /**
  * 后台三元组提取：从最近会话消息中提取实体/关系写入 Neo4j。
@@ -171,4 +171,239 @@ export async function rebuildGraphFromStoredMessages(
   if (pairs.length === 0) return 0;
   await extractInBackground(extractor, driver, llm, cfg, logger, pairs);
   return pairs.length;
+}
+
+// ─────────────────────────────────────────────────────────────
+// v2.4.1 高性能重建：面向 11 万级会话消息的批量重建
+//
+// 相比 rebuildGraphFromStoredMessages（单次 limit=50 + 内部 maxPairs=3 + LLM 串行），
+// 本函数针对大批量做四点优化：
+//   1. 键集分页流式读取全部消息（getSessionMessagesPage），消除分页往返
+//   2. LLM 并发提取（concurrency 窗口），替代串行 + maxPairs=3
+//   3. 多对结果合并为一次 UNWIND 批量写（节点/边），降低 Neo4j 往返
+//   4. 确定性节点 id（hash(type+name)），MERGE 幂等去重，重跑不膨胀
+// 并支持进度文件断点续传（progressPath），中断后带进度续跑。
+// ─────────────────────────────────────────────────────────────
+
+export interface RebuildOptions {
+  /** LLM 并发窗口（本地 Ollama 默认 16，可调 8–32） */
+  concurrency?: number;
+  /** 键集分页读取的每页大小（默认 2000） */
+  pageSize?: number;
+  /** 合并写入的批大小上限（默认 500 节点/边） */
+  writeBatchSize?: number;
+  /** 进度文件路径（JSON），用于断点续传 */
+  progressPath?: string;
+  /** 进度回调（可用于日志/进度条） */
+  onProgress?: (info: { processedPairs: number; totalPairs: number; lastProcessedTurn: number }) => void;
+}
+
+interface RebuildPair {
+  user: string;
+  assistant: string;
+  /** 该对的轮次（取 assistant 的 turnIndex），用于断点续传 */
+  lastTurn: number;
+}
+
+/** 确定性哈希（FNV-1a 32bit），用于幂等节点 id */
+function hashString(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16);
+}
+
+function deterministicNodeId(type: string, name: string): string {
+  return `gn-${hashString(type + "|" + name)}`;
+}
+
+function readRebuildProgress(path: string): Promise<{ sessionKey: string; lastProcessedTurn: number } | null> {
+  return import("node:fs/promises").then(
+    (fs) =>
+      fs.readFile(path, "utf-8").then(
+        (text) => {
+          try {
+            const j = JSON.parse(text);
+            return { sessionKey: String(j.sessionKey ?? ""), lastProcessedTurn: Number(j.lastProcessedTurn ?? 0) || 0 };
+          } catch {
+            return null;
+          }
+        },
+        () => null,
+      ),
+    () => null,
+  );
+}
+
+function writeRebuildProgress(path: string, data: Record<string, unknown>): Promise<void> {
+  return import("node:fs/promises").then((fs) =>
+    fs.writeFile(path, JSON.stringify(data)).catch(() => undefined),
+  );
+}
+
+/**
+ * 从 Neo4j 已存储会话消息（:GmMessage）高性能重建三级节点。
+ *
+ * @returns 实际处理的对数
+ */
+export async function rebuildSessionMessages(
+  extractor: Extractor | null,
+  driver: Driver | null,
+  llm: CompleteFn | null,
+  cfg: GmConfig | null,
+  logger: { debug?(...args: unknown[]): void; info?(...args: unknown[]): void },
+  sessionKey: string,
+  opts: RebuildOptions = {},
+): Promise<{ processedPairs: number; totalPairs: number }> {
+  if (!extractor || !driver || !llm) return { processedPairs: 0, totalPairs: 0 };
+
+  const llmBreaker = getCircuitBreaker("llm");
+  if (!llmBreaker.allow()) {
+    logger?.info?.("[graph-memory-pro] llm circuit OPEN, skip rebuild");
+    return { processedPairs: 0, totalPairs: 0 };
+  }
+
+  const concurrency = Math.max(1, opts.concurrency ?? 16);
+  const pageSize = Math.max(100, opts.pageSize ?? 2000);
+  const writeBatchSize = Math.max(50, opts.writeBatchSize ?? 500);
+
+  // 断点恢复
+  let lastProcessedTurn = 0;
+  if (opts.progressPath) {
+    const saved = await readRebuildProgress(opts.progressPath);
+    if (saved && saved.sessionKey === sessionKey) lastProcessedTurn = saved.lastProcessedTurn || 0;
+  }
+
+  // 1) 键集分页流式读取全部消息并配对
+  const pairs: RebuildPair[] = [];
+  {
+    let afterCreatedAt = -1;
+    let afterId = "";
+    let pendingUser: { content: string; turn: number } | null = null;
+    for (;;) {
+      const page = await getSessionMessagesPage(driver, sessionKey, afterCreatedAt, afterId, pageSize);
+      if (page.length === 0) break;
+      for (const m of page) {
+        if (m.role === "user") {
+          if (pendingUser) pairs.push({ user: pendingUser.content, assistant: "", lastTurn: pendingUser.turn });
+          pendingUser = { content: m.content, turn: m.turnIndex };
+        } else if (m.role === "assistant") {
+          if (pendingUser) {
+            pairs.push({ user: pendingUser.content, assistant: m.content, lastTurn: m.turnIndex });
+            pendingUser = null;
+          }
+        }
+      }
+      const last = page[page.length - 1];
+      afterCreatedAt = last.createdAt;
+      afterId = last.id;
+      if (page.length < pageSize) break;
+    }
+  }
+
+  const todo = pairs.filter((p) => p.lastTurn > lastProcessedTurn);
+  const totalPairs = todo.length;
+  if (totalPairs === 0) return { processedPairs: 0, totalPairs };
+
+  // 2) 并发提取 + 合并批量写
+  let processed = 0;
+  let lastTurn = lastProcessedTurn;
+  let pendingNodes: GmNode[] = [];
+  let pendingEdges: GmEdge[] = [];
+  const seenNodeIds = new Set<string>();
+
+  const flush = async () => {
+    let wroteNodes = 0;
+    let wroteEdges = 0;
+    if (pendingNodes.length) {
+      try { wroteNodes = await batchUpsertNodes(driver, pendingNodes); }
+      catch (e) { logger?.debug?.(`[graph-memory-pro] rebuild batchUpsertNodes failed: ${e}`); }
+    }
+    if (pendingEdges.length) {
+      try { wroteEdges = await batchUpsertEdges(driver, pendingEdges); }
+      catch (e) { logger?.debug?.(`[graph-memory-pro] rebuild batchUpsertEdges failed: ${e}`); }
+    }
+    pendingNodes = [];
+    pendingEdges = [];
+    seenNodeIds.clear();
+    return { wroteNodes, wroteEdges };
+  };
+
+  for (let i = 0; i < todo.length; i += concurrency) {
+    const window = todo.slice(i, i + concurrency);
+    const results = await Promise.allSettled(window.map((p) => extractor.extract(llm, p.user, p.assistant)));
+
+    let windowTurn = lastTurn;
+    for (let k = 0; k < window.length; k++) {
+      const p = window[k];
+      windowTurn = Math.max(windowTurn, p.lastTurn);
+      const r = results[k];
+      if (r.status === "rejected") {
+        llmBreaker.recordFailure();
+        continue;
+      }
+      llmBreaker.recordSuccess();
+      const res = r.value;
+      if (!res.nodes.length && !res.edges.length) continue;
+
+      const now = Date.now();
+      const nodeIdMap = new Map<string, string>();
+      for (const enode of res.nodes) {
+        const id = deterministicNodeId(enode.type, enode.name);
+        nodeIdMap.set(enode.name, id);
+        if (seenNodeIds.has(id)) continue;
+        seenNodeIds.add(id);
+        pendingNodes.push({
+          id,
+          type: enode.type,
+          name: enode.name,
+          description: enode.description,
+          content: enode.content,
+          status: "active",
+          communityId: undefined,
+          pagerank: 0,
+          validatedCount: 0,
+          createdAt: now,
+          updatedAt: now,
+          embeddingModel: cfg?.embedding?.model,
+        });
+      }
+      for (const eedge of res.edges) {
+        const fromId = nodeIdMap.get(eedge.fromName);
+        const toId = nodeIdMap.get(eedge.toName);
+        if (!fromId || !toId) continue;
+        pendingEdges.push({
+          id: `ge-${hashString(fromId + "|" + toId + "|" + eedge.type)}`,
+          type: eedge.type,
+          fromId,
+          toId,
+          instruction: eedge.instruction,
+          condition: eedge.condition,
+          weight: 1,
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+    }
+
+    lastTurn = windowTurn;
+    processed += window.length;
+
+    if (pendingNodes.length >= writeBatchSize || pendingEdges.length >= writeBatchSize) {
+      await flush();
+    }
+    if (opts.progressPath && (i % (concurrency * 20) === 0 || i + concurrency >= todo.length)) {
+      await writeRebuildProgress(opts.progressPath, { sessionKey, lastProcessedTurn: lastTurn, processedPairs: processed, totalPairs });
+    }
+    opts.onProgress?.({ processedPairs: processed, totalPairs, lastProcessedTurn: lastTurn });
+  }
+
+  await flush();
+  if (opts.progressPath) {
+    await writeRebuildProgress(opts.progressPath, { sessionKey, lastProcessedTurn: lastTurn, processedPairs: processed, totalPairs, status: "done" });
+  }
+  logger?.info?.(`[graph-memory-pro] rebuild complete: ${processed}/${totalPairs} pairs`);
+  return { processedPairs: processed, totalPairs };
 }
