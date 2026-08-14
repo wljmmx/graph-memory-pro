@@ -186,7 +186,7 @@ export async function rebuildGraphFromStoredMessages(
 // ─────────────────────────────────────────────────────────────
 
 export interface RebuildOptions {
-  /** LLM 并发窗口（本地 Ollama 默认 16，可调 8–32） */
+  /** LLM 并发窗口（本地 Ollama 推荐低并发，默认 4，可调 1–128） */
   concurrency?: number;
   /** 键集分页读取的每页大小（默认 2000） */
   pageSize?: number;
@@ -265,7 +265,7 @@ export async function rebuildSessionMessages(
     return { processedPairs: 0, totalPairs: 0 };
   }
 
-  const concurrency = Math.max(1, opts.concurrency ?? 16);
+  const concurrency = Math.max(1, opts.concurrency ?? 4);
   const pageSize = Math.max(100, opts.pageSize ?? 2000);
   const writeBatchSize = Math.max(50, opts.writeBatchSize ?? 500);
 

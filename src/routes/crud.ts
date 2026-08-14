@@ -122,7 +122,11 @@ async function handleStatus(): Promise<{ status: number; body: unknown }> {
 /**
  * v2.4.1: 根据 Neo4j 中已存储的会话消息（:GmMessage）高性能重建三级节点。
  * POST /api/extract/rebuild
- * body: { sessionKey, concurrency?, pageSize?, writeBatchSize?, progressPath?, lastProcessedTurn? }
+ * body: { sessionKey, concurrency?, pageSize?, writeBatchSize?, progressPath? }
+ *   - concurrency:   LLM 并发窗口（默认 4，1–128）
+ *   - pageSize:      读取分页大小（默认 2000）
+ *   - writeBatchSize:合并写入批上限（默认 500）
+ *   - progressPath:  进度文件路径；传入即启用断点续传 + 进度落盘，同路径再次调用续跑
  */
 async function handleRebuildFromMessages(params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
   if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
@@ -131,7 +135,7 @@ async function handleRebuildFromMessages(params: Record<string, unknown>): Promi
   if (typeof sessionKey !== "string" || sessionKey.length === 0) {
     return { status: 400, body: { error: "sessionKey is required (string)" } };
   }
-  const concurrency = safeParseInt(params.concurrency as string, 16, 128);
+  const concurrency = safeParseInt(params.concurrency as string, 4, 128);
   const pageSize = safeParseInt(params.pageSize as string, 2000, 20000);
   const writeBatchSize = safeParseInt(params.writeBatchSize as string, 500, 5000);
   const progressPath = typeof params.progressPath === "string" && params.progressPath.length > 0
