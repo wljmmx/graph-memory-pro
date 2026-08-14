@@ -227,11 +227,11 @@ function hashString(s: string): string {
 
 /**
  * v2.4.1: 节点名规范化，用于边引用名与节点 name 的容错匹配。
- * LLM 返回的 edge.fromName/toName 常与节点 name 存在大小写/空格/标点差异，
- * 直接精确匹配会全部落空导致 0 条边。统一转为小写并去空白作匹配 key。
+ * LLM 返回的 edge.fromName/toName 常与节点 name 存在大小写/空格/连字符/标点差异，
+ * 直接精确匹配会全部落空导致 0 条边。统一转小写并去掉所有非字母数字字符作匹配 key。
  */
 function normName(s: string): string {
-  return (s ?? "").trim().toLowerCase().replace(/\s+/g, "");
+  return (s ?? "").toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]/g, "");
 }
 
 function deterministicNodeId(type: string, name: string): string {

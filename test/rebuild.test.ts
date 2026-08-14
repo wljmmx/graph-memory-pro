@@ -214,6 +214,36 @@ describe("rebuildSessionMessages", () => {
     expect(calls[0].query).toContain("GmMessage");
   });
 
+  it("写入首字母大写 label（Task/Skill/Event）并正确连边，而非全大写 TASK", async () => {
+    const driver = mockDriver();
+    driver.queueResults([
+      [
+        pageMsg("m1", 1, "user", "构建 API"),
+        pageMsg("m2", 2, "assistant", "用 OpenAPI"),
+      ],
+      [{ c: 2 }], // batchUpsertNodes RETURN count
+      [{ c: 1 }], // batchUpsertEdges RETURN count
+    ]);
+
+    // 边引用名与节点 name 大小写/空格不一致，验证规范化匹配能连上边
+    const llm = makeMockLlm(JSON.stringify({
+      nodes: SAMPLE_NODES, // name: "build-api" / "openapi-spec"
+      edges: [{ type: "USED_SKILL", fromName: "Build API", toName: "OpenAPI Spec", instruction: "task uses skill" }],
+    }));
+    const extractor = new Extractor(driver as any);
+
+    await rebuildSessionMessages(extractor, driver as any, llm, null, console, "s1", { concurrency: 16 });
+
+    const queries = driver.getAllRunCalls().map((c) => c.query).join("\n");
+    // label 必须为首字母大写，禁止全大写 TASK/SKILL
+    expect(queries).not.toMatch(/MERGE \(.*:TASK\b/);
+    expect(queries).not.toMatch(/MERGE \(.*:TASK /);
+    expect(queries).toMatch(/MERGE \(n:Task \{id:/);
+    // 边必须被写入（规范化匹配成功），而非 0 条
+    expect(queries).toMatch(/:USED_SKILL/);
+    expect(queries).toMatch(/fromId/);
+  });
+
   it("无 user/assistant 配对 → 返回 0，不调用 LLM", async () => {
     const driver = mockDriver();
     driver.queueResults([[pageMsg("m1", 1, "assistant", "只有助手消息")]]);
