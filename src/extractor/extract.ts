@@ -6,7 +6,7 @@
  */
 
 import type { CompleteFn } from "../engine/llm.ts";
-import type { ExtractResult } from "../types.ts";
+import type { ExtractResult, NodeType, EdgeType } from "../types.ts";
 import type { Driver } from "neo4j-driver";
 
 const EXTRACT_SYSTEM_PROMPT = `你是知识图谱三元组提取专家。
@@ -166,4 +166,108 @@ export class Extractor {
   ): Promise<ExtractResult> {
     return extractTriplets(llm, userContent, assistantContent);
   }
+}
+
+// ─────────────────────────────────────────────────────────────
+// v2.4.1 非 LLM 快速提取（启发式规则）
+//
+// 不调用 LLM，用规则从对话文本快速提取 TASK/SKILL/EVENT 节点与边。
+// 速度快、零成本、确定性，但泛化能力有限 —— 适合大批量初筛/快速重建。
+// 由 rebuild 的 `mode: "heuristic"` 开关启用。
+// ─────────────────────────────────────────────────────────────
+
+/** 转小写 ASCII 短横线 slug（中文则保留原样，用于节点 name） */
+function slugify(text: string): string {
+  const t = (text ?? "").trim();
+  if (!t) return "";
+  if (/[\u4e00-\u9fa5]/.test(t)) return t.slice(0, 24);
+  return t.slice(0, 40).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+/** 取前 n 个词/字作为短语 */
+function firstPhrase(text: string, maxWords: number): string {
+  const t = (text ?? "").trim();
+  if (!t) return "";
+  const words = t.split(/\s+/).filter(Boolean);
+  return words.slice(0, maxWords).join(" ");
+}
+
+/** 错误/问题关键词（命中则视为 EVENT 节点） */
+const ERROR_KEYWORDS = /(?:错误|失败|异常|崩溃|报错|超时|无法|拒绝|error|failed|crash|exception|timeout|denied)/i;
+
+/**
+ * 基于规则的快速提取。不依赖 LLM。
+ */
+export function heuristicExtract(userContent: string, assistantContent: string): ExtractResult {
+  const nodes: RoomNodeLike[] = [];
+  const edges: RoomEdgeLike[] = [];
+  const seen = new Set<string>();
+
+  const user = (userContent ?? "").trim();
+  const assistant = (assistantContent ?? "").trim();
+
+  // TASK：来自用户消息
+  if (user) {
+    const name = slugify(firstPhrase(user, 10));
+    if (name && !seen.has(name)) {
+      seen.add(name);
+      nodes.push({ type: "TASK", name, description: user.slice(0, 160), content: user });
+    }
+  }
+
+  // EVENT：命中错误关键词
+  const joined = `${user} ${assistant}`;
+  const errMatch = joined.match(new RegExp(`(?:${ERROR_KEYWORDS.source})[：:\\s]*([^。\\n]{2,60})`));
+  if (errMatch) {
+    const raw = errMatch[0];
+    const name = `event-${slugify(firstPhrase(raw, 8))}`;
+    if (!seen.has(name)) {
+      seen.add(name);
+      nodes.push({ type: "EVENT", name, description: raw.slice(0, 160), content: raw });
+    }
+  }
+
+  // SKILL：来自助手消息，按句切分取前几段
+  if (assistant) {
+    const chunks = assistant.split(/[。；;！!？?]/).map((s) => s.trim()).filter(Boolean);
+    for (const ch of chunks.slice(0, 3)) {
+      const name = slugify(firstPhrase(ch, 10));
+      if (name && name.length >= 2 && !seen.has(name)) {
+        seen.add(name);
+        nodes.push({ type: "SKILL", name, description: ch.slice(0, 160), content: ch });
+      }
+    }
+  }
+
+  const taskNode = nodes.find((n) => n.type === "TASK");
+  const eventNode = nodes.find((n) => n.type === "EVENT");
+  const skillNodes = nodes.filter((n) => n.type === "SKILL");
+
+  if (taskNode) {
+    for (const s of skillNodes) {
+      edges.push({ type: "USED_SKILL", fromName: taskNode.name, toName: s.name, instruction: "task uses skill" });
+    }
+  }
+  if (eventNode) {
+    for (const s of skillNodes) {
+      edges.push({ type: "SOLVED_BY", fromName: eventNode.name, toName: s.name, instruction: "event solved by skill" });
+    }
+  }
+
+  return { nodes: nodes.slice(0, 5), edges: edges.slice(0, 8) };
+}
+
+// 与 ExtractResult 兼容的局部类型，避免重复引用
+interface RoomNodeLike {
+  type: NodeType;
+  name: string;
+  description: string;
+  content: string;
+}
+interface RoomEdgeLike {
+  type: EdgeType;
+  fromName: string;
+  toName: string;
+  instruction: string;
+  condition?: string;
 }

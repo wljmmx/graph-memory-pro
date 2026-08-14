@@ -113,6 +113,26 @@ export async function getSessionMessagesPage(
   }
 }
 
+/**
+ * v2.4.1: 枚举所有出现过的会话 key（用于批量重建遍历全部会话）。
+ */
+export async function listAllSessionKeys(driver: Driver): Promise<string[]> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(
+      `MATCH (m:GmMessage)
+       WHERE m.sessionKey IS NOT NULL
+       WITH DISTINCT m.sessionKey AS k
+       RETURN k`,
+    );
+    return result.records
+      .map((r) => r.get("k"))
+      .filter((k): k is string => typeof k === "string" && k.length > 0);
+  } finally {
+    await session.close();
+  }
+}
+
 export async function getRecentDistinctMessages(
   driver: Driver,
   sessionKey: string,

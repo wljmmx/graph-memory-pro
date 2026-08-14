@@ -8,12 +8,13 @@
  */
 
 import type { Driver } from "neo4j-driver";
-import type { GmConfig, GmNode, GmEdge, GmMessage } from "../types.ts";
+import type { GmConfig, GmNode, GmEdge, GmMessage, ExtractResult } from "../types.ts";
 import type { CompleteFn } from "../engine/llm.ts";
 import type { Extractor } from "../extractor/extract.ts";
 import { upsertNode, batchUpsertNodes, upsertEdge, batchUpsertEdges } from "../store/store.ts";
 import { getCircuitBreaker } from "../engine/circuit-breaker.ts";
-import { getSessionMessages, getSessionMessagesPage } from "../store/messages.ts";
+import { getSessionMessages, getSessionMessagesPage, listAllSessionKeys } from "../store/messages.ts";
+import { heuristicExtract } from "../extractor/extract.ts";
 
 /**
  * 后台三元组提取：从最近会话消息中提取实体/关系写入 Neo4j。
@@ -196,6 +197,10 @@ export interface RebuildOptions {
   progressPath?: string;
   /** 进度回调（可用于日志/进度条） */
   onProgress?: (info: { processedPairs: number; totalPairs: number; lastProcessedTurn: number }) => void;
+  /** v2.4.1: 提取模式。默认 "llm"（调用 LLM）；"heuristic"（规则快速提取，不调 LLM，零成本） */
+  mode?: "llm" | "heuristic";
+  /** v2.4.1: 断点续传起始轮次（未传 progressPath 时使用；progressPath 记录优先） */
+  lastProcessedTurn?: number;
 }
 
 interface RebuildPair {
@@ -246,7 +251,7 @@ function writeRebuildProgress(path: string, data: Record<string, unknown>): Prom
 /**
  * 从 Neo4j 已存储会话消息（:GmMessage）高性能重建三级节点。
  *
- * @returns 实际处理的对数
+ * @returns 实际处理的对数，以及本会话最新处理到的轮次（用于断点续传）
  */
 export async function rebuildSessionMessages(
   extractor: Extractor | null,
@@ -256,21 +261,24 @@ export async function rebuildSessionMessages(
   logger: { debug?(...args: unknown[]): void; info?(...args: unknown[]): void },
   sessionKey: string,
   opts: RebuildOptions = {},
-): Promise<{ processedPairs: number; totalPairs: number }> {
-  if (!extractor || !driver || !llm) return { processedPairs: 0, totalPairs: 0 };
+): Promise<{ processedPairs: number; totalPairs: number; lastProcessedTurn: number }> {
+  const mode = opts.mode ?? "llm";
+  if (!driver) return { processedPairs: 0, totalPairs: 0, lastProcessedTurn: 0 };
+  // heuristic 模式不依赖 LLM/Extractor；llm 模式两者必需
+  if (mode === "llm" && (!extractor || !llm)) return { processedPairs: 0, totalPairs: 0, lastProcessedTurn: 0 };
 
   const llmBreaker = getCircuitBreaker("llm");
-  if (!llmBreaker.allow()) {
+  if (mode === "llm" && !llmBreaker.allow()) {
     logger?.info?.("[graph-memory-pro] llm circuit OPEN, skip rebuild");
-    return { processedPairs: 0, totalPairs: 0 };
+    return { processedPairs: 0, totalPairs: 0, lastProcessedTurn: 0 };
   }
 
   const concurrency = Math.max(1, opts.concurrency ?? 4);
   const pageSize = Math.max(100, opts.pageSize ?? 2000);
   const writeBatchSize = Math.max(50, opts.writeBatchSize ?? 500);
 
-  // 断点恢复
-  let lastProcessedTurn = 0;
+  // 断点恢复：progressPath 记录优先，否则用调用方传入的起始轮次
+  let lastProcessedTurn = opts.lastProcessedTurn ?? 0;
   if (opts.progressPath) {
     const saved = await readRebuildProgress(opts.progressPath);
     if (saved && saved.sessionKey === sessionKey) lastProcessedTurn = saved.lastProcessedTurn || 0;
@@ -305,7 +313,7 @@ export async function rebuildSessionMessages(
 
   const todo = pairs.filter((p) => p.lastTurn > lastProcessedTurn);
   const totalPairs = todo.length;
-  if (totalPairs === 0) return { processedPairs: 0, totalPairs };
+  if (totalPairs === 0) return { processedPairs: 0, totalPairs, lastProcessedTurn };
 
   // 2) 并发提取 + 合并批量写
   let processed = 0;
@@ -313,6 +321,14 @@ export async function rebuildSessionMessages(
   let pendingNodes: GmNode[] = [];
   let pendingEdges: GmEdge[] = [];
   const seenNodeIds = new Set<string>();
+
+  // v2.4.1: 按模式选择提取函数（llm=调用 LLM；heuristic=规则快速提取，不调 LLM）
+  // 外层已保证 mode="llm" 时 extractor/llm 非空，此处提前取出非空引用供闭包使用
+  const llmExtractor = extractor!;
+  const extractOne: (p: RebuildPair) => Promise<ExtractResult> =
+    mode === "heuristic"
+      ? (p) => Promise.resolve(heuristicExtract(p.user, p.assistant))
+      : (p) => llmExtractor.extract(llm!, p.user, p.assistant);
 
   const flush = async () => {
     let wroteNodes = 0;
@@ -333,7 +349,7 @@ export async function rebuildSessionMessages(
 
   for (let i = 0; i < todo.length; i += concurrency) {
     const window = todo.slice(i, i + concurrency);
-    const results = await Promise.allSettled(window.map((p) => extractor.extract(llm, p.user, p.assistant)));
+    const results = await Promise.allSettled(window.map((p) => extractOne(p)));
 
     let windowTurn = lastTurn;
     for (let k = 0; k < window.length; k++) {
@@ -405,5 +421,141 @@ export async function rebuildSessionMessages(
     await writeRebuildProgress(opts.progressPath, { sessionKey, lastProcessedTurn: lastTurn, processedPairs: processed, totalPairs, status: "done" });
   }
   logger?.info?.(`[graph-memory-pro] rebuild complete: ${processed}/${totalPairs} pairs`);
-  return { processedPairs: processed, totalPairs };
+  return { processedPairs: processed, totalPairs, lastProcessedTurn: lastTurn };
+}
+
+// ─────────────────────────────────────────────────────────────
+// v2.4.1 批量重建全部会话（进程内 session 级并发）
+//
+// 相比「手动启动多个 API 实例」：本函数在单进程内用 sessionConcurrency 个
+// 工作协程并发处理多个 session，每个 session 内部再用 concurrency 窗口并发
+// 提取。复用同一 Neo4j 连接池与进度文件，避免多实例的连接池压力与进度竞争。
+// 支持 mode（llm/heuristic）与 progressPath 断点续传。
+// ─────────────────────────────────────────────────────────────
+
+export interface RebuildAllOptions extends RebuildOptions {
+  /** 同时并发处理的 session 数（默认 2，本地 Ollama 请勿过高） */
+  sessionConcurrency?: number;
+  /** 最多处理多少个 session（调试/分批用，默认 0 = 全部） */
+  limitSessions?: number;
+}
+
+/** 全局进度状态（rebuild-all 用） */
+interface RebuildAllProgress {
+  totalSessions: number;
+  processedSessions: number;
+  totalPairs: number;
+  processedPairs: number;
+  done: boolean;
+  /** 每个 session 上次处理到的轮次，用于续跑 */
+  sessions: Record<string, number>;
+  updatedAt: string;
+}
+
+function readAllProgress(path: string): Promise<RebuildAllProgress | null> {
+  return import("node:fs/promises").then(
+    (fs) => fs.readFile(path, "utf-8").then((t) => {
+      try { return JSON.parse(t) as RebuildAllProgress; } catch { return null; }
+    }).catch(() => null),
+    () => null,
+  );
+}
+
+function writeAllProgress(path: string, data: RebuildAllProgress): Promise<void> {
+  return import("node:fs/promises").then((fs) =>
+    fs.writeFile(path, JSON.stringify(data)).catch(() => undefined),
+  );
+}
+
+/**
+ * 遍历全部会话并批量重建三级节点。
+ *
+ * @returns 处理统计
+ */
+export async function rebuildAllSessions(
+  extractor: Extractor | null,
+  driver: Driver | null,
+  llm: CompleteFn | null,
+  cfg: GmConfig | null,
+  logger: { debug?(...args: unknown[]): void; info?(...args: unknown[]): void },
+  opts: Omit<RebuildAllOptions, "progressPath"> & { progressPath?: string } = {},
+): Promise<{
+  totalSessions: number;
+  processedSessions: number;
+  totalPairs: number;
+  processedPairs: number;
+  mode: "llm" | "heuristic";
+  results: Record<string, { processedPairs: number; totalPairs: number }>;
+}> {
+  if (!driver) return { totalSessions: 0, processedSessions: 0, totalPairs: 0, processedPairs: 0, mode: opts.mode ?? "llm", results: {} };
+
+  const sessionConcurrency = Math.max(1, opts.sessionConcurrency ?? 2);
+  const limitSessions = Math.max(0, opts.limitSessions ?? 0);
+  const mode = opts.mode ?? "llm";
+  const progressPath = opts.progressPath;
+
+  // 断点恢复：已完成的 session 及其轮次
+  let progress: RebuildAllProgress | null = null;
+  if (progressPath) progress = await readAllProgress(progressPath);
+
+  const keys = await listAllSessionKeys(driver);
+  const targets = limitSessions > 0 ? keys.slice(0, limitSessions) : keys;
+  const totalSessions = targets.length;
+
+  const results: Record<string, { processedPairs: number; totalPairs: number }> = {};
+  let processedSessions = 0;
+  let processedPairs = 0;
+  let totalPairs = 0;
+
+  const record = async (key: string, r: { processedPairs: number; totalPairs: number; lastProcessedTurn: number }) => {
+    results[key] = r;
+    processedSessions++;
+    processedPairs += r.processedPairs;
+    totalPairs += r.totalPairs;
+    if (progressPath) {
+      // 会话已全部处理完 → 记为 -1（下次跳过）；否则记录已处理到的轮次以便续跑
+      const done = r.processedPairs > 0 && r.processedPairs >= r.totalPairs;
+      const mark = done ? -1 : r.lastProcessedTurn;
+      const p: RebuildAllProgress = {
+        totalSessions,
+        processedSessions,
+        totalPairs,
+        processedPairs,
+        done: processedSessions >= totalSessions,
+        sessions: { ...(progress?.sessions ?? {}), [key]: mark },
+        updatedAt: new Date().toISOString(),
+      };
+      progress = p;
+      await writeAllProgress(progressPath, p);
+    }
+    logger?.info?.(`[graph-memory-pro] rebuilt session ${key}: ${r.processedPairs}/${r.totalPairs} pairs`);
+  };
+
+  // 工作协程池：并发处理多个 session
+  let idx = 0;
+  const worker = async () => {
+    while (idx < totalSessions) {
+      const key = targets[idx++];
+      // 断点：该 session 已做完（lastTurn 记为 -1）则跳过
+      if (progress?.sessions?.[key] === -1) continue;
+      try {
+        const perSession = progress?.sessions?.[key] ?? undefined;
+        const r = await rebuildSessionMessages(extractor, driver, llm, cfg, logger, key, {
+          concurrency: opts.concurrency,
+          pageSize: opts.pageSize,
+          writeBatchSize: opts.writeBatchSize,
+          mode,
+          // 断点续传：该 session 已处理的轮次
+          ...(typeof perSession === "number" && perSession > 0 ? { lastProcessedTurn: perSession } : {}),
+        });
+        await record(key, r);
+      } catch (err) {
+        logger?.debug?.(`[graph-memory-pro] rebuild session ${key} failed: ${err}`);
+      }
+    }
+  };
+  const workers = Array.from({ length: sessionConcurrency }, () => worker());
+  await Promise.all(workers);
+
+  return { totalSessions, processedSessions, totalPairs, processedPairs, mode, results };
 }

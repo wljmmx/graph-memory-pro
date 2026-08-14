@@ -765,6 +765,7 @@ export default definePluginEntry({
       model: Type.Optional(Type.String({ default: "" })),
       keepAlive: Type.Optional(Type.Union([Type.String({ default: "" }), Type.Number({ default: -1 })])),
       maxConcurrency: Type.Optional(Type.Number({ default: 1, description: "v2.3.2 阶段二: 最大并发请求数（默认 1 for Ollama 本地，可调高 for 云端 API）" })),
+      thinking: Type.Optional(Type.Boolean({ description: "v2.4.1: 思考模式开关（true=开启 reasoning，false=关闭快速），仅对支持的服务生效" })),
     })),
     embedding: Type.Optional(Type.Object({
       apiKey: Type.Optional(Type.String({ default: "" })),

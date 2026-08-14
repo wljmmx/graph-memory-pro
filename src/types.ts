@@ -22,6 +22,12 @@ export interface LlmConfig {
   keepAlive?: string | number;
   /** v2.3.2 阶段二: 最大并发请求数（默认 1 for Ollama 本地，可调高 for 云端） */
   maxConcurrency?: number;
+  /**
+   * v2.4.1: 思考模式开关。true=开启思考（reasoning），false=关闭（快速）。
+   * 仅对支持该参数的服务生效：Ollama 原生 /api/chat 传 options.think；
+   * OpenAI 兼容端点透传 think 字段（不支持的服务会忽略）。默认不传（保持服务默认行为）。
+   */
+  thinking?: boolean;
 }
 
 export interface EmbeddingConfig {

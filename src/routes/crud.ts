@@ -106,6 +106,8 @@ export function getRoutes(): RouteHandler[] {
     { method: "POST", path: "/api/ops/reconnect", handler: handleReconnect },
     { method: "GET", path: "/api/ops/services", handler: handleServiceStatus },
     { method: "POST", path: "/api/extract/rebuild", handler: handleRebuildFromMessages },
+    // v2.4.1: 批量重建全部会话（进程内并发 + 断点续传 + llm/heuristic 模式）
+    { method: "POST", path: "/api/extract/rebuild-all", handler: handleRebuildAll },
   ];
 }
 
@@ -141,6 +143,8 @@ async function handleRebuildFromMessages(params: Record<string, unknown>): Promi
   const progressPath = typeof params.progressPath === "string" && params.progressPath.length > 0
     ? params.progressPath
     : undefined;
+  // v2.4.1: 提取模式开关。mode=llm（默认，调用 LLM）；mode=heuristic（规则快速提取，不调 LLM，零成本）
+  const mode = params.mode === "heuristic" ? "heuristic" : "llm";
   try {
     const { Extractor } = await import("../extractor/extract.ts");
     const extractor = new Extractor(_driver);
@@ -152,9 +156,52 @@ async function handleRebuildFromMessages(params: Record<string, unknown>): Promi
       _cfg,
       console,
       sessionKey,
-      { concurrency, pageSize, writeBatchSize, progressPath },
+      { concurrency, pageSize, writeBatchSize, progressPath, mode },
     );
-    return { status: 200, body: { ...result, message: "rebuild completed" } };
+    return { status: 200, body: { ...result, mode, message: "rebuild completed" } };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
+  }
+}
+
+/**
+ * v2.4.1: 批量重建全部会话。
+ * POST /api/extract/rebuild-all
+ * body: { mode?, sessionConcurrency?, concurrency?, limitSessions?, pageSize?, writeBatchSize?, progressPath? }
+ *   - mode:              "llm"（默认，调用 LLM）| "heuristic"（规则快速提取，不调 LLM，零成本）
+ *   - sessionConcurrency: 同时并发处理的 session 数（默认 2，本地 Ollama 勿过高）
+ *   - concurrency:       单个 session 内 LLM 并发窗口（默认 4）
+ *   - limitSessions:      最多处理 N 个 session（0=全部，默认 0）
+ *   - pageSize:           读取分页大小（默认 2000）
+ *   - writeBatchSize:     合并写入批上限（默认 500）
+ *   - progressPath:       进度文件路径；传入即启用断点续传，同路径再次调用续跑
+ */
+async function handleRebuildAll(params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
+  if (!_driver) return { status: 503, body: { error: "Neo4j not connected" } };
+  const mode = params.mode === "heuristic" ? "heuristic" : "llm";
+  // heuristic 模式不依赖 LLM；llm 模式必须配置 LLM
+  if (mode === "llm" && !_llm) return { status: 503, body: { error: "LLM not configured (or use mode=heuristic)" } };
+  const sessionConcurrency = safeParseInt(params.sessionConcurrency as string, 2, 64);
+  const concurrency = safeParseInt(params.concurrency as string, 4, 128);
+  const limitSessions = safeParseInt(params.limitSessions as string, 0, 100000);
+  const pageSize = safeParseInt(params.pageSize as string, 2000, 20000);
+  const writeBatchSize = safeParseInt(params.writeBatchSize as string, 500, 5000);
+  const progressPath = typeof params.progressPath === "string" && params.progressPath.length > 0
+    ? params.progressPath
+    : undefined;
+  try {
+    const { Extractor } = await import("../extractor/extract.ts");
+    const extractor = new Extractor(_driver);
+    const { rebuildAllSessions } = await import("../services/extract-service.ts");
+    const result = await rebuildAllSessions(
+      extractor,
+      _driver,
+      _llm,
+      _cfg,
+      console,
+      { mode, sessionConcurrency, concurrency, limitSessions, pageSize, writeBatchSize, progressPath },
+    );
+    return { status: 200, body: { ...result, message: "rebuild-all completed" } };
   } catch (err: unknown) {
     return { status: 500, body: { error: (err as Error).message } };
   }

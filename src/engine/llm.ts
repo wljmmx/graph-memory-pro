@@ -168,6 +168,8 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
               options: {
                 num_predict: 1024,
                 temperature: 0.3,
+                // v2.4.1: 思考模式开关（Ollama 推理模型支持 think:false 关闭思考）
+                ...(config.thinking !== undefined ? { think: config.thinking } : {}),
               },
               keep_alive: keepAlive,
             }),
@@ -190,6 +192,8 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
               ],
               max_tokens: 1024,
               temperature: 0.3,
+              // v2.4.1: 思考模式开关（OpenAI 兼容服务未知字段一般会忽略）
+              ...(config.thinking !== undefined ? { think: config.thinking } : {}),
               // keep_alive 仅 Ollama 识别，OpenAI 兼容服务会忽略未知字段
               ...(keepAlive != null ? { keep_alive: keepAlive } : {}),
             }),
