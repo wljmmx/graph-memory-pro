@@ -1113,12 +1113,28 @@ async function handleUsage(): Promise<{ status: number; body: unknown }> {
     const { getUsageStats } = await import("../store/usage.ts");
     const stats = getUsageStats();
     const hasData = stats.total.calls > 0;
+    // v2.4.1: 汇总 LLM 输出情况，便于直接判断「LLM 是否有输出」。
+    // hasOutput = 累计 completionTokens > 0（LLM 确实吐出了文字）。
+    // 注意：llm.ts 中 content 为空会先抛错不走 recordUsage，故 completionTokens>0 即证明有实质输出。
+    const purposeSummary = Object.fromEntries(
+      Object.entries(stats.byPurpose)
+        .filter(([k]) => k !== "all")
+        .map(([k, v]) => [k, { calls: v.calls, completionTokens: v.completionTokens, promptTokens: v.promptTokens }]),
+    );
+    const llm = {
+      hasOutput: (stats.total.completionTokens ?? 0) > 0,
+      calls: stats.total.calls,
+      completionTokens: stats.total.completionTokens,
+      promptTokens: stats.total.promptTokens,
+      byPurpose: purposeSummary,
+    };
     return {
       status: 200,
       body: {
         version: VERSION,
         timestamp: new Date().toISOString(),
         ...stats,
+        llm,
         // v2.3.5: 说明字段，便于 dashboard 展示
         hint: hasData
           ? undefined
