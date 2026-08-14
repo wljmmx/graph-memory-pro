@@ -77,29 +77,60 @@ function parseExtractResult(raw: string): ExtractResult {
     .replace(/\s*```$/i, "")
     .trim();
 
+  // 1) 直接 JSON.parse（输出即纯 JSON 的常规情况）
+  const direct = tryParseWholeObject(cleaned);
+  if (direct) return toExtractResult(direct);
+
+  // 2) 思考模式/reasoning 适配：剥离思考文本，
+  //    用括号配对扫描顶层对象，取第一个含 "nodes" 键的 JSON 对象
+  const found = extractObjectWithNodes(cleaned);
+  if (found) return toExtractResult(found);
+
+  return FALLBACK;
+}
+
+/** 尝试把整段文本当作单个 JSON 对象解析 */
+function tryParseWholeObject(text: string): Record<string, unknown> | null {
   try {
-    const parsed = JSON.parse(cleaned);
-    if (!parsed || typeof parsed !== "object") return FALLBACK;
-    return {
-      nodes: Array.isArray(parsed.nodes) ? parsed.nodes.filter(isValidNode).slice(0, 5) : [],
-      edges: Array.isArray(parsed.edges) ? parsed.edges.filter(isValidEdge).slice(0, 8) : [],
-    };
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === "object" ? parsed : null;
   } catch {
-    // 非贪婪匹配，避免匹配过多内容
-    const match = cleaned.match(/\{[\s\S]*?"nodes"[\s\S]*?\}/);
-    if (match) {
-      try {
-        const parsed = JSON.parse(match[0]);
-        return {
-          nodes: Array.isArray(parsed.nodes) ? parsed.nodes.filter(isValidNode).slice(0, 5) : [],
-          edges: Array.isArray(parsed.edges) ? parsed.edges.filter(isValidEdge).slice(0, 8) : [],
-        };
-      } catch {
-        return FALLBACK;
+    return null;
+  }
+}
+
+/**
+ * 在思考模式输出（reasoning 文本 + 末尾 JSON）中提取含 "nodes" 键的顶层 JSON 对象。
+ * 用括号配对定位每个顶层对象，避免被思考文本里的 `{}` 干扰，并优先返回含 "nodes" 的。
+ */
+function extractObjectWithNodes(text: string): Record<string, unknown> | null {
+  const start = text.indexOf("{");
+  if (start === -1) return null;
+
+  let depth = 0;
+  let objStart = -1;
+  for (let i = start; i < text.length; i++) {
+    const c = text[i];
+    if (c === "{") {
+      if (depth === 0) objStart = i;
+      depth++;
+    } else if (c === "}") {
+      depth--;
+      if (depth === 0 && objStart !== -1) {
+        const candidate = tryParseWholeObject(text.slice(objStart, i + 1));
+        if (candidate && "nodes" in candidate) return candidate;
+        objStart = -1;
       }
     }
-    return FALLBACK;
   }
+  return null;
+}
+
+function toExtractResult(parsed: Record<string, unknown>): ExtractResult {
+  return {
+    nodes: Array.isArray(parsed.nodes) ? parsed.nodes.filter(isValidNode).slice(0, 5) : [],
+    edges: Array.isArray(parsed.edges) ? parsed.edges.filter(isValidEdge).slice(0, 8) : [],
+  };
 }
 
 // ─── 验证函数 ──────────────────────────────────

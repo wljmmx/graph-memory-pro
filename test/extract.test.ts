@@ -86,11 +86,10 @@ ${JSON.stringify({ nodes: SAMPLE_NODES, edges: SAMPLE_EDGES }, null, 2)}
     expect(result.edges[0].type).toBe("USED_SKILL");
   });
 
-  // ── 3. M-7 容错：前后文本包裹（含嵌套对象时的已知限制） ─
-  // 注意：extract.ts 的 M-7 regex `\{[\s\S]*?"nodes"[\s\S]*?\}` 使用非贪婪
-  // 匹配，遇到节点对象内部的 `}` 会提前结束，导致 JSON 不完整 → 返回空数组。
-  // 这是当前实现的已知限制，本测试据实断言该行为。
-  it("M-7 容错：LLM 返回带前后文本的 JSON（含嵌套节点）→ regex 截断，返回空数组", async () => {
+  // ── 3. M-7 容错：前后文本包裹 ────────────────────────────
+  // 旧实现用非贪婪 regex `\{[\s\S]*?"nodes"[\s\S]*?\}`，遇到节点对象内部的 `}`
+  // 会提前截断导致解析失败。v2.4.1 改为括号配对提取完整顶层对象 → 现在可正确解析。
+  it("M-7 容错：前后文本包裹的 JSON（含嵌套节点）→ 完整提取", async () => {
     const json = JSON.stringify({ nodes: SAMPLE_NODES, edges: SAMPLE_EDGES });
     const payload = `好的，这是提取结果：\n${json}\n以上为本次提取的三元组。`;
 
@@ -98,8 +97,9 @@ ${JSON.stringify({ nodes: SAMPLE_NODES, edges: SAMPLE_EDGES }, null, 2)}
 
     const result = await extractTriplets(llm, "构建 API", "用 OpenAPI");
 
-    expect(result.nodes).toEqual([]);
-    expect(result.edges).toEqual([]);
+    expect(result.nodes).toHaveLength(2);
+    expect(result.nodes[0].name).toBe("build-api");
+    expect(result.edges).toHaveLength(1);
   });
 
   // 补充：前后文本包裹「无嵌套对象」的 JSON → regex 可完整提取
@@ -319,6 +319,42 @@ ${JSON.stringify({ nodes: SAMPLE_NODES, edges: SAMPLE_EDGES }, null, 2)}
 
     expect(result.edges).toHaveLength(1);
     expect(result.edges[0].fromName).toBe("a");
+  });
+
+  // ── 思考模式（reasoning）适配 ──────────────────────────────
+  it("思考模式：输出=thinking 文本 + JSON → 能提取 nodes/edges", async () => {
+    const reasoning = [
+      "好的，让我分析这段对话。用户在构建 REST API，助手建议用 OpenAPI 规范。",
+      "我需要提取任务节点和技能节点。让我组织一下输出。",
+    ].join("\n");
+    const json = JSON.stringify({ nodes: SAMPLE_NODES, edges: SAMPLE_EDGES });
+    const llm = makeMockLlm(`${reasoning}\n\n${json}`);
+
+    const result = await extractTriplets(llm, "构建 API", "用 OpenAPI");
+
+    expect(result.nodes).toHaveLength(2);
+    expect(result.nodes[0].name).toBe("build-api");
+    expect(result.edges).toHaveLength(1);
+  });
+
+  it("思考模式：thinking 内包含花括号/JSON 示例 → 仍取含 nodes 的顶层对象", async () => {
+    const reasoning = `思考：输出格式应为 {"nodes":[...],"edges":[...]} 这样的 JSON。`;
+    const json = JSON.stringify({ nodes: SAMPLE_NODES, edges: SAMPLE_EDGES });
+    const llm = makeMockLlm(`${reasoning}\n最终结果：\n${json}`);
+
+    const result = await extractTriplets(llm, "构建 API", "用 OpenAPI");
+
+    expect(result.nodes).toHaveLength(2);
+    expect(result.edges).toHaveLength(1);
+  });
+
+  it("思考模式：LLM 只返回思考文本无 JSON → 返回空数组（不抛错）", async () => {
+    const llm = makeMockLlm("思考中，请稍候……我还在分析这段内容。");
+
+    const result = await extractTriplets(llm, "构建 API", "用 OpenAPI");
+
+    expect(result.nodes).toEqual([]);
+    expect(result.edges).toEqual([]);
   });
 });
 
