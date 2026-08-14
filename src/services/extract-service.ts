@@ -556,8 +556,9 @@ export async function rebuildAllSessions(
     processedPairs += r.processedPairs;
     totalPairs += r.totalPairs;
     if (progressPath) {
-      // 会话已全部处理完 → 记为 -1（下次跳过）；否则记录已处理到的轮次以便续跑
-      const done = r.processedPairs > 0 && r.processedPairs >= r.totalPairs;
+      // v2.4.1: 无可处理对（totalPairs=0）或已全部处理完 → 记为 -1（下次跳过），
+      // 避免无产出的 session（如纯 memory 子会话）在续跑时被重复尝试。
+      const done = r.totalPairs === 0 || (r.processedPairs > 0 && r.processedPairs >= r.totalPairs);
       const mark = done ? -1 : r.lastProcessedTurn;
       const p: RebuildAllProgress = {
         totalSessions,
