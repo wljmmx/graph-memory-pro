@@ -527,10 +527,11 @@ export async function rebuildAllSessions(
   processedSessions: number;
   totalPairs: number;
   processedPairs: number;
+  failedSessions: number;
   mode: "llm" | "heuristic";
   results: Record<string, { processedPairs: number; totalPairs: number }>;
 }> {
-  if (!driver) return { totalSessions: 0, processedSessions: 0, totalPairs: 0, processedPairs: 0, mode: opts.mode ?? "llm", results: {} };
+  if (!driver) return { totalSessions: 0, processedSessions: 0, totalPairs: 0, processedPairs: 0, failedSessions: 0, mode: opts.mode ?? "llm", results: {} };
 
   const sessionConcurrency = Math.max(1, opts.sessionConcurrency ?? 2);
   const limitSessions = Math.max(0, opts.limitSessions ?? 0);
@@ -549,6 +550,10 @@ export async function rebuildAllSessions(
   let processedSessions = 0;
   let processedPairs = 0;
   let totalPairs = 0;
+  // v2.4.1: 失败（异常）的 session 计数，供 API 层反馈闭环
+  let failedSessions = 0;
+  // v2.4.1: LLM 熔断器，worker 级预检，避免熔断 session 被误记为完成（totalPairs=0 → -1）
+  const llmBreaker = getCircuitBreaker("llm");
 
   const record = async (key: string, r: { processedPairs: number; totalPairs: number; lastProcessedTurn: number }) => {
     results[key] = r;
@@ -582,6 +587,8 @@ export async function rebuildAllSessions(
       const key = targets[idx++];
       // 断点：该 session 已做完（lastTurn 记为 -1）则跳过
       if (progress?.sessions?.[key] === -1) continue;
+      // v2.4.1: LLM 熔断时跳过，不 record、不标记，避免被误记为完成（totalPairs=0 → -1）
+      if (mode === "llm" && !llmBreaker.allow()) continue;
       try {
         const perSession = progress?.sessions?.[key] ?? undefined;
         const r = await rebuildSessionMessages(extractor, driver, llm, cfg, logger, key, {
@@ -589,11 +596,15 @@ export async function rebuildAllSessions(
           pageSize: opts.pageSize,
           writeBatchSize: opts.writeBatchSize,
           mode,
+          // v2.4.1: 透传进度回调，支持 API 层实时反馈
+          ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
           // 断点续传：该 session 已处理的轮次
           ...(typeof perSession === "number" && perSession > 0 ? { lastProcessedTurn: perSession } : {}),
         });
         await record(key, r);
       } catch (err) {
+        // v2.4.1: 失败计数，供 API 层反馈；不标记进度，续跑会重试
+        failedSessions++;
         logger?.debug?.(`[graph-memory-pro] rebuild session ${key} failed: ${err}`);
       }
     }
@@ -601,5 +612,5 @@ export async function rebuildAllSessions(
   const workers = Array.from({ length: sessionConcurrency }, () => worker());
   await Promise.all(workers);
 
-  return { totalSessions, processedSessions, totalPairs, processedPairs, mode, results };
+  return { totalSessions, processedSessions, totalPairs, processedPairs, failedSessions, mode, results };
 }
