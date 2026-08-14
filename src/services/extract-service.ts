@@ -478,7 +478,13 @@ export interface RebuildAllOptions extends RebuildOptions {
   /** v2.4.1: 是否包含内部记忆子会话（默认 false=过滤含 `:active-memory:` 的 key，
    * 避免遍历数万个无产出（无 user/assistant 对）的记忆会话导致卡慢） */
   includeMemorySessions?: boolean;
+  /** v2.4.1: 自定义排除的 sessionKey 子串。提供则替换默认排除列表。
+   * 默认排除 `:active-memory:` 与 `dreaming-narrative-rem`（内部记忆/叙事 agent 会话，无对话对）。 */
+  excludeSessionKeySubstrings?: string[];
 }
+
+/** v2.4.1: 默认排除的内部记忆/叙事 agent 会话子串（无 user/assistant 对话对，重建必然 0 产出） */
+const DEFAULT_EXCLUDE_SESSION_SUBSTRINGS = [":active-memory:", "dreaming-narrative-rem"];
 
 /** 全局进度状态（rebuild-all 用） */
 interface RebuildAllProgress {
@@ -548,9 +554,16 @@ export async function rebuildAllSessions(
   if (progressPath) progress = await readAllProgress(progressPath);
 
   const keys = await listAllSessionKeys(driver);
-  // v2.4.1: 默认过滤内部记忆子会话（`:active-memory:`），它们无 user/assistant 对话对，
-  // 重建对其必然 0 产出，遍历会拖慢进度。`includeMemorySessions: true` 时才包含。
-  const filtered = opts.includeMemorySessions ? keys : keys.filter((k) => !k.includes(":active-memory:"));
+  // v2.4.1: 默认过滤内部记忆/叙事 agent 会话（`:active-memory:`、`dreaming-narrative-rem`），
+  // 它们无 user/assistant 对话对，重建必然 0 产出，遍历会拖慢进度。
+  // 可用 excludeSessionKeySubstrings 自定义覆盖；includeMemorySessions=true 时放行 active-memory。
+  const baseExclude = opts.includeMemorySessions
+    ? DEFAULT_EXCLUDE_SESSION_SUBSTRINGS.filter((s) => s !== ":active-memory:")
+    : DEFAULT_EXCLUDE_SESSION_SUBSTRINGS;
+  const exclude = opts.excludeSessionKeySubstrings && opts.excludeSessionKeySubstrings.length
+    ? opts.excludeSessionKeySubstrings
+    : baseExclude;
+  const filtered = keys.filter((k) => !exclude.some((s) => k.includes(s)));
   const targets = limitSessions > 0 ? filtered.slice(0, limitSessions) : filtered;
   const totalSessions = targets.length;
 
@@ -621,5 +634,9 @@ export async function rebuildAllSessions(
   const workers = Array.from({ length: sessionConcurrency }, () => worker());
   await Promise.all(workers);
 
+  // v2.4.1: 完成汇总日志，明确反馈"已结束"，避免看不到完成状态
+  logger?.info?.(
+    `[graph-memory-pro] rebuild-all done: ${processedSessions}/${totalSessions} sessions, ${processedPairs}/${totalPairs} pairs, ${failedSessions} failed, mode=${mode}`,
+  );
   return { totalSessions, processedSessions, totalPairs, processedPairs, failedSessions, mode, results };
 }

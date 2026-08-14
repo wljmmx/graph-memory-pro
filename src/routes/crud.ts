@@ -224,6 +224,10 @@ async function handleRebuildAll(params: Record<string, unknown>): Promise<{ stat
     : undefined;
   // v2.4.1: 默认过滤内部记忆子会话，避免遍历数万个无产出的 active-memory 会话卡慢
   const includeMemorySessions = params.includeMemorySessions === true || params.includeMemorySessions === "true";
+  // v2.4.1: 自定义排除的 sessionKey 子串（覆盖默认的 active-memory/dreaming-narrative-rem）
+  const excludeSessionKeySubstrings = Array.isArray(params.excludeSessionKeySubstrings)
+    ? params.excludeSessionKeySubstrings.map(String)
+    : undefined;
 
   // v2.4.1: 异步化——立即返回 202 + jobId，后台执行，避免同步长请求
   // 触发 Node 5 分钟 requestTimeout / openclaw 心跳判定插件不可达。
@@ -244,7 +248,7 @@ async function handleRebuildAll(params: Record<string, unknown>): Promise<{ stat
         _llm,
         _cfg,
         console,
-        { mode, sessionConcurrency, concurrency, limitSessions, pageSize, writeBatchSize, progressPath, includeMemorySessions },
+        { mode, sessionConcurrency, concurrency, limitSessions, pageSize, writeBatchSize, progressPath, includeMemorySessions, excludeSessionKeySubstrings },
       );
       const llmOutputTokens = Math.max(0, (await usageCompletionTokens()) - llmBefore);
       job.result = { ...result, llmOutputTokens, llmHasOutput: llmOutputTokens > 0 };
