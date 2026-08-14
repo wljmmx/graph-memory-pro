@@ -84,7 +84,11 @@ export async function startApiServer(
   // 需要鉴权的路径（非 GET 或敏感读路径）
   const SENSITIVE_READ_PATHS = new Set(["/api/health", "/api/metrics", "/api/usage", "/api/doctor"]);
 
-  const httpServer = http.createServer(async (req, res) => {
+  // v2.4.1: 禁用默认 5 分钟 requestTimeout，避免长任务（如 rebuild-all 全量重建）
+  // 在 5 分钟时被 Node 强制断开，导致 openclaw 主进程判定插件"不可达: fetch failed"。
+  const httpServer = http.createServer(
+    { requestTimeout: 0, headersTimeout: 120_000, keepAliveTimeout: 5000 },
+    async (req, res) => {
     // CORS 头
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");

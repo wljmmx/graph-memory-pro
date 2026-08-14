@@ -34,6 +34,18 @@ let _embed: EmbedFn | null = null;
 let _batchEmbed: BatchEmbedFn | null = null;
 let _recaller: Recaller | null = null;
 
+// v2.4.1: 异步 rebuild-all 任务存储（内存态）。长任务后台执行、请求立即返回，
+// 避免同步长请求触发 Node 5 分钟 requestTimeout 或 openclaw 心跳判定插件不可达。
+interface RebuildJob {
+  id: string;
+  status: "running" | "done" | "failed";
+  startedAt: number;
+  finishedAt?: number;
+  result?: unknown;
+  error?: string;
+}
+const rebuildJobs = new Map<string, RebuildJob>();
+
 export function initRoutes(
   driver: Driver,
   cfg: GmConfig,
@@ -107,7 +119,9 @@ export function getRoutes(): RouteHandler[] {
     { method: "GET", path: "/api/ops/services", handler: handleServiceStatus },
     { method: "POST", path: "/api/extract/rebuild", handler: handleRebuildFromMessages },
     // v2.4.1: 批量重建全部会话（进程内并发 + 断点续传 + llm/heuristic 模式）
+    // 异步化：POST 立即返回 202+jobId 后台执行，GET 查询进度，避免长请求超时被断开
     { method: "POST", path: "/api/extract/rebuild-all", handler: handleRebuildAll },
+    { method: "GET", path: "/api/extract/rebuild-all/job/:id", handler: handleRebuildAllJob },
   ];
 }
 
@@ -208,30 +222,64 @@ async function handleRebuildAll(params: Record<string, unknown>): Promise<{ stat
   const progressPath = typeof params.progressPath === "string" && params.progressPath.length > 0
     ? params.progressPath
     : undefined;
-  try {
-    const { Extractor } = await import("../extractor/extract.ts");
-    const extractor = new Extractor(_driver);
-    const { rebuildAllSessions } = await import("../services/extract-service.ts");
-    // v2.4.1: 记录本次 rebuild-all 期间 LLM 的输出 token 数（判断 LLM 是否有真实输出）
-    const llmBefore = await usageCompletionTokens();
-    const result = await rebuildAllSessions(
-      extractor,
-      _driver,
-      _llm,
-      _cfg,
-      console,
-      { mode, sessionConcurrency, concurrency, limitSessions, pageSize, writeBatchSize, progressPath },
-    );
-    const llmOutputTokens = Math.max(0, (await usageCompletionTokens()) - llmBefore);
-    // v2.4.1: 有 session 处理失败时返回 207（部分成功），调用方据此提示可断点续跑
-    const failed = (result as { failedSessions?: number }).failedSessions ?? 0;
-    return {
-      status: failed > 0 ? 207 : 200,
-      body: { ...result, llmOutputTokens, llmHasOutput: llmOutputTokens > 0, message: failed > 0 ? `rebuild-all completed with ${failed} failed session(s)` : "rebuild-all completed" },
-    };
-  } catch (err: unknown) {
-    return { status: 500, body: { error: (err as Error).message } };
-  }
+
+  // v2.4.1: 异步化——立即返回 202 + jobId，后台执行，避免同步长请求
+  // 触发 Node 5 分钟 requestTimeout / openclaw 心跳判定插件不可达。
+  const id = `rebuild-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const job: RebuildJob = { id, status: "running", startedAt: Date.now() };
+  rebuildJobs.set(id, job);
+
+  void (async () => {
+    try {
+      const { Extractor } = await import("../extractor/extract.ts");
+      const extractor = new Extractor(_driver!);
+      const { rebuildAllSessions } = await import("../services/extract-service.ts");
+      // v2.4.1: 记录本次 rebuild-all 期间 LLM 的输出 token 数（判断 LLM 是否有真实输出）
+      const llmBefore = await usageCompletionTokens();
+      const result = await rebuildAllSessions(
+        extractor,
+        _driver!,
+        _llm,
+        _cfg,
+        console,
+        { mode, sessionConcurrency, concurrency, limitSessions, pageSize, writeBatchSize, progressPath },
+      );
+      const llmOutputTokens = Math.max(0, (await usageCompletionTokens()) - llmBefore);
+      job.result = { ...result, llmOutputTokens, llmHasOutput: llmOutputTokens > 0 };
+      job.status = "done";
+      job.finishedAt = Date.now();
+    } catch (err: unknown) {
+      job.status = "failed";
+      job.error = (err as Error).message;
+      job.finishedAt = Date.now();
+    }
+  })();
+
+  return {
+    status: 202,
+    body: { jobId: id, status: "running", message: "rebuild-all started; poll GET /api/extract/rebuild-all/job/:jobId" },
+  };
+}
+
+// v2.4.1: 查询异步 rebuild-all 任务进度
+async function handleRebuildAllJob(params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
+  const id = String(params.id ?? "");
+  const job = rebuildJobs.get(id);
+  if (!job) return { status: 404, body: { error: "rebuild job not found" } };
+  const failed = (job.result as { failedSessions?: number } | undefined)?.failedSessions ?? 0;
+  // 进行中/成功 → 200；部分失败 → 207；失败 → 500
+  const status = job.status === "failed" ? 500 : failed > 0 ? 207 : 200;
+  return {
+    status,
+    body: {
+      jobId: job.id,
+      status: job.status,
+      startedAt: job.startedAt,
+      finishedAt: job.finishedAt,
+      ...(job.result ?? {}),
+      ...(job.error ? { error: job.error } : {}),
+    },
+  };
 }
 
 // v2.1.2 G-5: 图谱健康检查
