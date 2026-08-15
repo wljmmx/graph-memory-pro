@@ -438,10 +438,10 @@ export function createRuntimeCompleteFn(
           { role: "system", content: system },
           { role: "user", content: user },
         ],
-        // v2.5.0: 显式指定配置的主模型（fallbackConfig.model = GmConfig.llm.model）。
-        // 此前不传 model，宿主 runtime 会用其默认模型（可能非用户配置的主模型），
-        // 导致本地 Ollama 反复加载/卸载两个不同模型、资源争抢。
-        model: fallbackConfig?.model || undefined,
+        // v2.5.1: 不传 model —— 让 runtime 使用 agent 当前会话模型（本地 Ollama 场景）。
+        // 设计意图：agent 模型为本地/局域网 ollama 时，直接复用 agent 正在用的模型
+        // （如 qwen3.8:27b），忽略插件配置的 llm（fallbackConfig.model，仅用于远程场景），
+        // 避免同一 Ollama 上加载/卸载两个不同模型造成资源争抢。
         maxTokens: MAX_TOKENS_BY_PURPOSE[purpose] ?? DEFAULT_MAX_TOKENS,
         temperature: 0.3,
         purpose: "graph-memory-pro:llm",
@@ -485,7 +485,6 @@ export function createRuntimeCompleteFn(
     try {
       const result = await runtimeLlm.complete({
         messages: [{ role: "user", content: "ping" }],
-        model: fallbackConfig?.model || undefined,  // v2.5.0: 探测也用配置的主模型
         maxTokens: 64,
         temperature: 0,
         purpose: "graph-memory-pro:provider-detect",
