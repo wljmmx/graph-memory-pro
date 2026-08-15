@@ -11,6 +11,7 @@ import { getSession } from "../store/db.ts";
 import type { CompleteFn } from "../engine/llm.ts";
 import type { EmbedFn } from "../engine/embed.ts";
 import { updateCommunities, upsertCommunitySummary, pruneCommunitySummaries } from "../store/store.ts";
+import { getSummarizedCommunityIds } from "../store/community.ts";
 import { ALL_REL_TYPES } from "../utils.ts";
 
 async function getExistingRelTypes(session: Session): Promise<string[]> {
@@ -468,12 +469,18 @@ export async function summarizeCommunities(
   communities: Map<string, string[]>,
   llm: CompleteFn,
   embedFn?: EmbedFn,
+  force = false,
 ): Promise<number> {
   await pruneCommunitySummaries(driver);
+  // v2.4.2 方案1: 社区摘要增量处理——默认跳过已有非空摘要的社区，只对新建/未摘要社区
+  // 调 LLM。解决无消息交互时后台维护仍对每个社区逐一重算摘要、持续产生 LLM 调用的问题。
+  // 传 force=true 时全量重算（用于手动 gm_maintain / 带 force 的 API）。
+  const existing = force ? new Set<string>() : await getSummarizedCommunityIds(driver);
   let generated = 0;
 
   for (const [communityId, memberIds] of communities) {
     if (memberIds.length === 0) continue;
+    if (existing.has(communityId)) continue;
 
     const session = getSession(driver);
     let members: { name: string; type: string; description: string }[];

@@ -83,6 +83,26 @@ export async function getAllCommunitySummaries(
   }
 }
 
+/**
+ * v2.4.2: 返回「已有非空摘要」的社区 id 集合，供社区摘要增量处理跳过（避免重复调 LLM）。
+ * 仅查询 id 列，比 getAllCommunitySummaries（全量取回 summary/embedding）更轻量。
+ */
+export async function getSummarizedCommunityIds(
+  driver: Driver,
+): Promise<Set<string>> {
+  const session = getSession(driver);
+  try {
+    const result = await session.run(
+      `MATCH (c:GmCommunity)
+       WHERE c.summary IS NOT NULL AND c.summary <> ''
+       RETURN c.id AS id`,
+    );
+    return new Set(result.records.map((r) => String(r.get("id"))));
+  } finally {
+    await session.close();
+  }
+}
+
 export async function upsertCommunitySummary(
   driver: Driver,
   communityId: string,

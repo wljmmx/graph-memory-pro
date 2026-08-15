@@ -360,3 +360,57 @@ describe("drillDownCommunity", () => {
     expect(calls[0].params.topicId).toBe("h-1");
   });
 });
+
+// ═══════════════════════════════════════════════════════════════
+// summarizeCommunities（v2.4.2 增量）
+// ═══════════════════════════════════════════════════════════════
+
+describe("summarizeCommunities", () => {
+  it("增量：跳过已有非空摘要的社区，只对未摘要社区调 LLM", async () => {
+    const driver = mockDriver();
+    // 执行顺序: prune(DELETE) → getSummarizedCommunityIds(返回 c-1 已有) → c-2 成员 → upsert(MERGE)
+    driver.queueResults([
+      [], // pruneCommunitySummaries
+      [{ id: "c-1" }], // 已有摘要的社区
+      [{ name: "n3", type: "TASK", description: "desc3" }], // c-2 成员
+      [], // upsertCommunitySummary
+    ]);
+
+    const llm = vi.fn(async () => "c-2 社区摘要") as never;
+    const communities = new Map<string, string[]>([
+      ["c-1", ["n1", "n2"]],
+      ["c-2", ["n3"]],
+    ]);
+
+    const { summarizeCommunities } = await import("../src/graph/community.ts");
+    const generated = await summarizeCommunities(driver as any, communities, llm, undefined);
+
+    expect(generated).toBe(1); // 只生成 c-2，c-1 跳过
+    expect(llm).toHaveBeenCalledTimes(1); // c-1 已有摘要不调 LLM
+  });
+
+  it("force=true：全量重算，已摘要社区也调 LLM", async () => {
+    const driver = mockDriver();
+    // 顺序: prune(DELETE) → c-1 成员 → upsert c-1 → c-2 成员 → upsert c-2
+    // （force=true 时不调用 getSummarizedCommunityIds）
+    driver.queueResults([
+      [],
+      [{ name: "n1", type: "TASK", description: "d1" }],
+      [],
+      [{ name: "n3", type: "TASK", description: "d3" }],
+      [],
+    ]);
+
+    const llm = vi.fn(async () => "摘要") as never;
+    const communities = new Map<string, string[]>([
+      ["c-1", ["n1", "n2"]],
+      ["c-2", ["n3"]],
+    ]);
+
+    const { summarizeCommunities } = await import("../src/graph/community.ts");
+    const generated = await summarizeCommunities(driver as any, communities, llm, undefined, true);
+
+    expect(generated).toBe(2);
+    expect(llm).toHaveBeenCalledTimes(2);
+  });
+});
