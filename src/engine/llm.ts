@@ -438,6 +438,10 @@ export function createRuntimeCompleteFn(
           { role: "system", content: system },
           { role: "user", content: user },
         ],
+        // v2.5.0: 显式指定配置的主模型（fallbackConfig.model = GmConfig.llm.model）。
+        // 此前不传 model，宿主 runtime 会用其默认模型（可能非用户配置的主模型），
+        // 导致本地 Ollama 反复加载/卸载两个不同模型、资源争抢。
+        model: fallbackConfig?.model || undefined,
         maxTokens: MAX_TOKENS_BY_PURPOSE[purpose] ?? DEFAULT_MAX_TOKENS,
         temperature: 0.3,
         purpose: "graph-memory-pro:llm",
@@ -481,6 +485,7 @@ export function createRuntimeCompleteFn(
     try {
       const result = await runtimeLlm.complete({
         messages: [{ role: "user", content: "ping" }],
+        model: fallbackConfig?.model || undefined,  // v2.5.0: 探测也用配置的主模型
         maxTokens: 64,
         temperature: 0,
         purpose: "graph-memory-pro:provider-detect",
