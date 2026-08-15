@@ -13,7 +13,7 @@ import type { CompleteFn } from "../engine/llm.ts";
 import type { Extractor } from "../extractor/extract.ts";
 import { upsertNode, batchUpsertNodes, upsertEdge, batchUpsertEdges } from "../store/store.ts";
 import { getCircuitBreaker } from "../engine/circuit-breaker.ts";
-import { getSessionMessages, getSessionMessagesPageTolerant, listAllSessionKeys } from "../store/messages.ts";
+import { getSessionMessages, getSessionMessagesPageTolerant, listAllSessionKeys, markMessagesProcessed } from "../store/messages.ts";
 import { heuristicExtract } from "../extractor/extract.ts";
 
 /**
@@ -210,6 +210,10 @@ export interface RebuildOptions {
   mode?: "llm" | "heuristic";
   /** v2.4.1: 断点续传起始轮次（未传 progressPath 时使用；progressPath 记录优先） */
   lastProcessedTurn?: number;
+  /** v2.4.2: 增量重建。只处理未标记（rebuildProcessedAt IS NULL）的消息，
+   * 处理完打标记。用「标记」替代进度文件断点，避免每次从头重扫已处理消息，
+   * 让新增（在末尾）的时序消息能及时被处理。重复/全量重建请勿开启。 */
+  markProcessed?: boolean;
 }
 
 interface RebuildPair {
@@ -218,6 +222,8 @@ interface RebuildPair {
   /** 该对的序号（按 (createdAt,id) 顺序的合成序号，1 起），用于断点续传。
    * v2.4.1 修复: 不再用 turnIndex——导入数据常为 0/缺失，`0 > 0` 恒 false 曾导致全部 0/0。 */
   lastTurn: number;
+  /** v2.4.2: 组成该对的 GmMessage id，用于增量标记（markProcessed）。 */
+  msgIds: string[];
 }
 
 /**
@@ -310,9 +316,13 @@ export async function rebuildSessionMessages(
   const pageSize = Math.max(100, opts.pageSize ?? 2000);
   const writeBatchSize = Math.max(50, opts.writeBatchSize ?? 500);
 
-  // 断点恢复：progressPath 记录优先，否则用调用方传入的起始轮次
+  // v2.4.2: 增量模式（markProcessed）——用「rebuildProcessedAt 标记」替代进度文件断点：
+  // 只读未标记消息、处理完打标记。故忽略进度文件/lastProcessedTurn，从 0 起（未标记即全部处理）。
+  const markProcessed = !!opts.markProcessed;
   let lastProcessedTurn = opts.lastProcessedTurn ?? 0;
-  if (opts.progressPath) {
+  if (markProcessed) {
+    lastProcessedTurn = 0;
+  } else if (opts.progressPath) {
     const saved = await readRebuildProgress(opts.progressPath);
     if (saved && saved.sessionKey === sessionKey) lastProcessedTurn = saved.lastProcessedTurn || 0;
   }
@@ -441,8 +451,11 @@ export async function rebuildSessionMessages(
   // 重跑稳定），断点语义 = 已处理到的对序号。role 做归一化，兼容 USER/Human/model 等变体。
   let after: { createdAt: number | string; id: string } | null = null;
   let pairSeq = 0;                       // 本次扫描中已形成的对序号（含被断点跳过的）
-  let pendingUser: { content: string } | null = null;
+  let pendingUser: { content: string; ids: string[] } | null = null;
   const windowBuf: RebuildPair[] = [];
+  // v2.4.2: 增量标记收集——本 session 被消费（形成对/孤立 assistant）的消息 id，
+  // 扫描结束后统一打 rebuildProcessedAt 标记，下次重建只处理新增（未标记）消息。
+  const consumedMsgIds = new Set<string>();
   let pages = 0;
   for (;;) {
     // v2.4.1 护栏: 防御数据异常（键集不前进/超大表）导致死循环
@@ -450,21 +463,35 @@ export async function rebuildSessionMessages(
       logger?.info?.(`[graph-memory-pro] rebuild page guard hit for ${sessionKey}, stop at page ${pages}`);
       break;
     }
-    const { rows } = await getSessionMessagesPageTolerant(driver, sessionKey, after, pageSize);
+    // v2.4.2: markProcessed 时只读未标记消息（增量）
+    const { rows } = await getSessionMessagesPageTolerant(driver, sessionKey, after, pageSize, markProcessed);
     if (rows.length === 0) break;
     for (const m of rows) {
       const role = normRole(m.role);
       if (role === "user") {
         if (pendingUser) {
           pairSeq++;
-          if (pairSeq > lastProcessedTurn) { windowBuf.push({ user: pendingUser.content, assistant: "", lastTurn: pairSeq }); totalPairs++; }
+          if (pairSeq > lastProcessedTurn) {
+            const p: RebuildPair = { user: pendingUser.content, assistant: "", lastTurn: pairSeq, msgIds: pendingUser.ids };
+            windowBuf.push(p);
+            totalPairs++;
+            if (markProcessed) for (const id of p.msgIds) consumedMsgIds.add(id);
+          }
         }
-        pendingUser = { content: m.content };
+        pendingUser = { content: m.content, ids: [m.id] };
       } else if (role === "assistant") {
         if (pendingUser) {
           pairSeq++;
-          if (pairSeq > lastProcessedTurn) { windowBuf.push({ user: pendingUser.content, assistant: m.content, lastTurn: pairSeq }); totalPairs++; }
+          if (pairSeq > lastProcessedTurn) {
+            const p: RebuildPair = { user: pendingUser.content, assistant: m.content, lastTurn: pairSeq, msgIds: [...pendingUser.ids, m.id] };
+            windowBuf.push(p);
+            totalPairs++;
+            if (markProcessed) for (const id of p.msgIds) consumedMsgIds.add(id);
+          }
           pendingUser = null;
+        } else if (markProcessed) {
+          // 孤立 assistant（无配对 user）：也标记，避免每次增量扫描都重复读到它
+          consumedMsgIds.add(m.id);
         }
       }
     }
@@ -483,6 +510,15 @@ export async function rebuildSessionMessages(
   }
 
   await flush();
+  // v2.4.2: 增量模式收尾——给本 session 消费过的消息打 rebuildProcessedAt 标记，
+  // 下次重建只处理新增（未标记）消息，避免新增时序消息排在末尾延时处理。
+  if (markProcessed && consumedMsgIds.size) {
+    try {
+      await markMessagesProcessed(driver, sessionKey, [...consumedMsgIds]);
+    } catch (e) {
+      logger?.debug?.(`[graph-memory-pro] markMessagesProcessed failed for ${sessionKey}: ${e}`);
+    }
+  }
   await writeProgress("done");
   logger?.info?.(`[graph-memory-pro] rebuild complete: ${processed}/${totalPairs} pairs`);
   return { processedPairs: processed, totalPairs, lastProcessedTurn: lastTurn };
@@ -651,17 +687,19 @@ export async function rebuildAllSessions(
   const worker = async () => {
     while (idx < totalSessions) {
       const key = targets[idx++];
-      // 断点：该 session 已做完（lastTurn 记为 -1）则跳过
-      if (progress?.sessions?.[key] === -1) continue;
+      // 断点：该 session 已做完（lastTurn 记为 -1）则跳过。
+      // v2.4.2: markProcessed 增量模式下以「消息标记」为准，不用进度文件断点。
+      if (!opts.markProcessed && progress?.sessions?.[key] === -1) continue;
       // v2.4.1: LLM 熔断时跳过，不 record、不标记，避免被误记为完成（totalPairs=0 → -1）
       if (mode === "llm" && !llmBreaker.allow()) continue;
       try {
-        const perSession = progress?.sessions?.[key] ?? undefined;
+        const perSession = opts.markProcessed ? undefined : (progress?.sessions?.[key] ?? undefined);
         const r = await rebuildSessionMessages(extractor, driver, llm, cfg, logger, key, {
           concurrency: opts.concurrency,
           pageSize: opts.pageSize,
           writeBatchSize: opts.writeBatchSize,
           mode,
+          markProcessed: opts.markProcessed,
           // v2.4.1: 透传进度回调，支持 API 层实时反馈
           ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
           // 断点续传：该 session 已处理的轮次

@@ -159,6 +159,8 @@ async function handleRebuildFromMessages(params: Record<string, unknown>): Promi
     : undefined;
   // v2.4.1: 提取模式开关。mode=llm（默认，调用 LLM）；mode=heuristic（规则快速提取，不调 LLM，零成本）
   const mode = params.mode === "heuristic" ? "heuristic" : "llm";
+  // v2.4.2: 增量重建。markProcessed=true：只处理未标记消息并打标记，新增消息在末尾也能及时处理。
+  const markProcessed = params.markProcessed === true || params.markProcessed === "true" || params.markProcessed === 1;
   try {
     const { Extractor } = await import("../extractor/extract.ts");
     const extractor = new Extractor(_driver);
@@ -172,7 +174,7 @@ async function handleRebuildFromMessages(params: Record<string, unknown>): Promi
       _cfg,
       console,
       sessionKey,
-      { concurrency, pageSize, writeBatchSize, progressPath, mode },
+      { concurrency, pageSize, writeBatchSize, progressPath, mode, markProcessed },
     );
     const llmOutputTokens = Math.max(0, (await usageCompletionTokens()) - llmBefore);
     return {
@@ -224,6 +226,8 @@ async function handleRebuildAll(params: Record<string, unknown>): Promise<{ stat
     : undefined;
   // v2.4.1: 默认过滤内部记忆子会话，避免遍历数万个无产出的 active-memory 会话卡慢
   const includeMemorySessions = params.includeMemorySessions === true || params.includeMemorySessions === "true";
+  // v2.4.2: 增量重建——只处理未标记消息并打标记，新增（末尾）时序消息能及时处理
+  const markProcessed = params.markProcessed === true || params.markProcessed === "true" || params.markProcessed === 1;
   // v2.4.1: 自定义排除的 sessionKey 子串（覆盖默认的 active-memory/dreaming-narrative）
   // 支持 JSON 数组或逗号分隔字符串两种传参
   const excludeSessionKeySubstrings = Array.isArray(params.excludeSessionKeySubstrings)
@@ -251,7 +255,7 @@ async function handleRebuildAll(params: Record<string, unknown>): Promise<{ stat
         _llm,
         _cfg,
         console,
-        { mode, sessionConcurrency, concurrency, limitSessions, pageSize, writeBatchSize, progressPath, includeMemorySessions, excludeSessionKeySubstrings },
+        { mode, sessionConcurrency, concurrency, limitSessions, pageSize, writeBatchSize, progressPath, includeMemorySessions, excludeSessionKeySubstrings, markProcessed },
       );
       const llmOutputTokens = Math.max(0, (await usageCompletionTokens()) - llmBefore);
       job.result = { ...result, llmOutputTokens, llmHasOutput: llmOutputTokens > 0 };

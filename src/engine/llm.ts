@@ -137,8 +137,11 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
   // Ollama 的 OpenAI 兼容层 (/v1/*) 是实验性支持，keep_alive 可能被忽略。
   // 如果检测到 Ollama（127.0.0.1:11434 或 localhost:11434），优先用原生 /api/chat 端点，
   // 该端点完整支持 keep_alive，避免模型反复卸载加载。
-  const isOllamaNative = /127\.0\.0\.1:11434|localhost:11434|0\.0\.0\.0:11434/.test(baseURL)
-    && !/\/v1\b/.test(baseURL);
+  // v2.4.2: 识别 Ollama 原生端点。Ollama 默认端口 11434，不区分 host（localhost、
+  // LAN IP、容器 hostname 均可），且不在 /v1 路径下 → 走原生 /api/chat（完整支持
+  // keep_alive/think）。此前仅匹配 localhost，非本机 Ollama 会被误判为 OpenAI 兼容，
+  // 请求 /chat/completions（无 /v1）而返回 404。
+  const isOllamaNative = /:11434(?:\/|$)/.test(baseURL) && !/\/v1\b/.test(baseURL);
 
   // v2.3.2 阶段二: 并发控制信号量
   // Ollama 默认单流处理（OLLAMA_NUM_PARALLEL=1），并发请求排队易级联超时。
@@ -191,7 +194,11 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
         } else {
           // OpenAI 兼容端点 /v1/chat/completions（含 Ollama /v1 路径和云端 API）
           apiFormat = 'openai';
-          response = await fetch(`${baseURL}/chat/completions`, {
+          // v2.4.2: OpenAI 兼容服务统一要求在 /v1 下。baseURL 缺 /v1 时自动补全，
+          // 避免网关/非 /v1 端点因请求 /chat/completions（无 /v1）返回 404。
+          // 已含 /v1 或更高版本路径（如 /v1beta）则原样使用。
+          const compatBase = /\/v\d+\b/.test(baseURL) ? baseURL : `${baseURL}/v1`;
+          response = await fetch(`${compatBase}/chat/completions`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
