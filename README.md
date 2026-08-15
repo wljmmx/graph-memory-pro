@@ -98,7 +98,7 @@ graph-memory-pro 是**记忆底层引擎**，只做"图内"操作：
 
 ## 版本
 
-**当前版本：2.4.0**
+**当前版本：2.4.2**
 
 ## 安装
 
@@ -272,7 +272,7 @@ const { result } = await res.json();
 
 ```json
 {
-  "version": "2.4.0",
+  "version": "2.4.2",
   "timestamp": "2026-08-07T10:00:00.000Z",
   "total": { "calls": 12, "promptTokens": 1234, "completionTokens": 567, "totalTokens": 1801 },
   "byProvider": { "config-llm": { "calls": 8, "totalTokens": 1200 }, "runtime-ollama": { "calls": 4, "totalTokens": 601 } },
