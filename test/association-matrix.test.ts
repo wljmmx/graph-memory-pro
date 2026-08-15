@@ -339,6 +339,25 @@ describe("updateWithMarginalUtility", () => {
     const r2 = am.updateWithMarginalUtility(vec, 0.3);
     expect(r2.applied).toBe(false);
   });
+
+  it("v2.5.2: 向量含 NaN 时不应用更新（防污染 M）", () => {
+    const am = new AssociationMatrix(4, { enabled: true, warmupFeedbacks: 1 });
+    const bad = new Float32Array([1, NaN, 3, 4]);
+    const r = am.updateWithMarginalUtility(bad, 1.0);
+    expect(r.applied).toBe(false);
+    expect(am.getStats().updatesApplied).toBe(0);
+    // M 仍为单位矩阵（对角 1，非对角 0）
+    const data = JSON.parse(am.serialize());
+    expect(data.M[0]).toBe(1);
+    expect(data.M[1]).toBe(0);
+  });
+
+  it("v2.5.2: 向量含 Infinity 时不应用更新", () => {
+    const am = new AssociationMatrix(4, { enabled: true, warmupFeedbacks: 1 });
+    const bad = new Float32Array([1, Infinity, 3, 4]);
+    expect(am.updateWithMarginalUtility(bad, -1.0).applied).toBe(false);
+    expect(am.getStats().updatesApplied).toBe(0);
+  });
 });
 
 // ─── 7. serialize / deserialize ────────────────────────
@@ -454,6 +473,44 @@ describe("serialize / deserialize", () => {
     expect(target.serialize()).toBe(json1);
     target.deserialize(json2);
     expect(target.serialize()).toBe(json2);
+  });
+
+  it("v2.5.2: serialize 不产生 null（NaN/Infinity 归一为 0，防全零矩阵）", () => {
+    const am = new AssociationMatrix(4, { enabled: true, warmupFeedbacks: 1 });
+    // 直接注入 NaN / Infinity 到 M（模拟历史污染）
+    (am as any).M[0] = NaN;
+    (am as any).M[1] = Infinity;
+    const json = am.serialize();
+    expect(json.includes("null")).toBe(false);
+    const data = JSON.parse(json);
+    // 归一为 0
+    expect(data.M[0]).toBe(0);
+    expect(data.M[1]).toBe(0);
+    // 对角 1 保留
+    expect(data.M[0 * 4 + 0]).toBe(0); // [0,0] 被上面覆盖为 NaN→0
+    expect(data.M[1 * 4 + 1]).toBe(1);
+  });
+
+  it("v2.5.2: deserialize 兼容含 null 的污染文件（null→0 且维度正确）", () => {
+    const polluted = JSON.stringify({
+      dim: 4,
+      M: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, null, 0, 0, 0, 0, 1],
+      bias: [0, 0, 0, 0],
+      gain: [1, 1, 1, 1],
+      rowScale: [1, 1, 1, 1],
+      mW: new Array(16).fill(0),
+      vW: new Array(16).fill(0),
+      mBias: [0, 0, 0, 0],
+      vBias: [0, 0, 0, 0],
+      t: 1,
+    });
+    const am = new AssociationMatrix(4, { enabled: true });
+    am.deserialize(polluted);
+    const d = JSON.parse(am.serialize());
+    // null → 0，其他对角保留 1
+    expect(d.M[2 * 4 + 2]).toBe(0);
+    expect(d.M[3 * 4 + 3]).toBe(1);
+    expect(d.M.length).toBe(16);
   });
 });
 

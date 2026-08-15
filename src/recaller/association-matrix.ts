@@ -350,6 +350,14 @@ export class AssociationMatrix {
     const vec = Float32Array.from(queryVec);
     if (vec.length !== this.dim) return { applied: false, neighborhoodGain: 0 };
 
+    // v2.5.2: 防 NaN 污染。embed 层可能返回含 NaN 的向量（模型异常/输入异常），
+    // 若不经检查直接传入 applyHebbianUpdate，NaN 会通过 Hebbian 梯度传播到整个 M，
+    // 序列化时 JSON.stringify(NaN)→null，反序列化 Float32Array.from(null)→0，
+    // 导致 M 全零矩阵（含对角 1 也被清零）。此处检查并跳过 NaN 向量。
+    if (hasNaN(vec)) {
+      return { applied: false, neighborhoodGain: 0 };
+    }
+
     // R-3: 先在邻域上评估
     if (this.muCfg.enabled && this.history.length > 0) {
       // 找最相似的 N 个历史样本
@@ -506,17 +514,19 @@ export class AssociationMatrix {
   serialize(): string {
     return JSON.stringify({
       dim: this.dim,
-      M: Array.from(this.M),
-      bias: Array.from(this.bias),
-      gain: Array.from(this.gain),
-      rowScale: Array.from(this.rowScale),
-      mW: Array.from(this.mW),
-      vW: Array.from(this.vW),
-      mBias: Array.from(this.mBias),
-      vBias: Array.from(this.vBias),
+      // v2.5.2: 序列化时把 NaN/Infinity 归一为 0，避免 JSON.stringify(NaN)→null，
+      // 反序列化 Float32Array.from(null)→0 造成 M 全零矩阵（含对角被清零）。
+      M: sanitizeForJson(this.M),
+      bias: sanitizeForJson(this.bias),
+      gain: sanitizeForJson(this.gain),
+      rowScale: sanitizeForJson(this.rowScale),
+      mW: sanitizeForJson(this.mW),
+      vW: sanitizeForJson(this.vW),
+      mBias: sanitizeForJson(this.mBias),
+      vBias: sanitizeForJson(this.vBias),
       t: this.t,
-      bnRunningMean: Array.from(this.bnRunningMean),
-      bnRunningVar: Array.from(this.bnRunningVar),
+      bnRunningMean: sanitizeForJson(this.bnRunningMean),
+      bnRunningVar: sanitizeForJson(this.bnRunningVar),
       updateCount: this.updateCount,
       rejectedCount: this.rejectedCount,
       learningHistory: this.learningHistory,
@@ -529,17 +539,22 @@ export class AssociationMatrix {
     if (data.dim !== this.dim) {
       throw new Error(`dim mismatch: expected ${this.dim}, got ${data.dim}`);
     }
-    this.M = Float32Array.from(data.M);
-    this.bias = Float32Array.from(data.bias);
-    this.gain = Float32Array.from(data.gain);
-    this.rowScale = Float32Array.from(data.rowScale);
-    this.mW = Float32Array.from(data.mW);
-    this.vW = Float32Array.from(data.vW);
-    this.mBias = Float32Array.from(data.mBias);
-    this.vBias = Float32Array.from(data.vBias);
+    // v2.5.2: 兼容历史污染文件。旧版本若 M 被 NaN 污染，JSON 里 NaN→null，
+    // Float32Array.from(null) 得不到期望值；这里显式把 null/NaN 归一为 0，
+    // 避免读到 undefined/NaN 破坏矩阵维度。
+    this.M = fromJsonArray(data.M, this.dim * this.dim);
+    this.bias = fromJsonArray(data.bias, this.dim);
+    this.gain = fromJsonArray(data.gain, this.dim);
+    this.rowScale = fromJsonArray(data.rowScale, this.dim);
+    this.mW = fromJsonArray(data.mW, this.dim * this.dim);
+    this.vW = fromJsonArray(data.vW, this.dim * this.dim);
+    this.mBias = fromJsonArray(data.mBias, this.dim);
+    this.vBias = fromJsonArray(data.vBias, this.dim);
     this.t = data.t ?? 0;
-    this.bnRunningMean = Float32Array.from(data.bnRunningMean ?? new Array(this.dim).fill(0));
-    this.bnRunningVar = Float32Array.from(data.bnRunningVar ?? new Array(this.dim).fill(1));
+    this.bnRunningMean = fromJsonArray(data.bnRunningMean, this.dim) ?? new Float32Array(this.dim);
+    this.bnRunningVar = data.bnRunningVar != null
+      ? fromJsonArray(data.bnRunningVar, this.dim)
+      : new Float32Array(this.dim).fill(1);
     this.updateCount = data.updateCount ?? 0;
     this.rejectedCount = data.rejectedCount ?? 0;
     // 学习曲线采样（兼容旧文件无此字段）
@@ -550,6 +565,41 @@ export class AssociationMatrix {
 }
 
 // ── 辅助函数 ──────────────────────────────────────
+
+/** v2.5.2: 检查数组是否含 NaN（含 Infinity 一并处理），用于防污染入 M */
+function hasNaN(arr: ArrayLike<number>): boolean {
+  for (let i = 0; i < arr.length; i++) {
+    if (!Number.isFinite(arr[i])) return true;
+  }
+  return false;
+}
+
+/** v2.5.2: 序列化前把 NaN/Infinity 归一为 0，避免 JSON 序列化产生 null 破坏矩阵 */
+function sanitizeForJson(arr: ArrayLike<number>): number[] {
+  const out = new Array<number>(arr.length);
+  for (let i = 0; i < arr.length; i++) {
+    const v = arr[i];
+    out[i] = Number.isFinite(v) ? v : 0;
+  }
+  return out;
+}
+
+/**
+ * v2.5.2: 从 JSON 数据构建 Float32Array。
+ * 兼容旧文件中的 null（NaN→JSON null）与缺失值，统一归一为 0，
+ * 保证返回数组长度恒为 expectedLen（不足补 0，超出截断）。
+ */
+function fromJsonArray(data: unknown, expectedLen: number): Float32Array {
+  const out = new Float32Array(expectedLen);
+  if (Array.isArray(data)) {
+    const n = Math.min(data.length, expectedLen);
+    for (let i = 0; i < n; i++) {
+      const v = data[i];
+      out[i] = typeof v === "number" && Number.isFinite(v) ? v : 0;
+    }
+  }
+  return out;
+}
 
 function createIdentityMatrix(dim: number): Float32Array {
   const m = new Float32Array(dim * dim);
