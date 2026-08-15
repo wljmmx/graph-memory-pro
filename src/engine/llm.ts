@@ -36,6 +36,11 @@ const RETRY_JITTER_MAX_MS = 500;
 // 无外部依赖，基于 Promise 队列实现
 const DEFAULT_LLM_MAX_CONCURRENCY = 1;
 
+// v2.5.1: 周期性重探测间隔。同 session 内用户可能用 /model 切换模型。
+// 即使切换后未触发 runtime 调用（如 远程→本地 跨路径切换），至多每 30s
+// 重探测一次，避免 decision 长期停留在过期路径。
+const RERPROBE_COOLDOWN_MS = 30_000;
+
 // v2.4.2: 按 purpose 放宽输出上限（maxTokens）。
 // 背景：社区摘要是"一句话≤30字"任务，但推理型模型（如 Qwen3 系列，
 // 默认开启思考模式）会先输出长链 chain-of-thought，1024 上限会在到达
@@ -405,6 +410,10 @@ export function createRuntimeCompleteFn(
 ): CompleteFn {
   let decision: "runtime" | "fallback" | null = null;
   let detectPromise: Promise<void> | null = null;
+  // v2.5.1: 最近一次探测得到的 provider|model，用于 /model 切换后的即时指纹比对
+  let detectedKey: string | null = null;
+  // v2.5.1: 最近一次探测时间戳，用于周期性兜底重探测
+  let lastProbeAt = 0;
   // fallback CompleteFn（lazy init — 仅在 decision === "fallback" 时创建）
   let cachedFallback: CompleteFn | null = null;
 
@@ -413,6 +422,19 @@ export function createRuntimeCompleteFn(
       cachedFallback = createCompleteFn(fallbackConfig);
     }
     return cachedFallback;
+  }
+
+  /**
+   * 执行一次 provider 探测；并发调用共享同一次探测。
+   * 探测完成后重置 detectPromise，允许周期性重探测。
+   */
+  function ensureDetected(): Promise<void> {
+    if (!detectPromise) {
+      detectPromise = detectProvider().finally(() => {
+        detectPromise = null;
+      });
+    }
+    return detectPromise;
   }
 
   // v2.3.2 阶段二: runtime LLM 并发控制（与 fallback 路径独立，避免双重限流）
@@ -426,7 +448,7 @@ export function createRuntimeCompleteFn(
   /**
    * 基于 runtime LLM 的补全调用（含 content 规范化）
    */
-  async function runtimeComplete(system: string, user: string, signal?: AbortSignal, purpose: string = "unknown"): Promise<string> {
+  async function runtimeComplete(system: string, user: string, signal?: AbortSignal, purpose: string = "unknown"): Promise<{ text: string; provider: string; model: string }> {
     // v2.3.2 阶段二: 信号量限流（runtime LLM 通常本地单流）
     const release = await runtimeSemaphore.acquire();
     try {
@@ -465,7 +487,7 @@ export function createRuntimeCompleteFn(
         );
       } catch { /* usage 记录失败不影响主流程 */ }
 
-      return (text ?? "").trim();
+      return { text: (text ?? "").trim(), provider: (result?.provider ?? "").toString(), model: (result?.model ?? "").toString() };
     } finally {
       release();
     }
@@ -482,6 +504,7 @@ export function createRuntimeCompleteFn(
    * 后续 runtimeComplete 调用会抛出真实错误）。
    */
   async function detectProvider(): Promise<void> {
+    lastProbeAt = Date.now();
     try {
       const result = await runtimeLlm.complete({
         messages: [{ role: "user", content: "ping" }],
@@ -492,6 +515,8 @@ export function createRuntimeCompleteFn(
       });
       const provider = (result?.provider ?? "").toString();
       const model = (result?.model ?? "").toString();
+      // v2.5.1: 记录 provider|model 指纹，供 /model 切换后的即时比对
+      detectedKey = `${provider}|${model}`;
       const local = isLocalProvider(provider);
       logger?.info?.(
         `[graph-memory-pro:llm] runtime provider detected: provider=${provider} model=${model} local=${local}`,
@@ -516,12 +541,10 @@ export function createRuntimeCompleteFn(
   }
 
   return async (system: string, user: string, signal?: AbortSignal, purpose: string = "unknown"): Promise<string> => {
-    // 首次调用：执行 provider 探测（所有并发调用共享同一个 detectPromise）
-    if (decision === null) {
-      if (!detectPromise) {
-        detectPromise = detectProvider();
-      }
-      await detectPromise;
+    // v2.5.1: 首次调用，或距上次探测超过重探测间隔时，重新探测。
+    // 覆盖同 session /model 切换（含 远程→本地 跨路径切换，此时未走 runtime 调用）。
+    if (decision === null || Date.now() - lastProbeAt >= RERPROBE_COOLDOWN_MS) {
+      await ensureDetected();
     }
 
     if (decision === "fallback") {
@@ -531,7 +554,13 @@ export function createRuntimeCompleteFn(
     }
 
     // decision === "runtime" 或 fallback 无效时
-    return runtimeComplete(system, user, signal, purpose);
+    const { text, provider, model } = await runtimeComplete(system, user, signal, purpose);
+    // v2.5.1: 本次 runtime 实际使用的 provider/model 与上次探测不一致（如 本地↔本地 /model 切换）
+    // → 立即重探测，刷新 decision/detectedKey，供后续调用使用。
+    if (detectedKey && provider && model && `${provider}|${model}` !== detectedKey) {
+      await ensureDetected();
+    }
+    return text;
   };
 }
 

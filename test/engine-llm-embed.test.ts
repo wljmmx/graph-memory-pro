@@ -479,6 +479,69 @@ describe("createRuntimeCompleteFn", () => {
     expect(runtimeLlm.complete).toHaveBeenCalledTimes(6);
   });
 
+  it("v2.5.1: runtime 实际使用的模型变化时，即时重探测刷新 decision", async () => {
+    let callCount = 0;
+    const runtimeLlm = mockRuntimeLlm(async (params) => {
+      callCount++;
+      const isProbe = params.messages?.[0]?.content === "ping";
+      // 探测(qwen3.5:9b) + 第 1 次任务(qwen3.5:9b) 后，模型切换为 qwen3.5:27b
+      const model = callCount <= 2 ? "qwen3.5:9b" : "qwen3.5:27b";
+      return {
+        text: isProbe ? "ok" : `answer-${callCount}`,
+        provider: "ollama",
+        model,
+        agentId: "main",
+      };
+    });
+
+    const complete = createRuntimeCompleteFn(runtimeLlm);
+    const r1 = await complete("sys", "u1"); // probe + task(qwen3.5:9b)
+    const r2 = await complete("sys", "u2"); // task(qwen3.5:27b) → 触发重探测
+    expect(r1).toBe("answer-2");
+    expect(r2).toBe("answer-3");
+    // probe + task1 + task2 + 重探测 = 4 次
+    expect(runtimeLlm.complete).toHaveBeenCalledTimes(4);
+  });
+
+  it("v2.5.1: 超过重探测间隔后，跨路径(远程→本地)切换会重新探测", async () => {
+    vi.useFakeTimers();
+    let isLocalProbe = false;
+    const runtimeLlm = mockRuntimeLlm(async (params) => {
+      const isProbe = params.messages?.[0]?.content === "ping";
+      if (isProbe) {
+        // 第 1 次探测：远程 openai；第 2 次探测：本地 ollama（模拟 /model 切换）
+        const provider = isLocalProbe ? "ollama" : "openai";
+        isLocalProbe = true;
+        return { text: "ok", provider, model: provider === "ollama" ? "qwen3.8:27b" : "gpt-4o", agentId: "main" };
+      }
+      return { text: "runtime-answer", provider: "ollama", model: "qwen3.8:27b", agentId: "main" };
+    });
+    fetchSpy.mockResolvedValue(
+      mockResponse({ choices: [{ message: { content: "fallback-answer" } }] }),
+    );
+
+    const complete = createRuntimeCompleteFn(runtimeLlm, {
+      model: "gpt-4o-mini",
+      baseURL: "https://api.openai.com/v1",
+    });
+
+    // 第一次：probe=openai → fallback 路径（走 fetch）
+    const p1 = complete("sys", "u1");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await p1).toBe("fallback-answer");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    // 推进超过重探测间隔（30s）
+    await vi.advanceTimersByTimeAsync(31_000);
+
+    // 第二次：cooldown 触发重探测 → 现在 ollama → 走 runtime
+    const p2 = complete("sys", "u2");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await p2).toBe("runtime-answer");
+    // 至少 2 次探测（第 1 次远程 + 第 2 次本地）
+    expect(runtimeLlm.complete).toHaveBeenCalledTimes(3); // probe1 + probe2 + runtime task
+  });
+
   it("runtime 返回数组 content 时正确规范化拼接", async () => {
     const runtimeLlm = mockRuntimeLlm(async (params) => {
       const isProbe = params.messages?.[0]?.content === "ping";
