@@ -36,6 +36,17 @@ const RETRY_JITTER_MAX_MS = 500;
 // 无外部依赖，基于 Promise 队列实现
 const DEFAULT_LLM_MAX_CONCURRENCY = 1;
 
+// v2.4.2: 按 purpose 放宽输出上限（maxTokens）。
+// 背景：社区摘要是"一句话≤30字"任务，但推理型模型（如 Qwen3 系列，
+// 默认开启思考模式）会先输出长链 chain-of-thought，1024 上限会在到达
+// 最终答案前截断；截断时返回给插件的 text 往往为空 → 被当作
+// "LLM returned no content"。Qwen3 系列官方输出上限默认 8192（8K），
+// 设为 8K 可让思考跑完再收敛到答案，且不超服务端上限（避免 400）。
+const MAX_TOKENS_BY_PURPOSE: Record<string, number> = {
+  community: 8192,
+};
+const DEFAULT_MAX_TOKENS = 1024;
+
 interface Semaphore {
   acquire(): Promise<() => void>;
   activeCount(): number;
@@ -138,6 +149,8 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
   return async function complete(system: string, user: string, signal?: AbortSignal, purpose: string = "unknown"): Promise<string> {
     const lastErr: Error[] = [];
     const delays = [...RETRY_DELAYS];
+    // v2.4.2: 按 purpose 放宽输出上限（如 community=8K，供推理型模型跑完思考）
+    const maxTokens = MAX_TOKENS_BY_PURPOSE[purpose] ?? DEFAULT_MAX_TOKENS;
 
     // v2.3.2 阶段二: acquire 信号量，确保并发不超限（重试在持锁期间复用同一槽位）
     const release = await semaphore.acquire();
@@ -166,7 +179,7 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
               ],
               stream: false,
               options: {
-                num_predict: 1024,
+                num_predict: maxTokens,
                 temperature: 0.3,
                 // v2.4.1: 思考模式开关（Ollama 推理模型支持 think:false 关闭思考）
                 ...(config.thinking !== undefined ? { think: config.thinking } : {}),
@@ -190,7 +203,7 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
                 { role: "system", content: system },
                 { role: "user", content: user },
               ],
-              max_tokens: 1024,
+              max_tokens: maxTokens,
               temperature: 0.3,
               // v2.4.1: 思考模式开关（OpenAI 兼容服务未知字段一般会忽略）
               ...(config.thinking !== undefined ? { think: config.thinking } : {}),
@@ -418,7 +431,7 @@ export function createRuntimeCompleteFn(
           { role: "system", content: system },
           { role: "user", content: user },
         ],
-        maxTokens: 1024,
+        maxTokens: MAX_TOKENS_BY_PURPOSE[purpose] ?? DEFAULT_MAX_TOKENS,
         temperature: 0.3,
         purpose: "graph-memory-pro:llm",
         signal: requestSignal,

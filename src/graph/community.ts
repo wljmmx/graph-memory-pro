@@ -451,6 +451,18 @@ const COMMUNITY_SUMMARY_SYS = `你是知识图谱社区摘要引擎。根据社�
 - 不要使用"社区"这个词
 - 不要加引号或标点以外的格式`;
 
+/**
+ * v2.4.2 方案2: LLM 失败 / 输出为空时的兜底摘要。
+ * 推理型模型可能因思考过长被截断返回空文本，或输出只有思考块清洗后为空，
+ * 此时用成员信息生成一句话兜底摘要，避免社区永久无摘要。
+ */
+function buildFallbackSummary(communityId: string, members: Array<{ name: string; type: string }>): string {
+  const names = members.slice(0, 5).map((m) => m.name).join("、");
+  const types = [...new Set(members.map((m) => m.type))].join("/");
+  const base = names ? `${types}：${names}` : communityId;
+  return base.slice(0, 100);
+}
+
 export async function summarizeCommunities(
   driver: Driver,
   communities: Map<string, string[]>,
@@ -500,22 +512,34 @@ export async function summarizeCommunities(
         .trim()
         .slice(0, 100);
 
-      if (cleaned.length === 0) continue;
+      // v2.4.2 方案2: LLM 返回空文本（如推理截断）时用成员信息兜底
+      const cleanedSummary = cleaned.length > 0 ? cleaned : buildFallbackSummary(communityId, members);
 
       let embedding: number[] | undefined;
       if (embedFn) {
         try {
-          const embedText = `${cleaned}\n${members.map(m => m.name).join(", ")}`;
+          const embedText = `${cleanedSummary}\n${members.map(m => m.name).join(", ")}`;
           embedding = await embedFn(embedText);
         } catch (err) {
           console.warn(`[graph-memory-pro] community embedding failed for ${communityId}: ${err}`);
         }
       }
 
-      await upsertCommunitySummary(driver, communityId, cleaned, memberIds.length, embedding);
+      await upsertCommunitySummary(driver, communityId, cleanedSummary, memberIds.length, embedding);
       generated++;
     } catch (err) {
-      console.warn(`[graph-memory-pro] community summary failed for ${communityId}: ${err}`);
+      // v2.4.2 方案2: LLM 调用异常（超时/截断等）时用成员信息兜底，避免永久无摘要
+      console.warn(`[graph-memory-pro] community summary failed for ${communityId}: ${err} — fallback to member-based summary`);
+      const fallback = buildFallbackSummary(communityId, members);
+      let embedding: number[] | undefined;
+      if (embedFn) {
+        try {
+          const embedText = `${fallback}\n${members.map(m => m.name).join(", ")}`;
+          embedding = await embedFn(embedText);
+        } catch { /* 嵌入失败不影响兜底写入 */ }
+      }
+      await upsertCommunitySummary(driver, communityId, fallback, memberIds.length, embedding);
+      generated++;
     }
   }
 
