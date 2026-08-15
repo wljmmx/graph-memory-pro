@@ -1122,13 +1122,31 @@ export default definePluginEntry({
             }
 
             if (pairs.length === 0) return;
-            await extractInBackground(_extractor, _driver, _llm, _cfg, logger, pairs);
+            // v2.4.2: 返回本批实际处理的对数（内部 maxPairs=3 限流），据此：
+            //   1. 标记已处理消息（按内容反查 GmMessage，避免下一轮/重建重复处理）
+            //   2. 只清掉已处理的行，剩余行保留待下一轮（避免一次性清空导致 >3 对数据丢失）
+            const processed = await extractInBackground(_extractor, _driver, _llm, _cfg, logger, pairs);
 
-            // 清空队列文件（保留空文件）
+            let marked = 0;
+            if (processed > 0) {
+              const { markMessagesByContent } = await import('./src/store/messages.ts');
+              for (let i = 0; i < Math.min(processed, pairs.length); i++) {
+                try {
+                  await markMessagesByContent(_driver!, pairs[i].user, pairs[i].assistant);
+                  marked++;
+                } catch { /* 标记失败不影响提取结果 */ }
+              }
+            }
+
+            const remaining = lines.slice(processed).join('\n');
+            const pendingCount = Math.max(0, lines.length - processed);
             const { writeFile, mkdir } = await import('node:fs/promises');
             const { dirname } = await import('node:path');
             await mkdir(dirname(queuePath), { recursive: true }).catch(() => {});
-            await writeFile(queuePath, '').catch(() => {});
+            await writeFile(queuePath, remaining).catch(() => {});
+            if (marked > 0 || processed > 0) {
+              logger?.info?.(`[graph-memory-pro] extractor: ${processed} pairs processed, ${marked} GmMessage marked, ${pendingCount > 0 ? `kept ${pendingCount} pending` : 'queue drained'}`);
+            }
           } catch (err) {
             logger?.warn?.(`[graph-memory-pro] extractor tick failed: ${err}`);
           } finally {

@@ -196,6 +196,34 @@ export async function markMessagesProcessed(
 }
 
 /**
+ * v2.4.2: 按内容反查并标记已处理的对话对（正常运行时流程用）。
+ * 运行时增量队列（extract-queue.jsonl）由外部 lcm-graph-extra 写入，仅含
+ * {user, assistant} 纯文本、无消息 id。本函数在同 session 内用 (role, content)
+ * 精确匹配 user/assistant 两条 GmMessage 并打 rebuildProcessedAt 标记，
+ * 使运行时处理过的消息与增量重建共用同一"已处理"语义，避免下一轮重复处理。
+ * 匹配不到（内容被改写/不存在）时静默跳过，不影响提取。
+ */
+export async function markMessagesByContent(
+  driver: Driver,
+  userContent: string,
+  assistantContent: string,
+): Promise<void> {
+  if (!userContent || !assistantContent) return;
+  const session = getSession(driver);
+  try {
+    await session.run(
+      `MATCH (u:GmMessage {role: 'user', content: $userContent})
+       MATCH (a:GmMessage {role: 'assistant', content: $assistantContent})
+       WHERE u.sessionKey = a.sessionKey AND u.createdAt < a.createdAt
+       SET u.rebuildProcessedAt = $ts, a.rebuildProcessedAt = $ts`,
+      { userContent, assistantContent, ts: neo4j.int(Date.now()) },
+    );
+  } finally {
+    await session.close();
+  }
+}
+
+/**
  * v2.4.1: 枚举所有出现过的会话 key（用于批量重建遍历全部会话）。
  */
 export async function listAllSessionKeys(driver: Driver): Promise<string[]> {

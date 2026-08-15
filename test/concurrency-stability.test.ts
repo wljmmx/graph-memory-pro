@@ -1072,8 +1072,8 @@ describe("v2.3.4 ARCH-1: extract-service 拆分验证", () => {
     expect(typeof mod.extractInBackground).toBe("function");
   });
 
-  it("空输入时快速返回（无 driver/llm）", async () => {
+  it("空输入时快速返回 0（无 driver/llm）", async () => {
     const { extractInBackground } = await import("../src/services/extract-service.ts");
-    await expect(extractInBackground(null, null, null, null, console, [])).resolves.toBeUndefined();
+    await expect(extractInBackground(null, null, null, null, console, [])).resolves.toBe(0);
   });
 });

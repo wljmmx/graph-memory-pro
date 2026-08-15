@@ -186,6 +186,19 @@ function pageMsg(id: string, turnIndex: number, role: string, content: string): 
 }
 
 describe("rebuildSessionMessages", () => {
+  it("markMessagesByContent: 按内容反查并 SET rebuildProcessedAt", async () => {
+    const driver = mockDriver();
+    const { markMessagesByContent } = await import("../src/store/messages.ts");
+    await markMessagesByContent(driver as any, "你好", "你好，有什么可以帮你");
+    const calls = driver.getAllRunCalls();
+    expect(calls.length).toBe(1);
+    expect(calls[0].query).toContain("rebuildProcessedAt");
+    expect(calls[0].query).toContain("u.sessionKey = a.sessionKey");
+    // 空内容直接返回，不发查询
+    await markMessagesByContent(driver as any, "", "x");
+    expect(driver.getAllRunCalls().length).toBe(1);
+  });
+
   it("读取全部消息并并发配对 → 返回 processedPairs 并合并批量写", async () => {
     const driver = mockDriver();
     // 第 1 次 session.run：getSessionMessagesPage 返回 4 条消息（ASC）

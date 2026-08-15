@@ -33,8 +33,8 @@ export async function extractInBackground(
   cfg: GmConfig | null,
   logger: { debug?(...args: unknown[]): void; info?(...args: unknown[]): void },
   pendingMessages: Array<{ user: string; assistant: string }>,
-): Promise<void> {
-  if (!extractor || !driver || !llm || pendingMessages.length === 0) return;
+): Promise<number> {
+  if (!extractor || !driver || !llm || pendingMessages.length === 0) return 0;
 
   // v2.3.2 阶段三: LLM 熔断器 — OPEN 时跳过整个 extract tick，减少 Ollama 压力
   const llmBreaker = getCircuitBreaker("llm");
@@ -124,6 +124,8 @@ export async function extractInBackground(
   if (extracted > 0) {
     logger?.info?.(`[graph-memory-pro] background extractor: ${extracted} turns processed`);
   }
+  // v2.4.2: 返回本批被取出（交由提取）的对数，供调用方据此标记已处理的 GmMessage。
+  return pairs.length;
 }
 
 /**
