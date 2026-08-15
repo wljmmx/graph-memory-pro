@@ -199,6 +199,16 @@ describe("rebuildSessionMessages", () => {
     expect(driver.getAllRunCalls().length).toBe(1);
   });
 
+  it("markMessagesByContent: 传 sessionKey 时按 sessionKey 精确限定", async () => {
+    const driver = mockDriver();
+    const { markMessagesByContent } = await import("../src/store/messages.ts");
+    await markMessagesByContent(driver as any, "你好", "你好", "session-abc");
+    const calls = driver.getAllRunCalls();
+    expect(calls.length).toBe(1);
+    expect(calls[0].query).toContain("u.sessionKey = $sessionKey");
+    expect(calls[0].params?.sessionKey).toBe("session-abc");
+  });
+
   it("读取全部消息并并发配对 → 返回 processedPairs 并合并批量写", async () => {
     const driver = mockDriver();
     // 第 1 次 session.run：getSessionMessagesPage 返回 4 条消息（ASC）

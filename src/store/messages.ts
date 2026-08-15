@@ -197,26 +197,31 @@ export async function markMessagesProcessed(
 
 /**
  * v2.4.2: 按内容反查并标记已处理的对话对（正常运行时流程用）。
- * 运行时增量队列（extract-queue.jsonl）由外部 lcm-graph-extra 写入，仅含
- * {user, assistant} 纯文本、无消息 id。本函数在同 session 内用 (role, content)
- * 精确匹配 user/assistant 两条 GmMessage 并打 rebuildProcessedAt 标记，
- * 使运行时处理过的消息与增量重建共用同一"已处理"语义，避免下一轮重复处理。
- * 匹配不到（内容被改写/不存在）时静默跳过，不影响提取。
+ * 运行时增量队列（extract-queue.jsonl）由外部 lcm-graph-extra 写入，规范为
+ * {user, assistant, sessionKey?, id?|msgIds?}。优先按 sessionKey 精确区分管理：
+ * 传 sessionKey 时精确限定到具体会话；有 id 时走 markMessagesProcessed 按 id。
+ * 本函数在无 id 时用 (role, content) 在同 session 内匹配 user/assistant 两条
+ * GmMessage 并打 rebuildProcessedAt 标记，使运行时处理过的消息与增量重建共用
+ * 同一"已处理"语义，避免下一轮重复处理。匹配不到时静默跳过，不影响提取。
  */
 export async function markMessagesByContent(
   driver: Driver,
   userContent: string,
   assistantContent: string,
+  sessionKey?: string,
 ): Promise<void> {
   if (!userContent || !assistantContent) return;
   const session = getSession(driver);
   try {
+    // 统一按 sessionKey 区分管理：传 sessionKey 时精确限定到具体会话（利用 gm_message_session 索引），
+    // 避免同一内容跨 session 时误标记；未传时退化为"user/assistant 同一会话"的关联匹配。
+    const scope = sessionKey ? " AND u.sessionKey = $sessionKey" : "";
     await session.run(
       `MATCH (u:GmMessage {role: 'user', content: $userContent})
        MATCH (a:GmMessage {role: 'assistant', content: $assistantContent})
-       WHERE u.sessionKey = a.sessionKey AND u.createdAt < a.createdAt
+       WHERE u.sessionKey = a.sessionKey AND u.createdAt < a.createdAt${scope}
        SET u.rebuildProcessedAt = $ts, a.rebuildProcessedAt = $ts`,
-      { userContent, assistantContent, ts: neo4j.int(Date.now()) },
+      { userContent, assistantContent, sessionKey, ts: neo4j.int(Date.now()) },
     );
   } finally {
     await session.close();

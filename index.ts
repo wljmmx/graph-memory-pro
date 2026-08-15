@@ -1113,26 +1113,43 @@ export default definePluginEntry({
             if (!queueContent || !queueContent.trim()) return;
 
             const lines = queueContent.split('\n').filter(Boolean);
-            const pairs: Array<{ user: string; assistant: string }> = [];
+            // 统一数据格式：队列项以 {user, assistant, sessionKey?, id?|msgIds?} 区分管理。
+            // sessionKey 用于精确限定到具体会话（GmMessage 按 sessionKey 建有索引），
+            // id/msgIds 可用于按 id 精确标记；外部写入方若未提供则回退内容反查。
+            const pairs: Array<{ user: string; assistant: string; sessionKey?: string; ids?: string[] }> = [];
             for (const line of lines) {
               try {
                 const item = JSON.parse(line);
-                if (item.user && item.assistant) pairs.push(item);
+                if (!item.user || !item.assistant) continue;
+                const ids = Array.isArray(item.msgIds)
+                  ? item.msgIds.map(String).filter(Boolean)
+                  : (typeof item.id === 'string' && item.id ? [item.id] : []);
+                pairs.push({
+                  user: item.user,
+                  assistant: item.assistant,
+                  sessionKey: typeof item.sessionKey === 'string' && item.sessionKey ? item.sessionKey : undefined,
+                  ids: ids.length ? ids : undefined,
+                });
               } catch { /* 跳过损坏行 */ }
             }
 
             if (pairs.length === 0) return;
             // v2.4.2: 返回本批实际处理的对数（内部 maxPairs=3 限流），据此：
-            //   1. 标记已处理消息（按内容反查 GmMessage，避免下一轮/重建重复处理）
+            //   1. 标记已处理消息（有 id 按 id，否则按 sessionKey+内容反查，避免下一轮/重建重复处理）
             //   2. 只清掉已处理的行，剩余行保留待下一轮（避免一次性清空导致 >3 对数据丢失）
             const processed = await extractInBackground(_extractor, _driver, _llm, _cfg, logger, pairs);
 
             let marked = 0;
             if (processed > 0) {
-              const { markMessagesByContent } = await import('./src/store/messages.ts');
+              const { markMessagesProcessed, markMessagesByContent } = await import('./src/store/messages.ts');
               for (let i = 0; i < Math.min(processed, pairs.length); i++) {
+                const p = pairs[i];
                 try {
-                  await markMessagesByContent(_driver!, pairs[i].user, pairs[i].assistant);
+                  if (p.sessionKey && p.ids?.length) {
+                    await markMessagesProcessed(_driver!, p.sessionKey, p.ids);
+                  } else {
+                    await markMessagesByContent(_driver!, p.user, p.assistant, p.sessionKey);
+                  }
                   marked++;
                 } catch { /* 标记失败不影响提取结果 */ }
               }
