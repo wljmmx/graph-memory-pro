@@ -40,7 +40,7 @@ export async function extractInBackground(
   const llmBreaker = getCircuitBreaker("llm");
   if (!llmBreaker.allow()) {
     if (process.env.GM_DEBUG) logger?.debug?.("[graph-memory-pro] llm circuit OPEN, skip extract tick");
-    return;
+    return 0;
   }
 
   let extracted = 0;
