@@ -191,7 +191,7 @@ export async function runBenchmark(
   if (cfg.associationMatrix?.enabled === true && cfg.embedding?.dimensions) {
     try {
       const { createAssociationMatrix } = await import("../recaller/association-matrix.ts");
-      const { loadAssociationMatrix, saveAssociationMatrix, getDefaultBaseDir } = await import("../recaller/association-matrix-persist.ts");
+      const { loadAssociationMatrix, getDefaultBaseDir } = await import("../recaller/association-matrix-persist.ts");
       const { join } = await import("node:path");
       // benchmark 专属 M 文件（与生产 association-matrix.json 隔离）
       const benchFileName = cfg.benchmark?.matrixFile ?? "association-matrix-benchmark.json";

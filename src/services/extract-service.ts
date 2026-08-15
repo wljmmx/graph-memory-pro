@@ -8,7 +8,7 @@
  */
 
 import type { Driver } from "neo4j-driver";
-import type { GmConfig, GmNode, GmEdge, GmMessage, ExtractResult, NodeType } from "../types.ts";
+import type { GmConfig, GmNode, GmEdge, ExtractResult, NodeType } from "../types.ts";
 import type { CompleteFn } from "../engine/llm.ts";
 import type { Extractor } from "../extractor/extract.ts";
 import { upsertNode, batchUpsertNodes, upsertEdge, batchUpsertEdges } from "../store/store.ts";
