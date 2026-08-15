@@ -537,7 +537,7 @@ describe("createRuntimeCompleteFn", () => {
     expect(realCall.purpose).toBe("graph-memory-pro:llm");
   });
 
-  it("probe 调用使用极小 maxTokens=8 + purpose 标识", async () => {
+  it("probe 调用使用小 maxTokens（v2.4.2 提到 64 以兼容推理模型）+ purpose 标识", async () => {
     const runtimeLlm = mockRuntimeLlm(async () => ({
       text: "ok",
       provider: "ollama",
@@ -550,7 +550,7 @@ describe("createRuntimeCompleteFn", () => {
 
     const probeCall = runtimeLlm.complete.mock.calls[0][0];
     expect(probeCall.messages).toEqual([{ role: "user", content: "ping" }]);
-    expect(probeCall.maxTokens).toBe(8);
+    expect(probeCall.maxTokens).toBe(64);
     expect(probeCall.temperature).toBe(0);
     expect(probeCall.purpose).toBe("graph-memory-pro:provider-detect");
   });

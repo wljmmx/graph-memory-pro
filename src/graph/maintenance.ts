@@ -58,8 +58,8 @@ async function deriveRelatesFromMentions(
   const session = getSession(driver);
   try {
     const result = await session.run(
-      `MATCH (msg:ConversationMessage)-[:MENTIONS]->(a:Task|Skill|Event {status: active})
-       MATCH (msg)-[:MENTIONS]->(b:Task|Skill|Event {status: active})
+      `MATCH (msg:ConversationMessage)-[:MENTIONS]->(a:Task|Skill|Event {status: 'active'})
+       MATCH (msg)-[:MENTIONS]->(b:Task|Skill|Event {status: 'active'})
        WHERE a.id < b.id
        WITH a, b, count(DISTINCT msg) AS coOccur
        MERGE (a)-[r:RELATES_TO]->(b)

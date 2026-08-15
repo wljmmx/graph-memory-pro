@@ -463,7 +463,10 @@ export function createRuntimeCompleteFn(
   /**
    * 探测主会话 runtime LLM 的 provider，缓存 decision
    *
-   * 使用极小 probe（maxTokens=8，单条 "ping" 消息）以最小化 token 开销。
+   * 使用极小 probe（单条 "ping" 消息）以最小化 token 开销。
+   * v2.4.2: 推理型模型（如 Qwen3 系列默认开启思考）在 maxTokens=8 下无法产出，
+   * 会卡满 10s 探针超时 → catch 误判 fallback → 后续走可能未配置好的 fallback LLM
+   * 而报 404。故 maxTokens 提到 64、超时放宽到 30s，让思考模型能完成探测。
    * probe 失败时优雅降级到 fallback（如未配置则 decision 仍为 runtime，
    * 后续 runtimeComplete 调用会抛出真实错误）。
    */
@@ -471,10 +474,10 @@ export function createRuntimeCompleteFn(
     try {
       const result = await runtimeLlm.complete({
         messages: [{ role: "user", content: "ping" }],
-        maxTokens: 8,
+        maxTokens: 64,
         temperature: 0,
         purpose: "graph-memory-pro:provider-detect",
-        signal: AbortSignal.timeout(10_000),  // v2.3.3 ERR-1: probe 超时 10s
+        signal: AbortSignal.timeout(30_000),  // v2.4.2: 思考模型慢启动，放宽到 30s
       });
       const provider = (result?.provider ?? "").toString();
       const model = (result?.model ?? "").toString();
