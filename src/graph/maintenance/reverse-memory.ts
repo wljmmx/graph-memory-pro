@@ -30,7 +30,7 @@ export async function applyReverseMemory(
 ): Promise<{ watchlistAdded: number; watchlistRemoved: number; decayed: number }> {
   // 冷启动检查
   const feedbackCount = await getFeedbackCountInternal(driver);
-  if (feedbackCount < (warmupFeedbacks ?? 100)) {
+  if (feedbackCount < (warmupFeedbacks ?? 40)) {
     return { watchlistAdded: 0, watchlistRemoved: 0, decayed: 0 };
   }
 

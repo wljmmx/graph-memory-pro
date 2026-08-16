@@ -791,7 +791,7 @@ async function handleAutoTunerState(): Promise<{ status: number; body: unknown }
 //
 // v2.3.5: 补充冷启动状态和数据来源说明，避免 "已启用但无数据" 被误判为异常。
 // 关联矩阵 M 初始化为单位矩阵（M=I，transform 直接返回原 vec），需要满足：
-//   1. 累计反馈数 >= warmupFeedbacks（默认 100）才退出冷启动期
+//   1. 累计反馈数 >= warmupFeedbacks（默认 40）才退出冷启动期
 //   2. 在召回过程中通过 gm_feedback / POST /api/feedback 提供反馈信号
 //   3. updateWithMarginalUtility() 根据反馈信号更新 M
 // 因此 "updatesApplied=0, historySize=0" 是启用初期的正常状态。
@@ -813,7 +813,7 @@ async function handleAssociationMatrixState(): Promise<{ status: number; body: u
   }
   try {
     const stats = am.getStats();
-    const warmupFeedbacks = _cfg?.associationMatrix?.warmupFeedbacks ?? _cfg?.warmup?.warmupFeedbacks ?? 100;
+    const warmupFeedbacks = _cfg?.associationMatrix?.warmupFeedbacks ?? _cfg?.warmup?.warmupFeedbacks ?? 40;
     const judgeManager = _recaller?.getJudgeManager();
     const feedbackCount = judgeManager?.getFeedbackCount?.() ?? 0;
     const isColdStart = stats.t === 0 && feedbackCount < warmupFeedbacks;
@@ -1108,7 +1108,7 @@ async function handleDoctor(): Promise<{ status: number; body: unknown }> {
       });
     } else {
       const stats = am.getStats();
-      const warmupFb = _cfg.associationMatrix.warmupFeedbacks ?? _cfg.warmup?.warmupFeedbacks ?? 100;
+      const warmupFb = _cfg.associationMatrix.warmupFeedbacks ?? _cfg.warmup?.warmupFeedbacks ?? 40;
       const feedbackCount = jm?.getFeedbackCount() ?? 0;
       const isColdStart = feedbackCount < warmupFb;
       // v2.3.6: 检查 M 持久化文件是否存在

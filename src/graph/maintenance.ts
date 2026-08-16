@@ -304,7 +304,7 @@ export async function runMaintenance(
     // 依赖：I-2 裁判反馈（JUDGED 关系）+ 冷启动期（累计反馈 >= warmupFeedbacks）
     if (cfg?.edgeWeights?.enabled !== false) {
       try {
-        edgeWeightsResult = await adjustEdgeWeights(driver, cfg?.edgeWeights, cfg?.warmup?.warmupFeedbacks ?? 100);
+        edgeWeightsResult = await adjustEdgeWeights(driver, cfg?.edgeWeights, cfg?.warmup?.warmupFeedbacks ?? 40);
         if (edgeWeightsResult.scanned > 0) {
           log.info(
             "edge-weights",
@@ -325,7 +325,7 @@ export async function runMaintenance(
     // 依赖：I-2 裁判反馈（节点使用/未使用计数）+ 冷启动期
     if (cfg?.reverseMemory?.enabled !== false) {
       try {
-        reverseMemoryResult = await applyReverseMemory(driver, cfg?.reverseMemory, cfg?.warmup?.warmupFeedbacks ?? 100);
+        reverseMemoryResult = await applyReverseMemory(driver, cfg?.reverseMemory, cfg?.warmup?.warmupFeedbacks ?? 40);
         if (reverseMemoryResult.watchlistAdded > 0 || reverseMemoryResult.decayed > 0) {
           log.info(
             "reverse-memory",

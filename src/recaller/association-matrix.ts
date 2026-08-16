@@ -39,7 +39,7 @@ export const DEFAULT_AM_CONFIG: AssociationMatrixConfig = {
   momentum: 0.9,
   adamBeta1: 0.9,
   adamBeta2: 0.999,
-  warmupFeedbacks: 100,
+  warmupFeedbacks: 40,
 };
 
 /**
@@ -649,7 +649,7 @@ export function createAssociationMatrix(
 ): AssociationMatrix {
   const amCfg = cfg?.associationMatrix;
   const muCfg = cfg?.marginalUtility;
-  const warmupFeedbacks = amCfg?.warmupFeedbacks ?? cfg?.warmup?.warmupFeedbacks ?? 100;
+  const warmupFeedbacks = amCfg?.warmupFeedbacks ?? cfg?.warmup?.warmupFeedbacks ?? 40;
 
   return new AssociationMatrix(
     dim,

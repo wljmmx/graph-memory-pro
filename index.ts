@@ -1254,7 +1254,7 @@ async function doGatewayInit(api: any, logger: LoggerLike): Promise<void> {
     const am = createAssociationMatrix(amDim, _cfg);
     const { loaded, path } = await tryLoadAssociationMatrix(am);
     _recaller.setAssociationMatrix(am);
-    logger?.info?.(`[graph-memory-pro] association-matrix enabled (dim=${amDim}, warmup=${_cfg.associationMatrix?.warmupFeedbacks ?? _cfg.warmup?.warmupFeedbacks ?? 100}, persistedRestored=${loaded}, path=${path})`);
+    logger?.info?.(`[graph-memory-pro] association-matrix enabled (dim=${amDim}, warmup=${_cfg.associationMatrix?.warmupFeedbacks ?? _cfg.warmup?.warmupFeedbacks ?? 40}, persistedRestored=${loaded}, path=${path})`);
   }
 
   _extractor = new Extractor(driver);

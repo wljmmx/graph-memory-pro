@@ -31,7 +31,7 @@ export async function adjustEdgeWeights(
 ): Promise<{ scanned: number; strengthened: number; decayed: number }> {
   // 冷启动检查
   const feedbackCount = await getFeedbackCountInternal(driver);
-  if (feedbackCount < (warmupFeedbacks ?? 100)) {
+  if (feedbackCount < (warmupFeedbacks ?? 40)) {
     return { scanned: 0, strengthened: 0, decayed: 0 };
   }
 
