@@ -75,6 +75,18 @@ interface AgentEndCtx {
 
 // ─── 全局状态 ──────────────────────────────────────────
 
+// v2.5.4: 触发 after_tool_call 即时反馈的 memory 相关工具名。
+// 这些工具调用后可能产生 get()/search() 展开信号，需即时更新 M。
+const MEMORY_TOOL_NAMES = new Set([
+  "memory_search",
+  "gm_search",
+  "gm_recall",
+  "gm_stats",
+  "gm_record",
+  "recall_memory",
+  "corpus_search",
+]);
+
 let _driver: Driver | null = null;
 let _cfg: GmConfig | null = null;
 let _llm: CompleteFn | null = null;
@@ -620,23 +632,7 @@ function startBackgroundExtractor(
       // agent_end 只在整轮对话结束时触发；长任务中 agent 进行多轮工具调用时
       // agent_end 尚未触发，SessionRecallCache 中的 get() 信号一直堆积。
       // 此处周期性消费静默超过 90s 的 session，用 get() 信号直接更新 M。
-      if (_recaller && _cfg?.associationMatrix?.enabled === true) {
-        try {
-          const staleSessions = getSessionRecallCache().consumeStale(90_000);
-          for (const { sessionKey, consumed } of staleSessions) {
-            if (consumed.getNodeIds.length === 0) continue;
-            await _recaller.processGetBasedFeedback(
-              consumed.query,
-              consumed.nodeIds,
-              consumed.getNodeIds,
-              sessionKey,
-            );
-            logger?.info?.(`[graph-memory-pro] stale-session feedback flushed (session=${sessionKey}, getHits=${consumed.getNodeIds.length}, recalled=${consumed.nodeIds.length})`);
-          }
-        } catch (flushErr) {
-          logger?.warn?.(`[graph-memory-pro] stale-session feedback flush failed: ${flushErr}`);
-        }
-      }
+      await flushStaleFeedback(90_000, logger);
     } catch (err) {
       logger?.warn?.(`[graph-memory-pro] extractor tick failed: ${err}`);
     } finally {
@@ -644,6 +640,55 @@ function startBackgroundExtractor(
     }
   }, interval);
   return timer;
+}
+
+/**
+ * v2.5.4: 刷新陈旧会话的 get() 信号反馈（长任务期间 M 矩阵增量更新）。
+ *
+ * 从 extractor 定时器抽出，供定时器与 after_tool_call 钩子复用：
+ *   - 定时器：consumeStale(maxAgeMs) 消费静默超时的 session（兜底）
+ *   - after_tool_call：consumeGetSignals() 即时消费一个 session 的 get 信号
+ *
+ * 统一用 get() 确定性信号更新 M，不依赖 judge / assistantReply；
+ * 完整 judge 仍由 agent_end 负责。
+ */
+async function flushGetSignals(
+  sessionKey: string,
+  query: string,
+  getNodeIds: string[],
+  nodeIds: string[],
+  logger: LoggerLike,
+): Promise<void> {
+  if (!_recaller || _cfg?.associationMatrix?.enabled !== true) return;
+  if (getNodeIds.length === 0) return;
+  try {
+    await _recaller.processGetBasedFeedback(query, nodeIds, getNodeIds, sessionKey);
+    logger?.info?.(`[graph-memory-pro] get-signal feedback flushed (session=${sessionKey}, getHits=${getNodeIds.length}, recalled=${nodeIds.length})`);
+  } catch (flushErr) {
+    logger?.warn?.(`[graph-memory-pro] get-signal feedback flush failed: ${flushErr}`);
+  }
+}
+
+/**
+ * v2.5.3/4: 分摊陈旧会话反馈刷新（定时器路径）。
+ */
+async function flushStaleFeedback(maxAgeMs: number, logger: LoggerLike): Promise<void> {
+  if (!_recaller || _cfg?.associationMatrix?.enabled !== true) return;
+  try {
+    const staleSessions = getSessionRecallCache().consumeStale(maxAgeMs);
+    for (const { sessionKey, consumed } of staleSessions) {
+      if (consumed.getNodeIds.length === 0) continue;
+      await _recaller.processGetBasedFeedback(
+        consumed.query,
+        consumed.nodeIds,
+        consumed.getNodeIds,
+        sessionKey,
+      );
+      logger?.info?.(`[graph-memory-pro] stale-session feedback flushed (session=${sessionKey}, getHits=${consumed.getNodeIds.length}, recalled=${consumed.nodeIds.length})`);
+    }
+  } catch (flushErr) {
+    logger?.warn?.(`[graph-memory-pro] stale-session feedback flush failed: ${flushErr}`);
+  }
 }
 
 /**
@@ -1416,6 +1461,33 @@ export default definePluginEntry({
         log.warn(`auto-feedback failed: ${(err as Error)?.message ?? err}`);
       }
     }, { name: "graph-memory-pro-auto-feedback" });
+
+    // ─────────────────────────────────────────────────────────────────
+    // v2.5.4 L0: after_tool_call 实时反馈（长任务期间 M 矩阵即时更新）
+    //
+    // 长任务中 agent 进行多轮工具调用，agent_end 迟迟不触发，M 无法及时反映
+    // 已用记忆。此处每次 memory 相关工具调用结束后，即时消费该 session 的
+    // get() 展开信号（确定性正反馈）更新 M，不依赖 judge / assistantReply。
+    //
+    // 与 agent_end 的分工：
+    //   - 本钩子：get() 确定性信号 → 即时更新 M（L0 实时层）
+    //   - agent_end：完整 judge 判定 used/unused + M 更新（L1 完整层）
+    // consumeGetSignals 只取 get 信号、保留召回记录，避免与 agent_end 冲突。
+    // ─────────────────────────────────────────────────────────────────
+    api.registerHook("after_tool_call", async (event: { toolName?: string }, rawCtx: unknown) => {
+      if (_cfg?.autoFeedback?.enabled === false) return;
+      if (!_recaller || _cfg?.associationMatrix?.enabled !== true) return;
+      const toolName = event?.toolName ?? "";
+      if (!MEMORY_TOOL_NAMES.has(toolName)) return;
+
+      const ctx = (rawCtx ?? {}) as { sessionKey?: string; sessionId?: string };
+      const sessionKey = ctx?.sessionKey ?? ctx?.sessionId;
+      if (!sessionKey) return;
+
+      const signals = getSessionRecallCache().consumeGetSignals(sessionKey);
+      if (!signals || signals.getNodeIds.length === 0) return;
+      await flushGetSignals(sessionKey, signals.query, signals.getNodeIds, [], log);
+    }, { name: "graph-memory-pro-tool-feedback" });
 
     // ─────────────────────────────────────────────────────────────────
     // P0-1: 移除 before_prompt_build 钩子

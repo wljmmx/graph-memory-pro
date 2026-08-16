@@ -140,6 +140,32 @@ export class SessionRecallCache {
   }
 
   /**
+   * v2.5.4: 只消费该 session 的 get() 展开信号（用于长任务期间 M 实时更新），
+   * 但保留召回记录（records）供后续 agent_end 做完整 judge。
+   *
+   * 长任务中 agent 每轮工具调用后（after_tool_call），get() 信号是确定性正反馈，
+   * 可立即更新 M 而不必等 agent_end。为避免与 agent_end 的 judge 冲突：
+   *   - 取出并清空 getNodeIds（已用于 M 更新，避免重复）
+   *   - 保留 records（agent_end 仍需 nodeIds 加载召回节点做 used/unused 判定）
+   *
+   * @param sessionKey 会话标识
+   * @returns { query, getNodeIds }；无 get 信号返回 null
+   */
+  consumeGetSignals(sessionKey: string): { query: string; getNodeIds: string[] } | null {
+    if (!sessionKey) return null;
+    const entry = this.sessions.get(sessionKey);
+    if (!entry || entry.getNodeIds.size === 0) return null;
+
+    // 取最近一次召回的 query 作为该批 get 信号的关联查询
+    let lastQuery = "";
+    for (const r of entry.records) lastQuery = r.query;
+    const result = { query: lastQuery, getNodeIds: Array.from(entry.getNodeIds) };
+    entry.getNodeIds.clear();
+    entry.lastAccess = Date.now();
+    return result;
+  }
+
+  /**
    * v2.5.3: 消费并清除超过 maxAgeMs 未被 agent_end 消费的"陈旧"会话。
    *
    * 长任务场景：agent 执行 100+ 工具调用期间 agent_end 尚未触发，
