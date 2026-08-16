@@ -72,8 +72,17 @@ export interface GmConfig {
   background?: {
     extractorIntervalMs?: number;
     maintenanceIntervalMs?: number;
+    /** v2.5.4: maintenance 首次启动延迟 ms（默认 30min，避免启动初期 lossless-claw compaction 与 community summary 抢 LLM） */
+    maintenanceInitialDelayMs?: number;
     /** v2.5.4: 中间轮 assistant 文本提取的轮数节流阈值（默认 15 轮），满 N 轮才批量入队一次 */
     interimTurnsThreshold?: number;
+  };
+  /** v2.5.4: 社区摘要节流配置（避免 maintenance 与主会话 / compaction 抢 LLM 导致 503） */
+  communitySummary?: {
+    /** 单次 maintenance 最多摘要多少个社区（默认 5，超过留到下次 maintenance） */
+    maxPerBatch?: number;
+    /** 两个社区摘要之间的间隔 ms（默认 3_000，避免连打 LLM） */
+    interCallSleepMs?: number;
   };
   /** v2.5.x 心跳自愈配置（探测 API/MCP/driver，崩溃后自动重建） */
   heartbeat?: {

@@ -10,9 +10,11 @@ import type { Driver, Session } from "neo4j-driver";
 import { getSession } from "../store/db.ts";
 import type { CompleteFn } from "../engine/llm.ts";
 import type { EmbedFn } from "../engine/embed.ts";
+import type { GmConfig } from "../types.ts";
 import { updateCommunities, upsertCommunitySummary, pruneCommunitySummaries } from "../store/store.ts";
 import { getSummarizedCommunityIds } from "../store/community.ts";
 import { ALL_REL_TYPES } from "../utils.ts";
+import { getCircuitBreaker } from "../engine/circuit-breaker.ts";
 
 async function getExistingRelTypes(session: Session): Promise<string[]> {
   const result = await session.run(`
@@ -464,12 +466,36 @@ function buildFallbackSummary(communityId: string, members: Array<{ name: string
   return base.slice(0, 100);
 }
 
+/**
+ * 判断 LLM 错误是否为"服务忙/过载"类型（503、maximum pending、too many requests 等），
+ * 遇到这些错误应立即中断剩余社区摘要，避免继续打满 LLM 队列。
+ */
+function isOverloadedError(err: unknown): boolean {
+  const msg = String(err ?? "");
+  return (
+    /503/i.test(msg) ||
+    /server\s*busy/i.test(msg) ||
+    /maximum\s*pending/i.test(msg) ||
+    /too\s*many\s*requests/i.test(msg) ||
+    /429/.test(msg) ||
+    /rate\s*limit/i.test(msg) ||
+    /overload/i.test(msg) ||
+    /unavailable/i.test(msg)
+  );
+}
+
+/** 小工具：sleep 若干 ms（社区之间间隔，避免连打 LLM） */
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 export async function summarizeCommunities(
   driver: Driver,
   communities: Map<string, string[]>,
   llm: CompleteFn,
   embedFn?: EmbedFn,
   force = false,
+  cfg?: GmConfig | null,
 ): Promise<number> {
   await pruneCommunitySummaries(driver);
   // v2.4.2 方案1: 社区摘要增量处理——默认跳过已有非空摘要的社区，只对新建/未摘要社区
@@ -478,9 +504,30 @@ export async function summarizeCommunities(
   const existing = force ? new Set<string>() : await getSummarizedCommunityIds(driver);
   let generated = 0;
 
+  // v2.5.4: 单次 maintenance 摘要的社区批量上限（默认 5），避免一次 maintenance
+  // 对几十个新建社区逐个调 LLM，和 lossless-claw compaction 一起把 Ollama 打成 503。
+  // 超过上限的留到下一次 maintenance 处理。
+  const MAX_PER_BATCH = Math.max(
+    1,
+    Math.min(50, cfg?.communitySummary?.maxPerBatch ?? 5),
+  );
+  // v2.5.4: 社区之间调用间隔（默认 3s），避免连续 API 请求
+  const INTER_CALL_SLEEP_MS = Math.max(
+    0,
+    Math.min(60_000, cfg?.communitySummary?.interCallSleepMs ?? 3_000),
+  );
+
+  const llmBreaker = getCircuitBreaker("llm");
+
   for (const [communityId, memberIds] of communities) {
+    // 批量上限：达到 MAX_PER_BATCH 就停止，剩余交给下次 maintenance
+    if (generated >= MAX_PER_BATCH) break;
     if (memberIds.length === 0) continue;
     if (existing.has(communityId)) continue;
+
+    // v2.5.4: LLM 熔断器开路时，直接停止后续社区摘要（不用 LLM 兜底也跳过），
+    // 避免 fallback 路径虽然不调 LLM 但仍调 embedFn 反复请求嵌入。
+    if (!llmBreaker.allow()) break;
 
     const session = getSession(driver);
     let members: { name: string; type: string; description: string }[];
@@ -507,8 +554,14 @@ export async function summarizeCommunities(
       .map(m => `${m.type}:${m.name} — ${m.description}`)
       .join("\n");
 
+    // 是否遇到过载错误（遇到立即中断循环）
+    let overloadedHit = false;
+
     try {
+      // 调用前再检查一次熔断器
+      if (!llmBreaker.allow()) break;
       const summary = await llm(COMMUNITY_SUMMARY_SYS, `社区成员：\n${memberText}`, undefined, "community");
+      llmBreaker.recordSuccess();
       const cleaned = ((summary ?? "") as string)
         .trim()
         .replace(/<think>[\s\S]*?<\/think>/gi, "")
@@ -535,7 +588,17 @@ export async function summarizeCommunities(
       await upsertCommunitySummary(driver, communityId, cleanedSummary, memberIds.length, embedding);
       generated++;
     } catch (err) {
-      // v2.4.2 方案2: LLM 调用异常（超时/截断等）时用成员信息兜底，避免永久无摘要
+      llmBreaker.recordFailure();
+      // v2.5.4: 503 / server busy / max pending 等过载错误 → 立即中断剩余社区，
+      // 不再继续 fallback 兜底，避免和 lossless-claw compaction 抢队列。
+      if (isOverloadedError(err)) {
+        overloadedHit = true;
+        console.warn(
+          `[graph-memory-pro] community summary hit LLM overload (${communityId}): ${err} — abort remaining communities, retry on next maintenance`,
+        );
+        break;
+      }
+      // 非过载错误（超时/截断/网络等）→ 沿用原 fallback 兜底逻辑
       console.warn(`[graph-memory-pro] community summary failed for ${communityId}: ${err} — fallback to member-based summary`);
       const fallback = buildFallbackSummary(communityId, members);
       let embedding: number[] | undefined;
@@ -547,6 +610,11 @@ export async function summarizeCommunities(
       }
       await upsertCommunitySummary(driver, communityId, fallback, memberIds.length, embedding);
       generated++;
+    }
+
+    // 社区之间加间隔（避免连打 LLM），最后一个不 sleep
+    if (!overloadedHit && generated > 0 && generated < MAX_PER_BATCH && INTER_CALL_SLEEP_MS > 0) {
+      await sleepMs(INTER_CALL_SLEEP_MS);
     }
   }
 

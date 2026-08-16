@@ -117,6 +117,21 @@ function getInterimTurnsThreshold(): number {
 }
 
 /**
+ * 读取 maintenance 首次启动延迟 ms（默认 30 分钟，避免启动时 compaction/community summary 抢 LLM）
+ * 安全范围：[1min, 24h]
+ */
+const MAINTENANCE_INITIAL_DELAY_DEFAULT = 30 * 60 * 1000; // 30min
+function getMaintenanceInitialDelayMs(): number {
+  const configured = _cfg?.background?.maintenanceInitialDelayMs;
+  const MIN = 60 * 1000;
+  const MAX = 24 * 60 * 60 * 1000;
+  if (typeof configured === "number" && configured >= MIN && configured <= MAX) {
+    return configured;
+  }
+  return MAINTENANCE_INITIAL_DELAY_DEFAULT;
+}
+
+/**
  * 读取后台提取间隔 ms
  * 优先使用 cfg.background.extractorIntervalMs，回退到 EXTRACTOR_INTERVAL_DEFAULT
  * 安全范围：[1min, 24h]
@@ -587,9 +602,11 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
     if (!_maintenanceTimer) {
       try {
         const interval = cfg.background?.maintenanceIntervalMs ?? 6 * 3600_000;
-        const initialDelay = 5 * 60_000;
+        // v2.5.4: initialDelay 从 5min→30min（默认），可配置。避免启动初期
+        // lossless-claw compaction 与 community summary 同时调 LLM 把 Ollama 打成 503
+        const initialDelay = getMaintenanceInitialDelayMs();
         _maintenanceTimer = startBackgroundMaintenance(interval, initialDelay, apiLogger);
-        log.info(`[graph-memory-pro] background maintenance scheduled (interval=${interval}ms)`);
+        log.info(`[graph-memory-pro] background maintenance scheduled (interval=${interval}ms, initialDelay=${initialDelay}ms)`);
       } catch (err) {
         log.warn(`[graph-memory-pro] background maintenance start failed: ${err}`);
       }
@@ -1320,7 +1337,13 @@ export default definePluginEntry({
     background: Type.Optional(Type.Object({
       extractorIntervalMs: Type.Optional(Type.Number({ default: 1_200_000, description: "v2.5.4: 后台三元组提取定时器间隔 ms（默认 20min，本地 LLM 吞吐有限，避免抢占主会话资源）" })),
       maintenanceIntervalMs: Type.Optional(Type.Number({ default: 6 * 3600_000 })),
+      maintenanceInitialDelayMs: Type.Optional(Type.Number({ default: 1_800_000, description: "v2.5.4: maintenance 首次启动延迟 ms（默认 30min，避免启动初期 compaction/community summary 抢 LLM 导致 503）" })),
       interimTurnsThreshold: Type.Optional(Type.Number({ default: 15, description: "v2.5.4: 中间轮 assistant 文本提取的轮数节流阈值（默认 15 轮），满 N 轮才批量入队，纳入 autoTurn 调优" })),
+    })),
+    // ── v2.5.4 社区摘要节流配置 ────────────
+    communitySummary: Type.Optional(Type.Object({
+      maxPerBatch: Type.Optional(Type.Number({ default: 5, description: "单次 maintenance 最多摘要的社区数（默认 5，超过留到下次 maintenance）" })),
+      interCallSleepMs: Type.Optional(Type.Number({ default: 3_000, description: "两个社区摘要之间的间隔 ms（默认 3s，避免连打 LLM）" })),
     })),
     // ── v2.5.x 心跳自愈 ────────────
     heartbeat: Type.Optional(Type.Object({
@@ -1816,8 +1839,9 @@ export default definePluginEntry({
         // v2.5.x: self-init 已启动定时器，避免宿主 register() 重复 setInterval（旧 timer 泄漏）
         if (_maintenanceTimer) return;
         const interval = _cfg?.background?.maintenanceIntervalMs ?? 6 * 3600_000;
-        // 启动后延迟 5 分钟执行第一次，避免与初始化竞争
-        const initialDelay = 5 * 60_000;
+        // v2.5.4: 启动后延迟从 5min→30min（默认），可配置。避免启动初期
+        // lossless-claw compaction 与 community summary 抢 LLM 导致 503
+        const initialDelay = getMaintenanceInitialDelayMs();
         const runOnce = async () => {
           if (!_driver || !_cfg) return;
           // v2.3.2 S3: 重入保护 — 上一次 tick 仍在执行时跳过本次

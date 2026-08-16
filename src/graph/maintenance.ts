@@ -213,7 +213,8 @@ export async function runMaintenance(
     // ── Phase 4: Community Summaries (optional, needs LLM) ──
     if (llm && communityResult.communities.size > 0) {
       try {
-        communitySummaries = await summarizeCommunities(driver, communityResult.communities, llm, embedFn);
+        // v2.5.4: 透传 cfg，用于社区摘要的批量上限、间隔、熔断等节流参数
+        communitySummaries = await summarizeCommunities(driver, communityResult.communities, llm, embedFn, false, cfg);
         log.info("community summaries", { count: communitySummaries });
       } catch (err) {
         log.warn("community summaries failed", { error: String(err) });
