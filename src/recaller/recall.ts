@@ -102,7 +102,14 @@ export class Recaller {
     const embedPromise = (async (): Promise<number[] | undefined> => {
       if (!this.embed) return undefined;
       // v2.3.2 阶段三: embed 熔断器 — OPEN 时跳过 embed 重试链路（~9s），直接降级 FTS
-      const breaker = getCircuitBreaker("embed");
+      // v2.5.4: 专项参数：失败阈值 3（默认 5）、cooldown 15s（默认 60s）、时间窗口衰减 30s。
+      //   之前默认 cooldown=60s 太长，Ollama 短暂 503 后会进入 60s 纯 FTS 召回期，
+      //   导致社区/关联节点完全靠关键词匹配不到，graph-adapter 收到 0 节点报 error。
+      const breaker = getCircuitBreaker("embed", {
+        failureThreshold: 3,
+        cooldownMs: 15_000,
+        failureWindowMs: 30_000,
+      });
       if (!breaker.allow()) {
         log?.warn?.("[recall] embed circuit OPEN, skip embed → FTS fallback");
         return undefined;
@@ -542,8 +549,22 @@ export class Recaller {
     limit: number,
     precomputedVec?: number[],
   ): Promise<RecallResult> {
+    // v2.5.4: 先判定「无向量可用」直接早退出，不进入 try 体，避免被 catch 捕获
+    // 产生误导性 "recall-generalized failed" warn。这是正常降级路径，不应打 warn。
+    //   情况1：未配置 embed 且入口也没预计算向量；
+    //   情况2：embed 熔断器已 OPEN（入口返回了 undefined），此时不应再发起请求。
     if (!this.embed && !precomputedVec?.length) {
       return { nodes: [], edges: [], tokenEstimate: 0 };
+    }
+    if (!precomputedVec?.length) {
+      const breaker = getCircuitBreaker("embed", {
+        failureThreshold: 3,
+        cooldownMs: 15_000,
+        failureWindowMs: 30_000,
+      });
+      if (!breaker.allow()) {
+        return { nodes: [], edges: [], tokenEstimate: 0 };
+      }
     }
 
     const tGen = Date.now();
@@ -554,8 +575,21 @@ export class Recaller {
       if (precomputedVec?.length) {
         vec = precomputedVec;
       } else {
+        // v2.5.4: 二次尝试 embed 前同样走专项熔断器（避免熔断器 OPEN 时这里再发请求打 Ollama）
+        const breaker = getCircuitBreaker("embed", {
+          failureThreshold: 3,
+          cooldownMs: 15_000,
+          failureWindowMs: 30_000,
+        });
+        if (!breaker.allow()) return { nodes: [], edges: [], tokenEstimate: 0 };
         const tEmbed = Date.now();
-        vec = await this.embed!(query);
+        try {
+          vec = await this.embed!(query);
+          breaker.recordSuccess();
+        } catch (e) {
+          breaker.recordFailure();
+          throw e; // 交给外层统一 catch
+        }
         logPhase("vec_embed", Date.now() - tEmbed, {
           context: "recall_generalized_fallback",
         });
