@@ -104,6 +104,12 @@ const _interimSeen = new Set<string>();
 let _interimTurnBuf: string[] = [];
 let _interimTurnCount = 0;
 
+// v2.5.4: 最近一次会话标识缓存（兜底用）。
+//   after_tool_call / llm_output 钩子的 event 和 rawCtx 不一定携带 sessionKey，
+//   但 corpusSupplement.search/get 调用时会通过 agentSessionKey 记录到 SessionRecallCache。
+//   此变量在 search/get 被调用时更新，作为钩子中 sessionKey 缺失时的降级来源。
+let _lastSessionKey: string | undefined = undefined;
+
 /**
  * 读取中间轮 assistant 文本提取的轮数节流阈值
  * 优先使用 cfg.background.interimTurnsThreshold，回退到 INTERIM_TURNS_DEFAULT
@@ -695,6 +701,13 @@ function startBackgroundExtractor(
       // 此处周期性消费静默超过 90s 的 session，用 get() 信号直接更新 M。
       await flushStaleFeedback(90_000, logger);
 
+      // v2.5.4: 消费活跃 session 的积压 get 信号（不依赖静默时间）。
+      //   长任务中 agent 持续调用 memory_search/get → lastAccess 不断更新 →
+      //   consumeStale(90s) 永远不触发。但 get() 信号（确定性正反馈）已堆积，
+      //   M 矩阵应在此间隔内增量更新，而非等 agent_end。
+      //   consumeActiveGetSignals 只取 get 信号、保留 records 供 agent_end judge。
+      await flushActiveGetSignals(logger);
+
       // v2.5.4: 消费中间 assistant 文本队列并入库（长任务期间关键数据及时入图）
       await processInterimQueue(logger);
     } catch (err) {
@@ -752,6 +765,35 @@ async function flushStaleFeedback(maxAgeMs: number, logger: LoggerLike): Promise
     }
   } catch (flushErr) {
     logger?.warn?.(`[graph-memory-pro] stale-session feedback flush failed: ${flushErr}`);
+  }
+}
+
+/**
+ * v2.5.4: 刷新活跃 session 的积压 get 信号（不依赖静默时间）。
+ *
+ * 与 flushStaleFeedback 不同，此方法调用 consumeActiveGetSignals()，
+ * 对每个有积压 getNodeIds 的活跃 session 直接消费 get 信号更新 M。
+ * 解决长任务中 agent 持续调用工具导致 lastAccess 不断更新、
+ * consumeStale(90s) 永远不触发、M 矩阵一直不更新的问题。
+ *
+ * 只取 get 信号（确定性正反馈），保留 records 供 agent_end 做完整 judge。
+ */
+async function flushActiveGetSignals(logger: LoggerLike): Promise<void> {
+  if (!_recaller || _cfg?.associationMatrix?.enabled !== true) return;
+  try {
+    const activeSessions = getSessionRecallCache().consumeActiveGetSignals();
+    for (const { sessionKey, query, getNodeIds, nodeIds } of activeSessions) {
+      if (getNodeIds.length === 0) continue;
+      await _recaller.processGetBasedFeedback(
+        query,
+        nodeIds,
+        getNodeIds,
+        sessionKey,
+      );
+      logger?.info?.(`[graph-memory-pro] active-session feedback flushed (session=${sessionKey}, getHits=${getNodeIds.length}, recalled=${nodeIds.length})`);
+    }
+  } catch (flushErr) {
+    logger?.warn?.(`[graph-memory-pro] active-session feedback flush failed: ${flushErr}`);
   }
 }
 
@@ -1643,14 +1685,20 @@ export default definePluginEntry({
     //   - agent_end：完整 judge 判定 used/unused + M 更新（L1 完整层）
     // consumeGetSignals 只取 get 信号、保留召回记录，避免与 agent_end 冲突。
     // ─────────────────────────────────────────────────────────────────
-    api.registerHook("after_tool_call", async (event: { toolName?: string }, rawCtx: unknown) => {
+    api.registerHook("after_tool_call", async (event: { toolName?: string; sessionKey?: string; sessionId?: string; agentSessionKey?: string }, rawCtx: unknown) => {
       if (_cfg?.autoFeedback?.enabled === false) return;
       if (!_recaller || _cfg?.associationMatrix?.enabled !== true) return;
       const toolName = event?.toolName ?? "";
       if (!MEMORY_TOOL_NAMES.has(toolName)) return;
 
-      const ctx = (rawCtx ?? {}) as { sessionKey?: string; sessionId?: string };
-      const sessionKey = ctx?.sessionKey ?? ctx?.sessionId;
+      // v2.5.4: 多途径提取 sessionKey —— event → rawCtx → _lastSessionKey 降级链
+      //   宿主 after_tool_call 钩子的 event/rawCtx 结构不一定包含 sessionKey，
+      //   但 corpusSupplement.search/get 被调用时会更新 _lastSessionKey，作为兜底。
+      const ctx = (rawCtx ?? {}) as { sessionKey?: string; sessionId?: string; agentSessionKey?: string };
+      const sessionKey =
+        event?.sessionKey ?? event?.sessionId ?? event?.agentSessionKey ??
+        ctx?.sessionKey ?? ctx?.sessionId ?? ctx?.agentSessionKey ??
+        _lastSessionKey;
       if (!sessionKey) return;
 
       const signals = getSessionRecallCache().consumeGetSignals(sessionKey);
@@ -1669,15 +1717,17 @@ export default definePluginEntry({
     // 本钩子将中间轮 assistant 文本过滤去重后写入 extract-interim-queue.jsonl，
     // 由后台 extractor 定时器消费提取入库（不阻塞主流程）。
     // ─────────────────────────────────────────────────────────────────
-    api.registerHook("llm_output", async (event: { assistantTexts?: string[]; sessionId?: string }, rawCtx: unknown) => {
+    api.registerHook("llm_output", async (event: { assistantTexts?: string[]; sessionId?: string; sessionKey?: string; agentSessionKey?: string }, rawCtx: unknown) => {
       if (!_driver || !_extractor || !_llm) return;
       const texts = Array.isArray(event?.assistantTexts) ? event.assistantTexts : [];
       if (texts.length === 0) return;
 
-      // v2.5.4: 按轮数节流 —— 累积最近几轮的中间文本，满 interimTurnsThreshold 轮才批量入队一次。
-      // 避免后台提取 LLM 频率超过主对话 LLM 频率（本地 LLM 吞吐有限时过于频繁会抢占资源）。
-      const ctx = (rawCtx ?? {}) as { sessionKey?: string; sessionId?: string };
-      const sessionKey = ctx?.sessionKey ?? ctx?.sessionId ?? event?.sessionId;
+      // v2.5.4: 多途径提取 sessionKey，与 after_tool_call 一致的降级链
+      const ctx = (rawCtx ?? {}) as { sessionKey?: string; sessionId?: string; agentSessionKey?: string };
+      const sessionKey =
+        event?.sessionKey ?? event?.sessionId ?? event?.agentSessionKey ??
+        ctx?.sessionKey ?? ctx?.sessionId ?? ctx?.agentSessionKey ??
+        _lastSessionKey;
       for (const t of texts) {
         if (typeof t !== "string" || t.trim().length < INTERIM_MIN_LEN) continue;
         const trimmed = t.trim().slice(0, INTERIM_MAX_LEN);
@@ -1815,7 +1865,21 @@ export default definePluginEntry({
               } catch (flushErr) {
                 logger?.warn?.(`[graph-memory-pro] stale-session feedback flush failed: ${flushErr}`);
               }
+              // v2.5.4: 消费活跃 session 的积压 get 信号（不依赖静默时间）
+              try {
+                const activeSessions = getSessionRecallCache().consumeActiveGetSignals();
+                for (const { sessionKey, query, getNodeIds, nodeIds } of activeSessions) {
+                  if (getNodeIds.length === 0) continue;
+                  await _recaller.processGetBasedFeedback(query, nodeIds, getNodeIds, sessionKey);
+                  logger?.info?.(`[graph-memory-pro] active-session feedback flushed (session=${sessionKey}, getHits=${getNodeIds.length}, recalled=${nodeIds.length})`);
+                }
+              } catch (flushErr) {
+                logger?.warn?.(`[graph-memory-pro] active-session feedback flush failed: ${flushErr}`);
+              }
             }
+
+            // v2.5.4: 消费中间 assistant 文本队列并入库（长任务期间关键数据及时入图）
+            await processInterimQueue(logger);
           } catch (err) {
             logger?.warn?.(`[graph-memory-pro] extractor tick failed: ${err}`);
           } finally {
@@ -1946,6 +2010,7 @@ export default definePluginEntry({
           const nodes = await searchNodes(_driver, params.query, limit);
           // v2.3.5 方案 A: 记录会话级召回，供 agent_end 自动反馈采集
           if (params.agentSessionKey) {
+            _lastSessionKey = params.agentSessionKey; // v2.5.4: 缓存供钩子降级
             getSessionRecallCache().recordRecall(
               params.agentSessionKey,
               params.query,
@@ -1988,6 +2053,7 @@ export default definePluginEntry({
           if (!n) return null;
           // v2.3.5 方案 C: get() 展开视为强使用信号，记录到 session 缓存
           if (params.agentSessionKey) {
+            _lastSessionKey = params.agentSessionKey; // v2.5.4: 缓存供钩子降级
             getSessionRecallCache().recordGet(params.agentSessionKey, n.id);
           }
           return {

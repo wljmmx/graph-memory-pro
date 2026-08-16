@@ -191,6 +191,38 @@ export class SessionRecallCache {
     return result;
   }
 
+  /**
+   * v2.5.4: 消费所有有积压 get() 信号但尚未被 agent_end 处理的活跃 session。
+   *
+   * 与 consumeStale 不同，此方法不依赖"静默时间"——长任务中 agent 持续调用
+   * memory_search / get() 会不断更新 lastAccess，导致 consumeStale(90s) 永远
+   * 不触发。但 get() 信号（确定性正反馈）已经堆积了，M 矩阵应该及时更新。
+   *
+   * 此方法对每个有积压 getNodeIds 的 session 调用 consumeGetSignals（只取 get
+   * 信号、保留 records），返回的信号由调用方更新 M 矩阵。agent_end 触发时
+   * 仍可从保留的 records 中做完整 judge。
+   *
+   * @returns 有积压 get 信号的 session 列表
+   */
+  consumeActiveGetSignals(): Array<{ sessionKey: string; query: string; getNodeIds: string[]; nodeIds: string[] }> {
+    const result: Array<{ sessionKey: string; query: string; getNodeIds: string[]; nodeIds: string[] }> = [];
+    for (const [key, entry] of this.sessions) {
+      if (entry.getNodeIds.size === 0) continue;
+      // 取最近一次召回的 query
+      let lastQuery = "";
+      const nodeIdSet = new Set<string>();
+      for (const r of entry.records) {
+        lastQuery = r.query;
+        for (const id of r.nodeIds) nodeIdSet.add(id);
+      }
+      const getNodeIds = Array.from(entry.getNodeIds);
+      entry.getNodeIds.clear(); // 清空 get 信号（已消费），保留 records 供 agent_end
+      entry.lastAccess = Date.now();
+      result.push({ sessionKey: key, query: lastQuery, getNodeIds, nodeIds: Array.from(nodeIdSet) });
+    }
+    return result;
+  }
+
   /** 当前缓存的 session 数（健康检查/诊断用） */
   size(): number {
     return this.sessions.size;
