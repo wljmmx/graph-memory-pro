@@ -1214,14 +1214,26 @@ async function doGatewayInit(api: any, logger: LoggerLike): Promise<void> {
 
   // 3. 初始化 LLM / Embedding
   const runtimeLlm = api.runtime?.llm;
-  // v2.6.x: 从 SDK 注入的 runtime 配置快照提取 agent 当前激活模型 + provider 注册表，
-  // 供 createRuntimeCompleteFn 解析真实 provider 端点（绕过 OpenClaw 网关）。
+  // v2.6.x: 从 SDK 运行时上下文提取 agent 当前生效模型 + provider 注册表，供
+  // createRuntimeCompleteFn 解析真实 provider 端点（绕过 OpenClaw 网关）。
+  // 当前生效模型优先取 runtime.llm.model（runtimeContext.llm.model，可反映会话级
+  // /model override，区别于配置默认的 agents.defaults.model.primary）。
   const getAgentModelCtx = (): AgentModelContext => {
     try {
       const snapshot = api.runtime?.config?.current?.() ?? {};
       const providers = snapshot?.models?.providers ?? snapshot?.providers ?? {};
-      const primary = (snapshot?.agents?.defaults?.model?.primary ?? snapshot?.agents?.defaults?.model ?? "").toString();
-      return { currentModel: primary, providers };
+      const runtimeModel =
+        runtimeLlm?.model?.toString?.() ??
+        snapshot?.llm?.model?.toString?.() ??
+        snapshot?.runtimeContext?.llm?.model?.toString?.() ??
+        "";
+      const primary = (
+        snapshot?.agents?.defaults?.model?.primary ??
+        snapshot?.agents?.defaults?.model ??
+        ""
+      ).toString();
+      const currentModel = (runtimeModel || primary).trim() || undefined;
+      return { currentModel, providers };
     } catch {
       return {};
     }

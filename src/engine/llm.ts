@@ -440,7 +440,10 @@ export interface ResolvedLlmEndpoint {
 
 function pickProviderBaseURL(p: AgentProviderInfo): string | undefined {
   const v = p?.baseURL?.trim() || p?.baseUrl?.trim();
-  return v || undefined;
+  if (!v) return undefined;
+  // 与 createOpenAICompatibleComplete 的 baseURL 清洗一致：去除反引号/首尾空白/尾部斜杠
+  // （openclaw.json 手工填写时可能用反引号包裹 URL）。
+  return v.replace(/`/g, "").replace(/\/+$/, "") || undefined;
 }
 
 function providerModelNames(p: AgentProviderInfo): string[] {
