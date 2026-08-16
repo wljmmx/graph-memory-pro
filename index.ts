@@ -35,7 +35,7 @@ import { resolveBenchmarkDataDir } from "./src/benchmark/dataDir.ts";
 import { reEmbedNodes } from "./src/graph/reembed.ts";
 import { setExternalLogger, createLogger } from "./src/logger.ts";
 import { setTimingEnabled } from "./src/timing.ts";
-import { extractInBackground } from "./src/services/extract-service.ts";  // v2.3.4 ARCH-1: 从 index.ts 拆出
+import { extractInBackground, extractInterimTexts } from "./src/services/extract-service.ts";  // v2.3.4 ARCH-1: 从 index.ts 拆出 // v2.5.4: 中间 assistant 文本提取
 import { getSessionRecallCache, resetSessionRecallCache } from "./src/recaller/session-recall-cache.ts";
 import type { TuneCycleResult } from "./src/evolution/auto-tuner.ts";
 import { startHeartbeat, type HeartbeatHandle, type HeartbeatProbe } from "./src/server/heartbeat.ts";  // v2.5.x 心跳自愈
@@ -86,6 +86,16 @@ const MEMORY_TOOL_NAMES = new Set([
   "recall_memory",
   "corpus_search",
 ]);
+
+// v2.5.4: 中间轮 assistant 文本提取
+//   INTERIM_MIN_LEN: 短于该长度的 assistant 文本（如"让我搜索一下"）无提取价值，直接跳过
+//   INTERIM_MAX_LEN: 单条文本截断长度，避免超大文本灌入 LLM
+//   INTERIM_SEEN_LIMIT: 内存去重集合上限（防内存无限增长）
+const INTERIM_MIN_LEN = 40;
+const INTERIM_MAX_LEN = 4000;
+const INTERIM_SEEN_LIMIT = 4000;
+// 内容 hash 去重集合（进程内，防同一段中间文本被反复提取入库）
+const _interimSeen = new Set<string>();
 
 let _driver: Driver | null = null;
 let _cfg: GmConfig | null = null;
@@ -633,6 +643,9 @@ function startBackgroundExtractor(
       // agent_end 尚未触发，SessionRecallCache 中的 get() 信号一直堆积。
       // 此处周期性消费静默超过 90s 的 session，用 get() 信号直接更新 M。
       await flushStaleFeedback(90_000, logger);
+
+      // v2.5.4: 消费中间 assistant 文本队列并入库（长任务期间关键数据及时入图）
+      await processInterimQueue(logger);
     } catch (err) {
       logger?.warn?.(`[graph-memory-pro] extractor tick failed: ${err}`);
     } finally {
@@ -688,6 +701,101 @@ async function flushStaleFeedback(maxAgeMs: number, logger: LoggerLike): Promise
     }
   } catch (flushErr) {
     logger?.warn?.(`[graph-memory-pro] stale-session feedback flush failed: ${flushErr}`);
+  }
+}
+
+/**
+ * v2.5.4: 计算文本内容 hash（用于中间 assistant 文本去重）。
+ */
+function simpleHash(text: string): string {
+  let h = 5381;
+  for (let i = 0; i < text.length; i++) {
+    h = ((h << 5) + h) ^ text.charCodeAt(i);
+  }
+  return (h >>> 0).toString(36);
+}
+
+/**
+ * v2.5.4: 将中间轮 assistant 文本追加到中间提取队列（fire-and-forget，不阻塞）。
+ *
+ * 供 llm_output 钩子调用。过滤短文本、截断超长文本、内容 hash 去重，
+ * 然后异步追加到 extract-interim-queue.jsonl，由后台 extractor 消费提取入库。
+ */
+async function enqueueInterimAssistant(
+  sessionKey: string | undefined,
+  texts: string[],
+): Promise<void> {
+  if (texts.length === 0) return;
+  const allowed = texts
+    .filter((t): t is string => typeof t === "string" && t.trim().length >= INTERIM_MIN_LEN)
+    .slice(0, 10)
+    .map((t) => t.trim().slice(0, INTERIM_MAX_LEN))
+    .filter((t) => {
+      const h = simpleHash(t);
+      if (_interimSeen.has(h)) return false;
+      if (_interimSeen.size >= INTERIM_SEEN_LIMIT) _interimSeen.clear();
+      _interimSeen.add(h);
+      return true;
+    });
+  if (allowed.length === 0) return;
+
+  try {
+    const { appendFile } = await import('node:fs/promises');
+    const { join } = await import('node:path');
+    const queuePath = join(
+      process.env.HOME || process.env.USERPROFILE || '.',
+      '.openclaw', 'graph-memory-pro', 'extract-interim-queue.jsonl'
+    );
+    const lines = allowed.map((t) => JSON.stringify({ sessionKey: sessionKey ?? null, text: t, ts: Date.now() }));
+    await appendFile(queuePath, lines.join("\n") + "\n");
+  } catch (err) {
+    log.warn(`[graph-memory-pro] enqueue interim assistant failed: ${err}`);
+  }
+}
+
+/**
+ * v2.5.4: 消费中间 assistant 提取队列并入库。
+ *
+ * 由后台 extractor 定时器调用。读取 extract-interim-queue.jsonl，
+ * 用 extractInterimTexts 逐条提取写入 Neo4j，处理完的部分清出队列。
+ */
+async function processInterimQueue(logger: LoggerLike): Promise<void> {
+  if (!_driver || !_extractor || !_llm) return;
+  try {
+    const { readFile, writeFile, mkdir } = await import('node:fs/promises');
+    const { join, dirname } = await import('node:path');
+    const queuePath = join(
+      process.env.HOME || process.env.USERPROFILE || '.',
+      '.openclaw', 'graph-memory-pro', 'extract-interim-queue.jsonl'
+    );
+    let content = '';
+    try {
+      content = await readFile(queuePath, 'utf-8');
+    } catch {
+      return;
+    }
+    if (!content || !content.trim()) return;
+    const lines = content.split("\n").filter(Boolean);
+    if (lines.length === 0) return;
+
+    const texts: string[] = [];
+    for (const line of lines) {
+      try {
+        const item = JSON.parse(line);
+        if (typeof item?.text === "string" && item.text.trim()) texts.push(item.text);
+      } catch { /* 跳过损坏行 */ }
+    }
+    if (texts.length === 0) return;
+
+    const extracted = await extractInterimTexts(_extractor, _driver, _llm, _cfg, texts);
+    // 处理完即清空队列（失败条目由去重 + 下次重提兜底）
+    await mkdir(dirname(queuePath), { recursive: true }).catch(() => {});
+    await writeFile(queuePath, "").catch(() => {});
+    if (extracted > 0) {
+      logger?.info?.(`[graph-memory-pro] interim extractor: ${extracted} assistant turns extracted to graph`);
+    }
+  } catch (err) {
+    logger?.warn?.(`[graph-memory-pro] interim queue processing failed: ${err}`);
   }
 }
 
@@ -1488,6 +1596,26 @@ export default definePluginEntry({
       if (!signals || signals.getNodeIds.length === 0) return;
       await flushGetSignals(sessionKey, signals.query, signals.getNodeIds, [], log);
     }, { name: "graph-memory-pro-tool-feedback" });
+
+    // ─────────────────────────────────────────────────────────────────
+    // v2.5.4 L0: llm_output 实时提取（长任务中间轮 assistant 数据及时入图）
+    //
+    // llm_output 在模型每次输出后触发（含中间轮工具调用），assistantTexts 携带
+    // 该轮 assistant 文本。长任务中关键数据往往出现在中间轮 assistant 输出，
+    // 而现有提取链路只消费最终 user/assistant 对话对，导致这些数据不入库、
+    // 后续轮次 recall 无法命中。
+    //
+    // 本钩子将中间轮 assistant 文本过滤去重后写入 extract-interim-queue.jsonl，
+    // 由后台 extractor 定时器消费提取入库（不阻塞主流程）。
+    // ─────────────────────────────────────────────────────────────────
+    api.registerHook("llm_output", async (event: { assistantTexts?: string[]; sessionId?: string }, rawCtx: unknown) => {
+      if (!_driver || !_extractor || !_llm) return;
+      const texts = Array.isArray(event?.assistantTexts) ? event.assistantTexts : [];
+      if (texts.length === 0) return;
+      const ctx = (rawCtx ?? {}) as { sessionKey?: string; sessionId?: string };
+      const sessionKey = ctx?.sessionKey ?? ctx?.sessionId ?? event?.sessionId;
+      await enqueueInterimAssistant(sessionKey, texts);
+    }, { name: "graph-memory-pro-interim-extract" });
 
     // ─────────────────────────────────────────────────────────────────
     // P0-1: 移除 before_prompt_build 钩子

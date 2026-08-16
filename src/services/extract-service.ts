@@ -53,68 +53,7 @@ export async function extractInBackground(
       llmBreaker.recordSuccess();
       if (result.nodes.length > 0) {
         extracted++;
-        const now = Date.now();
-
-        // v2.3.1 P0-3 性能优化: 批量 upsert 节点（UNWIND + MERGE）
-        // v2.4.1 统一: 与重建流程共用确定性 id（gn-hash(type|name)）+ type 大写归一，
-        // 使两条流程 MERGE 命中同一节点实现更新，而非各写一套重复节点。
-        const nodeIdMap = new Map<string, string>();
-        const nodesToWrite: GmNode[] = [];
-        for (const enode of result.nodes) {
-          const normalizedType = enode.type.toUpperCase() as NodeType;
-          const id = deterministicNodeId(normalizedType, enode.name);
-          // v2.4.1: 以规范化名（小写去空格）建索引，供边引用名容错匹配
-          nodeIdMap.set(normName(enode.name), id);
-          nodesToWrite.push({
-            id,
-            type: normalizedType,
-            name: enode.name,
-            description: enode.description,
-            content: enode.content,
-            status: "active",
-            communityId: undefined,
-            pagerank: 0,
-            validatedCount: 0,
-            createdAt: now,
-            updatedAt: now,
-            embeddingModel: cfg?.embedding?.model,
-          });
-        }
-        try {
-          await batchUpsertNodes(driver, nodesToWrite);
-        } catch (e) {
-          // v2.3.2 S2 稳定性修复: 批量失败时回退到逐条 upsert，保证部分成功（防数据丢失）
-          if (process.env.GM_DEBUG) logger?.debug?.(`  [graph-memory-pro] batchUpsertNodes failed, fallback to single upsert: ${e}`);
-          await Promise.allSettled(nodesToWrite.map(n => upsertNode(driver, n, cfg ?? undefined)));
-        }
-
-        // v2.3.1 P0-3: 批量 upsert 边
-        const edgesToWrite: GmEdge[] = [];
-        for (const eedge of result.edges) {
-          // v2.4.1: 边引用名用规范化匹配，避免大小写/空格差异导致 0 条边
-          const fromId = nodeIdMap.get(normName(eedge.fromName));
-          const toId = nodeIdMap.get(normName(eedge.toName));
-          if (!fromId || !toId) continue;
-          edgesToWrite.push({
-            id: `edge-${now}-${Math.random().toString(36).slice(2, 8)}`,
-            type: eedge.type,
-            fromId,
-            toId,
-            instruction: eedge.instruction,
-            condition: eedge.condition,
-            weight: 1,
-            createdAt: now,
-            updatedAt: now,
-          });
-        }
-        if (edgesToWrite.length > 0) {
-          try {
-            await batchUpsertEdges(driver, edgesToWrite);
-          } catch (e) {
-            if (process.env.GM_DEBUG) logger?.debug?.(`  [graph-memory-pro] batchUpsertEdges failed, fallback to single upsert: ${e}`);
-            await Promise.allSettled(edgesToWrite.map(e => upsertEdge(driver, e)));
-          }
-        }
+        await writeExtractResult(driver, cfg, result);
       }
     } catch (err) {
       llmBreaker.recordFailure();
@@ -126,6 +65,133 @@ export async function extractInBackground(
   }
   // v2.4.2: 返回本批被取出（交由提取）的对数，供调用方据此标记已处理的 GmMessage。
   return pairs.length;
+}
+
+/**
+ * v2.5.4: 将一次提取结果（节点+边）写入 Neo4j。
+ *
+ * 从 extractInBackground 抽出，供 user/assistant 对话对与中间 assistant 文本
+ * 两条提取路径复用，保证写入逻辑（确定性 id / 批量 upsert / 逐条回退）一致。
+ *
+ * @param driver Neo4j driver
+ * @param cfg 插件配置（读取 embedding.model）
+ * @param result 提取结果（nodes + edges）
+ */
+async function writeExtractResult(
+  driver: Driver,
+  cfg: GmConfig | null,
+  result: ExtractResult,
+): Promise<void> {
+  const now = Date.now();
+
+  // v2.3.1 P0-3 性能优化: 批量 upsert 节点（UNWIND + MERGE）
+  // v2.4.1 统一: 与重建流程共用确定性 id（gn-hash(type|name)）+ type 大写归一，
+  // 使两条流程 MERGE 命中同一节点实现更新，而非各写一套重复节点。
+  const nodeIdMap = new Map<string, string>();
+  const nodesToWrite: GmNode[] = [];
+  for (const enode of result.nodes) {
+    const normalizedType = enode.type.toUpperCase() as NodeType;
+    const id = deterministicNodeId(normalizedType, enode.name);
+    // v2.4.1: 以规范化名（小写去空格）建索引，供边引用名容错匹配
+    nodeIdMap.set(normName(enode.name), id);
+    nodesToWrite.push({
+      id,
+      type: normalizedType,
+      name: enode.name,
+      description: enode.description,
+      content: enode.content,
+      status: "active",
+      communityId: undefined,
+      pagerank: 0,
+      validatedCount: 0,
+      createdAt: now,
+      updatedAt: now,
+      embeddingModel: cfg?.embedding?.model,
+    });
+  }
+  try {
+    await batchUpsertNodes(driver, nodesToWrite);
+  } catch (e) {
+    // v2.3.2 S2 稳定性修复: 批量失败时回退到逐条 upsert，保证部分成功（防数据丢失）
+    if (process.env.GM_DEBUG) console.debug(`  [graph-memory-pro] batchUpsertNodes failed, fallback to single upsert: ${e}`);
+    await Promise.allSettled(nodesToWrite.map(n => upsertNode(driver, n, cfg ?? undefined)));
+  }
+
+  // v2.3.1 P0-3: 批量 upsert 边
+  const edgesToWrite: GmEdge[] = [];
+  for (const eedge of result.edges) {
+    // v2.4.1: 边引用名用规范化匹配，避免大小写/空格差异导致 0 条边
+    const fromId = nodeIdMap.get(normName(eedge.fromName));
+    const toId = nodeIdMap.get(normName(eedge.toName));
+    if (!fromId || !toId) continue;
+    edgesToWrite.push({
+      id: `edge-${now}-${Math.random().toString(36).slice(2, 8)}`,
+      type: eedge.type,
+      fromId,
+      toId,
+      instruction: eedge.instruction,
+      condition: eedge.condition,
+      weight: 1,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+  if (edgesToWrite.length > 0) {
+    try {
+      await batchUpsertEdges(driver, edgesToWrite);
+    } catch (e) {
+      if (process.env.GM_DEBUG) console.debug(`  [graph-memory-pro] batchUpsertEdges failed, fallback to single upsert: ${e}`);
+      await Promise.allSettled(edgesToWrite.map(e => upsertEdge(driver, e)));
+    }
+  }
+}
+
+/**
+ * v2.5.4: 批量提取中间轮 assistant 文本并入库。
+ *
+ * 长任务中 agent 多轮工具调用期间，关键数据往往出现在中间轮 assistant 输出
+ * （进度/发现/总结），而现有提取链路只喂最终 user/assistant 对话对，导致
+ * 这些数据不入库、后续轮次 recall 无法命中。
+ *
+ * 此函数消费中间 assistant 文本队列，逐条提取（user 段为空，assistant 段为文本）
+ * 并写入 Neo4j，让中间输出过程中即可被 recall。
+ *
+ * @param extractor 三元组提取器
+ * @param driver Neo4j driver
+ * @param llm LLM 补全函数
+ * @param cfg 插件配置
+ * @param texts 中间 assistant 文本列表
+ * @returns 成功提取并入库的条数
+ */
+export async function extractInterimTexts(
+  extractor: Extractor | null,
+  driver: Driver | null,
+  llm: CompleteFn | null,
+  cfg: GmConfig | null,
+  texts: string[],
+): Promise<number> {
+  if (!extractor || !driver || !llm || texts.length === 0) return 0;
+
+  const llmBreaker = getCircuitBreaker("llm");
+  if (!llmBreaker.allow()) return 0;
+
+  let extracted = 0;
+  const maxTexts = 20;
+  const batch = texts.slice(0, maxTexts);
+  for (const text of batch) {
+    try {
+      const result = await extractor.extract(llm, "", text);
+      llmBreaker.recordSuccess();
+      if (result.nodes.length > 0) {
+        extracted++;
+        await writeExtractResult(driver, cfg, result);
+      }
+    } catch (err) {
+      llmBreaker.recordFailure();
+      if (process.env.GM_DEBUG) console.debug(`  [graph-memory-pro] extract interim text failed: ${err}`);
+    }
+  }
+  return extracted;
 }
 
 /**
