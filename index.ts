@@ -476,6 +476,39 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
       _recaller ?? undefined,
     );
     log.info("API server started (module-level, full init)");
+
+    // 7. 启动 MCP Server（7800）— v2.5.x: self-init 路径此前遗漏 MCP 启动，
+    //    仅 doGatewayInit 的 registerService 会启动，导致 self-init 部署下 7800 无监听。
+    //    现与 apiServer 对称，在 self-init 模式下按 cfg.mcp.enabled 显式启动。
+    if (cfg.mcp?.enabled === true) {
+      try {
+        const { startMcpServer } = await import("./src/mcp/server.ts");
+        _mcpServerHandle = await startMcpServer(
+          driver, cfg,
+          _llm ?? undefined,
+          _embed ?? undefined,
+          _recaller ?? undefined,
+          _batchEmbed ?? undefined,
+        );
+        // v2.3.3 MCP-1: 启动后健康探测，确认 server 真正就绪（非仅 listen 成功）
+        const port = cfg.mcp?.port ?? 7800;
+        const host = cfg.mcp?.host ?? "127.0.0.1";
+        try {
+          const resp = await fetch(`http://${host}:${port}/health`, { signal: AbortSignal.timeout(3000) });
+          if (resp.ok) {
+            log.info(`[graph-memory-pro] MCP server started + health OK (port=${port})`);
+          } else {
+            log.warn(`[graph-memory-pro] MCP server started but /health returned ${resp.status}`);
+          }
+        } catch (probeErr) {
+          log.warn(`[graph-memory-pro] MCP server started but health probe failed: ${probeErr}`);
+        }
+      } catch (err) {
+        log.error(`[graph-memory-pro] MCP server start failed: ${err}`);
+      }
+    } else {
+      log.info(`[graph-memory-pro] MCP server disabled via config (mcp.enabled=${cfg.mcp?.enabled})`);
+    }
   } catch (err) {
     log.error(`API server start failed: ${err}`);
   }
@@ -1221,6 +1254,8 @@ export default definePluginEntry({
         id: "graph-memory-mcp",
         async start(_ctx: unknown) {
           if (!_driver || !_cfg) return;
+          // v2.5.x: self-init 已启动 MCP，避免重复监听 EADDRINUSE
+          if (_mcpServerHandle) return;
           try {
             const { startMcpServer } = await import("./src/mcp/server.ts");
             _mcpServerHandle = await startMcpServer(
