@@ -392,6 +392,134 @@ interface RuntimeLogger {
   warn?: (...args: unknown[]) => void;
 }
 
+// ─── Agent 提供方解析（v2.6.x）──────────────────────────────────────────
+//
+// 背景：插件通过 api.runtime.llm 调用时会命中 OpenClaw 内置网关地址
+// （runtimeContext.llm.baseURL，如 http://127.0.0.1:18789/v1），而非 agent 实际
+// 使用的 provider 端点。导致"主会话本地模型优先策略"里 agent 用 qwen3.8:27b，
+// 但 runtime 却解析到插件配置的 Qwen3.6-35B-A3B-MTP，加载两个不同本地模型。
+//
+// 修复：从 agent 的 provider 配置（openclaw.json 的 models.providers）解析出
+// 该模型真实 baseURL + 模型名，直接调用底层 provider，绕过网关。匹配规则优先级：
+//   1. provider/model 前缀命中（如 ollama/qwen3.8:27b 的 ollama 前缀）
+//   2. modelId 短 ID 命中（在某 provider 的 models[].id/name 精确或规范化命中）
+//   3. 唯一 provider 兜底（仅配置了一个 provider 时直接使用其 baseUrl）
+
+/** 单个 provider 的模型条目 */
+export interface AgentProviderModel {
+  id?: string;
+  name?: string;
+  [k: string]: unknown;
+}
+
+/** models.providers.<id> 条目（宽松结构，兼容官方配置） */
+export interface AgentProviderInfo {
+  baseUrl?: string;
+  baseURL?: string;
+  apiKey?: string;
+  api?: string;
+  models?: AgentProviderModel[];
+  [k: string]: unknown;
+}
+
+/** agent LLM 上下文（从 runtime 配置快照提取的最小视图） */
+export interface AgentModelContext {
+  /** 当前激活模型 ref，形如 "ollama/qwen3.8:27b" 或裸 "qwen3.8:27b" */
+  currentModel?: string;
+  /** provider 注册表：models.providers 映射 id -> provider 信息 */
+  providers?: Record<string, AgentProviderInfo>;
+}
+
+/** 解析出的真实 LLM 端点（绕过网关） */
+export interface ResolvedLlmEndpoint {
+  baseURL: string;
+  model: string;
+  apiKey?: string;
+  providerId?: string;
+}
+
+function pickProviderBaseURL(p: AgentProviderInfo): string | undefined {
+  const v = p?.baseURL?.trim() || p?.baseUrl?.trim();
+  return v || undefined;
+}
+
+function providerModelNames(p: AgentProviderInfo): string[] {
+  const out: string[] = [];
+  for (const m of p?.models ?? []) {
+    if (typeof m?.id === "string" && m.id) out.push(m.id);
+    if (typeof m?.name === "string" && m.name) out.push(m.name);
+  }
+  return out;
+}
+
+/** 规范化 token：去空格/大小写/分隔符（/ : 空白），用于宽松比对 */
+function normalizeModelToken(s: string): string {
+  return (s ?? "").trim().toLowerCase().replace(/[\s:/]+/g, "");
+}
+
+/** 拆分 "provider/model[...]" → 前缀 + 模型部分（模型部分允许含斜杠，如 qwen3/8b） */
+export function splitModelRef(ref: string): { prefix: string; model: string } {
+  const s = (ref ?? "").trim();
+  const i = s.indexOf("/");
+  if (i <= 0 || i === s.length - 1) return { prefix: "", model: s };
+  return { prefix: s.slice(0, i).trim(), model: s.slice(i + 1).trim() };
+}
+
+/**
+ * 按三级优先级从 agent provider 配置解析当前激活模型的真实端点。
+ * 解析失败或无法唯一确定时返回 null（调用方回退到 runtime LLM 路径）。
+ */
+export function resolveAgentLlmEndpoint(ctx?: AgentModelContext): ResolvedLlmEndpoint | null {
+  const providers = ctx?.providers;
+  if (!providers) return null;
+  const entries = Object.entries(providers).filter(([, p]) => p && typeof p === "object") as [string, AgentProviderInfo][];
+  if (entries.length === 0) return null;
+
+  const current = (ctx?.currentModel ?? "").trim();
+
+  // 1) provider/model 前缀匹配
+  if (current.includes("/")) {
+    const { prefix, model } = splitModelRef(current);
+    const prov = providers[prefix];
+    if (prov) {
+      const baseURL = pickProviderBaseURL(prov);
+      if (baseURL) {
+        const m = model || providerModelNames(prov)[0] || prefix;
+        return { baseURL, model: m, apiKey: prov.apiKey, providerId: prefix };
+      }
+    }
+  }
+
+  // 2) modelId 短 ID 命中：精确或规范化命中某 provider 的模型 id/name
+  const modelPart = current.includes("/") ? splitModelRef(current).model : current;
+  const normTarget = normalizeModelToken(modelPart);
+  let hit: ResolvedLlmEndpoint | null = null;
+  for (const [id, prov] of entries) {
+    const baseURL = pickProviderBaseURL(prov);
+    if (!baseURL) continue;
+    for (const name of providerModelNames(prov)) {
+      if (name.trim() === modelPart || (normTarget && normalizeModelToken(name) === normTarget)) {
+        // 不同 provider 命中同一短 ID → 命中不唯一，视为无法解析
+        if (hit && hit.providerId !== id) return null;
+        if (!hit) hit = { baseURL, model: name.trim(), apiKey: prov.apiKey, providerId: id };
+      }
+    }
+  }
+  if (hit) return hit;
+
+  // 3) 唯一 provider 兜底
+  if (entries.length === 1) {
+    const [id, prov] = entries[0];
+    const baseURL = pickProviderBaseURL(prov);
+    if (baseURL) {
+      const model = modelPart || providerModelNames(prov)[0] || id;
+      return { baseURL, model, apiKey: prov.apiKey, providerId: id };
+    }
+  }
+
+  return null;
+}
+
 /**
  * 创建基于 OpenClaw 主会话 runtime LLM 的补全函数（带 provider 探测 + 缓存）
  *
@@ -411,6 +539,10 @@ export function createRuntimeCompleteFn(
   runtimeLlm: RuntimeLlm,
   fallbackConfig?: LlmConfig,
   logger?: RuntimeLogger,
+  // v2.6.x: 可选 getter，返回 agent 当前激活模型 + provider 注册表（models.providers）。
+  // 能解析出真实端点时直接调用底层 provider，绕过 OpenClaw 网关（避免 runtime 落到
+  // 插件配置模型导致加载两个不同本地模型）。
+  getAgentModelCtx?: () => AgentModelContext,
 ): CompleteFn {
   let decision: "runtime" | "fallback" | null = null;
   let detectPromise: Promise<void> | null = null;
@@ -420,6 +552,58 @@ export function createRuntimeCompleteFn(
   let lastProbeAt = 0;
   // fallback CompleteFn（lazy init — 仅在 decision === "fallback" 时创建）
   let cachedFallback: CompleteFn | null = null;
+
+  // v2.6.x: 解析出的真实 provider 端点直连 CompleteFn（lazy init）。
+  // 以 "baseURL|model" 为指纹，agent /model 切换后自动重建。
+  let cachedDirect: CompleteFn | null = null;
+  let cachedDirectKey: string | null = null;
+
+  /**
+   * v2.6.x: 尝试从 agent provider 配置解析真实端点并构造直连 CompleteFn。
+   * 返回 null 表示无法解析或不应直连（回退到 runtime LLM / fallback 路径）。
+   *
+   * 仅当该端点可被 createCompleteFn 直接鉴权时才直连，避免破坏 OAuth 云端：
+   *   - 提供方给了 apiKey（OpenAI 兼容，任意 baseURL）
+   *   - 本地 Ollama（无需鉴权，命中默认端口 11434 走原生 /api/chat）
+   * 其余（如 OAuth 云端、无法鉴权的第三方）仍走 runtime 网关路径分发。
+   */
+  function getDirect(): CompleteFn | null {
+    let ctx: AgentModelContext;
+    try {
+      ctx = getAgentModelCtx?.() ?? {};
+    } catch (err) {
+      logger?.warn?.(`[graph-memory-pro:llm] agent model context unavailable — ${err}`);
+      return null;
+    }
+    let resolved: ResolvedLlmEndpoint | null;
+    try {
+      resolved = resolveAgentLlmEndpoint(ctx);
+    } catch {
+      resolved = null;
+    }
+    if (!resolved) return null;
+
+    // 鉴权门控：无 apiKey 且非本地 Ollama → 不直连（可能需 OAuth，交给网关）
+    const isLocal = isLocalProvider(resolved.providerId ?? "");
+    const isOllamaPort = /:11434(?:\/|$)/.test(resolved.baseURL);
+    if (!resolved.apiKey && !isLocal && !isOllamaPort) return null;
+
+    const key = `${resolved.baseURL}|${resolved.model}`;
+    if (cachedDirectKey === key) return cachedDirect ?? null;
+    cachedDirect = createCompleteFn({
+      baseURL: resolved.baseURL,
+      model: resolved.model,
+      apiKey: resolved.apiKey,
+      keepAlive: fallbackConfig?.keepAlive,
+      thinking: fallbackConfig?.thinking,
+      maxConcurrency: fallbackConfig?.maxConcurrency,
+    });
+    cachedDirectKey = key;
+    logger?.info?.(
+      `[graph-memory-pro:llm] direct agent provider resolved: providerId=${resolved.providerId} baseURL=${resolved.baseURL} model=${resolved.model}`,
+    );
+    return cachedDirect;
+  }
 
   function getFallback(): CompleteFn | null {
     if (!cachedFallback) {
@@ -545,6 +729,13 @@ export function createRuntimeCompleteFn(
   }
 
   return async (system: string, user: string, signal?: AbortSignal, purpose: string = "unknown"): Promise<string> => {
+    // v2.6.x: 优先使用从 agent provider 配置解析出的真实端点（绕过网关）。
+    // 解析失败/无配置时回退到下方的 runtime 探测分发路径。
+    const direct = getDirect();
+    if (direct) {
+      return direct(system, user, signal, purpose);
+    }
+
     // v2.5.1: 首次调用，或距上次探测超过重探测间隔时，重新探测。
     // 覆盖同 session /model 切换（含 远程→本地 跨路径切换，此时未走 runtime 调用）。
     if (decision === null || Date.now() - lastProbeAt >= RERPROBE_COOLDOWN_MS) {
@@ -569,4 +760,10 @@ export function createRuntimeCompleteFn(
 }
 
 // 导出内部辅助函数供测试使用（仅测试引用，不影响打包）
-export const __test__ = { isLocalProvider, normalizeContent, LOCAL_PROVIDER_KEYWORDS };
+export const __test__ = {
+  isLocalProvider,
+  normalizeContent,
+  LOCAL_PROVIDER_KEYWORDS,
+  resolveAgentLlmEndpoint,
+  splitModelRef,
+};

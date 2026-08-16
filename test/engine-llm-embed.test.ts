@@ -654,6 +654,122 @@ describe("createRuntimeCompleteFn", () => {
 });
 
 // ────────────────────────────────────────────────────────────
+// resolveAgentLlmEndpoint / splitModelRef（v2.6.x 白盒测试）
+// ────────────────────────────────────────────────────────────
+
+describe("resolveAgentLlmEndpoint", () => {
+  const { resolveAgentLlmEndpoint, splitModelRef } = __test__;
+
+  const ollamaProvider = {
+    baseUrl: "http://192.168.1.10:11434",
+    api: "ollama",
+    models: [
+      { id: "qwen3.8:27b", name: "Qwen3 8B" },
+      { id: "qwen3.6-35b", name: "Qwen3 35B" },
+    ],
+  };
+  const openaiProvider = {
+    baseUrl: "https://api.openai.com/v1",
+    apiKey: "sk-test",
+    models: [{ id: "gpt-4o", name: "GPT-4o" }],
+  };
+
+  it("优先级1：provider/model 前缀命中，取该 provider 的 baseURL 与模型名", () => {
+    const ep = resolveAgentLlmEndpoint({
+      currentModel: "ollama/qwen3.8:27b",
+      providers: { ollama: ollamaProvider, openai: openaiProvider },
+    });
+    expect(ep).toEqual({
+      baseURL: "http://192.168.1.10:11434",
+      model: "qwen3.8:27b",
+      apiKey: undefined,
+      providerId: "ollama",
+    });
+  });
+
+  it("优先级1：前缀匹配直接采用 ref 中的模型名（即使不在 provider 模型列表内）", () => {
+    const ep = resolveAgentLlmEndpoint({
+      currentModel: "ollama/qwen3:8b-ctx4k",
+      providers: { ollama: ollamaProvider },
+    });
+    expect(ep?.model).toBe("qwen3:8b-ctx4k");
+    expect(ep?.baseURL).toBe("http://192.168.1.10:11434");
+  });
+
+  it("优先级1：前缀命中但 provider 无 baseURL 时进入后续规则（短 ID 命中他 provider）", () => {
+    const ep = resolveAgentLlmEndpoint({
+      currentModel: "ollama/gpt-4o",
+      providers: { ollama: { models: [] }, openai: openaiProvider },
+    });
+    // ollama 前缀无 baseUrl → 落到短 ID 命中 openai 的 gpt-4o
+    expect(ep?.providerId).toBe("openai");
+    expect(ep?.model).toBe("gpt-4o");
+  });
+
+  it("优先级2：裸模型名短 ID 命中 provider 的 models[].id", () => {
+    const ep = resolveAgentLlmEndpoint({
+      currentModel: "qwen3.8:27b",
+      providers: { ollama: ollamaProvider, openai: openaiProvider },
+    });
+    expect(ep?.providerId).toBe("ollama");
+    expect(ep?.model).toBe("qwen3.8:27b");
+  });
+
+  it("优先级2：短 ID 规范化命中（忽略大小写/冒号）与 name 命中", () => {
+    const ep = resolveAgentLlmEndpoint({
+      currentModel: "GPT-4o",
+      providers: { ollama: ollamaProvider, openai: openaiProvider },
+    });
+    expect(ep?.providerId).toBe("openai");
+    expect(ep?.apiKey).toBe("sk-test");
+  });
+
+  it("优先级2：多个 provider 命中同一短 ID 时判定歧义返回 null", () => {
+    const ep = resolveAgentLlmEndpoint({
+      currentModel: "qwen3.8:27b",
+      providers: {
+        ollama: ollamaProvider,
+        proxy: { baseUrl: "http://127.0.0.1:9999", models: [{ id: "qwen3.8:27b" }] },
+      },
+    });
+    expect(ep).toBeNull();
+  });
+
+  it("优先级3：唯一 provider 兜底（无前缀、短 ID 未命中）", () => {
+    const ep = resolveAgentLlmEndpoint({
+      currentModel: "some-model",
+      providers: { ollama: ollamaProvider },
+    });
+    expect(ep?.providerId).toBe("ollama");
+    expect(ep?.baseURL).toBe("http://192.168.1.10:11434");
+    expect(ep?.model).toBe("some-model");
+  });
+
+  it("无 providers / currentModel 为空时返回 null", () => {
+    expect(resolveAgentLlmEndpoint(undefined)).toBeNull();
+    expect(resolveAgentLlmEndpoint({ currentModel: "x" })).toBeNull();
+    expect(resolveAgentLlmEndpoint({ providers: {} })).toBeNull();
+  });
+});
+
+describe("splitModelRef", () => {
+  const { splitModelRef } = __test__;
+
+  it("拆分 provider/model", () => {
+    expect(splitModelRef("ollama/qwen3.8:27b")).toEqual({ prefix: "ollama", model: "qwen3.8:27b" });
+  });
+
+  it("模型部分含斜杠时整体归为模型", () => {
+    expect(splitModelRef("ollama/qwen3/8b")).toEqual({ prefix: "ollama", model: "qwen3/8b" });
+  });
+
+  it("无前缀 / 空串安全", () => {
+    expect(splitModelRef("qwen3")).toEqual({ prefix: "", model: "qwen3" });
+    expect(splitModelRef("")).toEqual({ prefix: "", model: "" });
+  });
+});
+
+// ────────────────────────────────────────────────────────────
 // isLocalProvider / 关键字匹配（白盒测试）
 // ────────────────────────────────────────────────────────────
 

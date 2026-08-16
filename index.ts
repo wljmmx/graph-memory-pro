@@ -24,7 +24,7 @@ import type { Driver } from "neo4j-driver";
 import type { GmConfig, GmNode, NodeType } from "./src/types.ts";
 import type { CompleteFn } from "./src/engine/llm.ts";
 import type { EmbedFn, BatchEmbedFn } from "./src/engine/embed.ts";
-import { createCompleteFn, createRuntimeCompleteFn } from "./src/engine/llm.ts";
+import { createCompleteFn, createRuntimeCompleteFn, type AgentModelContext } from "./src/engine/llm.ts";
 import { createEmbedFn, createBatchEmbedFn } from "./src/engine/embed.ts";
 import { initDriver, closeDriver, verifyWithRetry, verifyConnectivity, getDriver, setDriver as setDbDriver } from "./src/store/db.ts";
 import { ensureSchema, getNodeCount, getEdgeCount, searchNodes, upsertNode, findById } from "./src/store/store.ts";
@@ -1214,8 +1214,20 @@ async function doGatewayInit(api: any, logger: LoggerLike): Promise<void> {
 
   // 3. 初始化 LLM / Embedding
   const runtimeLlm = api.runtime?.llm;
+  // v2.6.x: 从 SDK 注入的 runtime 配置快照提取 agent 当前激活模型 + provider 注册表，
+  // 供 createRuntimeCompleteFn 解析真实 provider 端点（绕过 OpenClaw 网关）。
+  const getAgentModelCtx = (): AgentModelContext => {
+    try {
+      const snapshot = api.runtime?.config?.current?.() ?? {};
+      const providers = snapshot?.models?.providers ?? snapshot?.providers ?? {};
+      const primary = (snapshot?.agents?.defaults?.model?.primary ?? snapshot?.agents?.defaults?.model ?? "").toString();
+      return { currentModel: primary, providers };
+    } catch {
+      return {};
+    }
+  };
   if (runtimeLlm && typeof runtimeLlm.complete === "function") {
-    _llm = createRuntimeCompleteFn(runtimeLlm, _cfg.llm, logger as unknown as Parameters<typeof createRuntimeCompleteFn>[2]);
+    _llm = createRuntimeCompleteFn(runtimeLlm, _cfg.llm, logger as unknown as Parameters<typeof createRuntimeCompleteFn>[2], getAgentModelCtx);
     logger?.info?.("[graph-memory-pro] LLM initialized via runtime (provider detection deferred to first call)");
   } else {
     _llm = createCompleteFn(_cfg.llm);
