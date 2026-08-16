@@ -531,8 +531,8 @@ describe("createRuntimeCompleteFn", () => {
     expect(await p1).toBe("fallback-answer");
     expect(fetchSpy).toHaveBeenCalledTimes(1);
 
-    // 推进超过重探测间隔（30s）
-    await vi.advanceTimersByTimeAsync(31_000);
+    // 推进超过重探测间隔（5min，v2.5.2 由 30s 放宽）
+    await vi.advanceTimersByTimeAsync(5 * 60_000 + 1000);
 
     // 第二次：cooldown 触发重探测 → 现在 ollama → 走 runtime
     const p2 = complete("sys", "u2");

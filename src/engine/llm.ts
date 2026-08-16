@@ -37,9 +37,13 @@ const RETRY_JITTER_MAX_MS = 500;
 const DEFAULT_LLM_MAX_CONCURRENCY = 1;
 
 // v2.5.1: 周期性重探测间隔。同 session 内用户可能用 /model 切换模型。
-// 即使切换后未触发 runtime 调用（如 远程→本地 跨路径切换），至多每 30s
+// 即使切换后未触发 runtime 调用（如 远程→本地 跨路径切换），至多每 5min
 // 重探测一次，避免 decision 长期停留在过期路径。
-const RERPROBE_COOLDOWN_MS = 30_000;
+// v2.5.2: 30s → 5min。过于频繁的重探测会对本地模型产生额外 "ping" 调用，
+// 冷启动（模型已卸载）时每次探测触发一次模型加载，导致"反复加载/处理缓慢"。
+// 常见的 /model 切换已由单次调用后的 provider|model 指纹即时比对处理，
+// 周期兜底重探测无需如此高频。
+const RERPROBE_COOLDOWN_MS = 5 * 60_000;
 
 // v2.4.2: 按 purpose 放宽输出上限（maxTokens）。
 // 背景：社区摘要是"一句话≤30字"任务，但推理型模型（如 Qwen3 系列，
