@@ -509,9 +509,142 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
     } else {
       log.info(`[graph-memory-pro] MCP server disabled via config (mcp.enabled=${cfg.mcp?.enabled})`);
     }
+
+    // 8. 启动后台周期服务（extractor / maintenance）
+    //
+    // v2.5.x: 与 MCP 同理，这些后台服务原本仅通过 doGatewayInit 的
+    // api.registerService 启动；在 self-init 部署下宿主未调用 register()，
+    // 导致后台提取与图谱维护定时器缺失。此处按 registerService 的 start
+    // 逻辑对称启动，并用模块级 timer + 防重复保护避免与宿主注册重复。
+    if (!_extractorTimer) {
+      try {
+        const interval = cfg.background?.extractorIntervalMs ?? 60_000;
+        _extractorTimer = startBackgroundExtractor(interval, apiLogger);
+        log.info(`[graph-memory-pro] background extractor scheduled (interval=${interval}ms)`);
+      } catch (err) {
+        log.warn(`[graph-memory-pro] background extractor start failed: ${err}`);
+      }
+    }
+    if (!_maintenanceTimer) {
+      try {
+        const interval = cfg.background?.maintenanceIntervalMs ?? 6 * 3600_000;
+        const initialDelay = 5 * 60_000;
+        _maintenanceTimer = startBackgroundMaintenance(interval, initialDelay, apiLogger);
+        log.info(`[graph-memory-pro] background maintenance scheduled (interval=${interval}ms)`);
+      } catch (err) {
+        log.warn(`[graph-memory-pro] background maintenance start failed: ${err}`);
+      }
+    }
   } catch (err) {
     log.error(`API server start failed: ${err}`);
   }
+}
+
+/**
+ * 启动后台提取定时器（消费待提取队列）。
+ *
+ * v2.5.x: 从 api.registerService("graph-memory-extractor") 的 start 逻辑抽取，
+ * 供 self-init 路径复用。返回句柄用于赋值 _extractorTimer。
+ */
+function startBackgroundExtractor(
+  interval: number,
+  logger: LoggerLike,
+): ReturnType<typeof setInterval> {
+  const timer = setInterval(async () => {
+    if (!_driver || !_extractor || !_llm) return;
+    if (_extractorRunning) return;
+    _extractorRunning = true;
+    try {
+      const { readFile, writeFile, mkdir } = await import('node:fs/promises');
+      const { join, dirname } = await import('node:path');
+      const queuePath = join(
+        process.env.HOME || process.env.USERPROFILE || '.',
+        '.openclaw', 'graph-memory-pro', 'extract-queue.jsonl'
+      );
+      let queueContent = '';
+      try {
+        queueContent = await readFile(queuePath, 'utf-8');
+      } catch {
+        return;
+      }
+      if (!queueContent || !queueContent.trim()) return;
+      const lines = queueContent.split('\n').filter(Boolean);
+      const pairs: Array<{ user: string; assistant: string; sessionKey?: string; ids?: string[] }> = [];
+      for (const line of lines) {
+        try {
+          const item = JSON.parse(line);
+          if (!item.user || !item.assistant) continue;
+          const ids = Array.isArray(item.msgIds)
+            ? item.msgIds.map(String).filter(Boolean)
+            : (typeof item.id === 'string' && item.id ? [item.id] : []);
+          pairs.push({
+            user: item.user,
+            assistant: item.assistant,
+            sessionKey: typeof item.sessionKey === 'string' && item.sessionKey ? item.sessionKey : undefined,
+            ids: ids.length ? ids : undefined,
+          });
+        } catch { /* 跳过损坏行 */ }
+      }
+      if (pairs.length === 0) return;
+      const processed = await extractInBackground(_extractor, _driver, _llm, _cfg, logger, pairs);
+      let marked = 0;
+      if (processed > 0) {
+        const { markMessagesProcessed, markMessagesByContent } = await import('./src/store/messages.ts');
+        for (let i = 0; i < Math.min(processed, pairs.length); i++) {
+          const p = pairs[i];
+          try {
+            if (p.sessionKey && p.ids?.length) {
+              await markMessagesProcessed(_driver!, p.sessionKey, p.ids);
+            } else {
+              await markMessagesByContent(_driver!, p.user, p.assistant, p.sessionKey);
+            }
+            marked++;
+          } catch { /* 标记失败不影响提取结果 */ }
+        }
+      }
+      const remaining = lines.slice(processed).join('\n');
+      const pendingCount = Math.max(0, lines.length - processed);
+      await mkdir(dirname(queuePath), { recursive: true }).catch(() => {});
+      await writeFile(queuePath, remaining).catch(() => {});
+      if (marked > 0 || processed > 0) {
+        logger?.info?.(`[graph-memory-pro] extractor: ${processed} pairs processed, ${marked} GmMessage marked, ${pendingCount > 0 ? `kept ${pendingCount} pending` : 'queue drained'}`);
+      }
+    } catch (err) {
+      logger?.warn?.(`[graph-memory-pro] extractor tick failed: ${err}`);
+    } finally {
+      _extractorRunning = false;
+    }
+  }, interval);
+  return timer;
+}
+
+/**
+ * 启动后台维护定时器（去重 / PageRank / 社区检测）。
+ *
+ * v2.5.x: 从 api.registerService("graph-memory-maintenance") 的 start 逻辑抽取，
+ * 供 self-init 路径复用。返回句柄用于赋值 _maintenanceTimer。
+ */
+function startBackgroundMaintenance(
+  interval: number,
+  initialDelay: number,
+  logger: LoggerLike,
+): ReturnType<typeof setInterval> {
+  const runOnce = async () => {
+    if (!_driver || !_cfg) return;
+    if (_maintenanceRunning) return;
+    _maintenanceRunning = true;
+    try {
+      logger?.info?.("[graph-memory-pro] background maintenance start");
+      const result = await runMaintenance(_driver, _cfg, _llm ?? undefined, _embed ?? undefined, _batchEmbed ?? undefined);
+      logger?.info?.(`[graph-memory-pro] maintenance done: ${result.dedup.merged} merged, ${result.community.count} communities`);
+    } catch (err) {
+      logger?.warn?.(`[graph-memory-pro] maintenance error: ${err}`);
+    } finally {
+      _maintenanceRunning = false;
+    }
+  };
+  setTimeout(runOnce, initialDelay);
+  return setInterval(runOnce, interval);
 }
 
 async function autoStartApiServer(): Promise<void> {
@@ -1122,6 +1255,8 @@ export default definePluginEntry({
     api.registerService({
       id: "graph-memory-extractor",
       async start(_ctx: unknown) {
+        // v2.5.x: self-init 已启动定时器，避免宿主 register() 重复 setInterval（旧 timer 泄漏）
+        if (_extractorTimer) return;
         const interval = _cfg?.background?.extractorIntervalMs ?? 60_000;
         _extractorTimer = setInterval(async () => {
           if (!_driver || !_extractor || !_llm) return;
@@ -1217,6 +1352,8 @@ export default definePluginEntry({
     api.registerService({
       id: "graph-memory-maintenance",
       async start(_ctx: unknown) {
+        // v2.5.x: self-init 已启动定时器，避免宿主 register() 重复 setInterval（旧 timer 泄漏）
+        if (_maintenanceTimer) return;
         const interval = _cfg?.background?.maintenanceIntervalMs ?? 6 * 3600_000;
         // 启动后延迟 5 分钟执行第一次，避免与初始化竞争
         const initialDelay = 5 * 60_000;
