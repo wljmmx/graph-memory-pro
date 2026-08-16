@@ -43,6 +43,9 @@ export interface EvolveActionSpace {
   freshTailCount: number;          // 5-20
   vectorSearchTopK: number;        // 5-30
   compactTurnCount: number;       // 3-12
+  // v2.5.4: 后台资源节流参数（autoTurn 调优纳入）
+  interimTurnsThreshold: number;   // 5-30 轮：中间轮 assistant 文本提取的轮数节流阈值
+  extractorIntervalMs: number;     // 900_000-3_600_000 ms (15min~60min)：后台提取定时器间隔
 }
 
 export const ACTION_BOUNDS: Record<keyof EvolveActionSpace, { min: number; max: number }> = {
@@ -54,6 +57,9 @@ export const ACTION_BOUNDS: Record<keyof EvolveActionSpace, { min: number; max: 
   freshTailCount: { min: 5, max: 20 },
   vectorSearchTopK: { min: 5, max: 30 },
   compactTurnCount: { min: 3, max: 12 },
+  // v2.5.4: 后台提取相关参数范围
+  interimTurnsThreshold: { min: 5, max: 30 },
+  extractorIntervalMs: { min: 15 * 60 * 1000, max: 60 * 60 * 1000 }, // 15min ~ 60min
 };
 
 /** 默认动作空间（基于 GmConfig 提取） */
@@ -67,6 +73,9 @@ export function extractActionSpace(cfg: GmConfig): EvolveActionSpace {
     freshTailCount: cfg.freshTailCount ?? 10,
     vectorSearchTopK: cfg.recallMaxNodes ? cfg.recallMaxNodes * 2 : 12,
     compactTurnCount: cfg.compactTurnCount ?? 6,
+    // v2.5.4: 后台提取相关参数，默认值与运行时常量一致
+    interimTurnsThreshold: cfg.background?.interimTurnsThreshold ?? 15,
+    extractorIntervalMs: cfg.background?.extractorIntervalMs ?? 20 * 60 * 1000,
   };
 }
 
@@ -81,6 +90,12 @@ export function applyActionSpace(cfg: GmConfig, action: EvolveActionSpace): GmCo
     dedupThreshold: action.dedupThreshold,
     freshTailCount: action.freshTailCount,
     compactTurnCount: action.compactTurnCount,
+    // v2.5.4: 后台提取相关参数写入 background 子对象
+    background: {
+      ...(cfg.background ?? {}),
+      interimTurnsThreshold: Math.round(action.interimTurnsThreshold),
+      extractorIntervalMs: Math.round(action.extractorIntervalMs),
+    },
   };
 }
 
@@ -184,6 +199,9 @@ export class AutoTuner {
       freshTailCount: 10,
       vectorSearchTopK: 12,
       compactTurnCount: 6,
+      // v2.5.4: 后台提取相关参数默认值
+      interimTurnsThreshold: 15,
+      extractorIntervalMs: 20 * 60 * 1000, // 20min
     };
   }
 
@@ -571,6 +589,9 @@ ${JSON.stringify(ACTION_BOUNDS, null, 2)}
       freshTailCount: partial.freshTailCount ?? this.currentAction.freshTailCount,
       vectorSearchTopK: partial.vectorSearchTopK ?? this.currentAction.vectorSearchTopK,
       compactTurnCount: partial.compactTurnCount ?? this.currentAction.compactTurnCount,
+      // v2.5.4: 后台提取相关参数填充
+      interimTurnsThreshold: partial.interimTurnsThreshold ?? this.currentAction.interimTurnsThreshold,
+      extractorIntervalMs: partial.extractorIntervalMs ?? this.currentAction.extractorIntervalMs,
     };
   }
 

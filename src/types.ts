@@ -72,6 +72,8 @@ export interface GmConfig {
   background?: {
     extractorIntervalMs?: number;
     maintenanceIntervalMs?: number;
+    /** v2.5.4: 中间轮 assistant 文本提取的轮数节流阈值（默认 15 轮），满 N 轮才批量入队一次 */
+    interimTurnsThreshold?: number;
   };
   /** v2.5.x 心跳自愈配置（探测 API/MCP/driver，崩溃后自动重建） */
   heartbeat?: {

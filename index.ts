@@ -91,16 +91,45 @@ const MEMORY_TOOL_NAMES = new Set([
 //   INTERIM_MIN_LEN: 短于该长度的 assistant 文本（如"让我搜索一下"）无提取价值，直接跳过
 //   INTERIM_MAX_LEN: 单条文本截断长度，避免超大文本灌入 LLM
 //   INTERIM_SEEN_LIMIT: 内存去重集合上限（防内存无限增长）
-//   INTERIM_TURNS: 每 N 轮 llm_output 才批量入队一次（按轮数节流，避免后台 LLM 密集）
+//   INTERIM_TURNS_DEFAULT: 默认轮数阈值（v2.5.4: 5→15，本地 LLM 一般只能 1-2 轮对话，拉长节流避免后台 LLM 过载）
 const INTERIM_MIN_LEN = 40;
 const INTERIM_MAX_LEN = 4000;
 const INTERIM_SEEN_LIMIT = 4000;
-const INTERIM_TURNS = 5;
+const INTERIM_TURNS_DEFAULT = 15;
+// v2.5.4: 默认后台提取间隔从 5 分钟拉长到 20 分钟（本地 LLM 吞吐有限，避免后台 LLM 调用抢占主会话资源）
+const EXTRACTOR_INTERVAL_DEFAULT = 20 * 60 * 1000; // 20min
 // 内容 hash 去重集合（进程内，防同一段中间文本被反复提取入库）
 const _interimSeen = new Set<string>();
-// v2.5.4: 轮数节流缓冲 —— llm_output 累积最近若干轮的文本，满 INTERIM_TURNS 轮才入队
+// v2.5.4: 轮数节流缓冲 —— llm_output 累积最近若干轮的文本，满 N 轮才入队
 let _interimTurnBuf: string[] = [];
 let _interimTurnCount = 0;
+
+/**
+ * 读取中间轮 assistant 文本提取的轮数节流阈值
+ * 优先使用 cfg.background.interimTurnsThreshold，回退到 INTERIM_TURNS_DEFAULT
+ */
+function getInterimTurnsThreshold(): number {
+  const configured = _cfg?.background?.interimTurnsThreshold;
+  if (typeof configured === "number" && configured >= 1 && configured <= 100) {
+    return Math.round(configured);
+  }
+  return INTERIM_TURNS_DEFAULT;
+}
+
+/**
+ * 读取后台提取间隔 ms
+ * 优先使用 cfg.background.extractorIntervalMs，回退到 EXTRACTOR_INTERVAL_DEFAULT
+ * 安全范围：[1min, 24h]
+ */
+function getExtractorIntervalMs(): number {
+  const configured = _cfg?.background?.extractorIntervalMs;
+  const MIN = 60 * 1000;          // 1min
+  const MAX = 24 * 60 * 60 * 1000; // 24h
+  if (typeof configured === "number" && configured >= MIN && configured <= MAX) {
+    return configured;
+  }
+  return EXTRACTOR_INTERVAL_DEFAULT;
+}
 
 let _driver: Driver | null = null;
 let _cfg: GmConfig | null = null;
@@ -548,7 +577,7 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
     // 逻辑对称启动，并用模块级 timer + 防重复保护避免与宿主注册重复。
     if (!_extractorTimer) {
       try {
-        const interval = cfg.background?.extractorIntervalMs ?? 300_000;
+        const interval = getExtractorIntervalMs();
         _extractorTimer = startBackgroundExtractor(interval, apiLogger);
         log.info(`[graph-memory-pro] background extractor scheduled (interval=${interval}ms)`);
       } catch (err) {
@@ -1289,8 +1318,9 @@ export default definePluginEntry({
       reportEveryN: Type.Optional(Type.Number({ default: 50 })),
     })),
     background: Type.Optional(Type.Object({
-      extractorIntervalMs: Type.Optional(Type.Number({ default: 300_000 })),
+      extractorIntervalMs: Type.Optional(Type.Number({ default: 1_200_000, description: "v2.5.4: 后台三元组提取定时器间隔 ms（默认 20min，本地 LLM 吞吐有限，避免抢占主会话资源）" })),
       maintenanceIntervalMs: Type.Optional(Type.Number({ default: 6 * 3600_000 })),
+      interimTurnsThreshold: Type.Optional(Type.Number({ default: 15, description: "v2.5.4: 中间轮 assistant 文本提取的轮数节流阈值（默认 15 轮），满 N 轮才批量入队，纳入 autoTurn 调优" })),
     })),
     // ── v2.5.x 心跳自愈 ────────────
     heartbeat: Type.Optional(Type.Object({
@@ -1621,8 +1651,8 @@ export default definePluginEntry({
       const texts = Array.isArray(event?.assistantTexts) ? event.assistantTexts : [];
       if (texts.length === 0) return;
 
-      // v2.5.4: 按轮数节流 —— 累积最近几轮的中间文本，满 INTERIM_TURNS 轮才批量入队一次。
-      // 避免后台提取 LLM 频率超过主对话 LLM 频率（对话密集时 60s 提取会过于频繁）。
+      // v2.5.4: 按轮数节流 —— 累积最近几轮的中间文本，满 interimTurnsThreshold 轮才批量入队一次。
+      // 避免后台提取 LLM 频率超过主对话 LLM 频率（本地 LLM 吞吐有限时过于频繁会抢占资源）。
       const ctx = (rawCtx ?? {}) as { sessionKey?: string; sessionId?: string };
       const sessionKey = ctx?.sessionKey ?? ctx?.sessionId ?? event?.sessionId;
       for (const t of texts) {
@@ -1635,7 +1665,8 @@ export default definePluginEntry({
         _interimTurnBuf.push(trimmed);
       }
       _interimTurnCount++;
-      if (_interimTurnCount >= INTERIM_TURNS) {
+      const threshold = getInterimTurnsThreshold();
+      if (_interimTurnCount >= threshold) {
         if (_interimTurnBuf.length > 0) {
           await enqueueInterimAssistant(sessionKey, _interimTurnBuf);
         }
@@ -1668,7 +1699,7 @@ export default definePluginEntry({
       async start(_ctx: unknown) {
         // v2.5.x: self-init 已启动定时器，避免宿主 register() 重复 setInterval（旧 timer 泄漏）
         if (_extractorTimer) return;
-        const interval = _cfg?.background?.extractorIntervalMs ?? 300_000;
+        const interval = getExtractorIntervalMs();
         _extractorTimer = setInterval(async () => {
           if (!_driver || !_extractor || !_llm) return;
           // v2.3.2 S3: 重入保护 — 上一次 tick 仍在执行时跳过本次
