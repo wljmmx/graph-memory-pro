@@ -26,7 +26,7 @@ import type { CompleteFn } from "./src/engine/llm.ts";
 import type { EmbedFn, BatchEmbedFn } from "./src/engine/embed.ts";
 import { createCompleteFn, createRuntimeCompleteFn } from "./src/engine/llm.ts";
 import { createEmbedFn, createBatchEmbedFn } from "./src/engine/embed.ts";
-import { initDriver, closeDriver, verifyWithRetry, getDriver, setDriver as setDbDriver } from "./src/store/db.ts";
+import { initDriver, closeDriver, verifyWithRetry, verifyConnectivity, getDriver, setDriver as setDbDriver } from "./src/store/db.ts";
 import { ensureSchema, getNodeCount, getEdgeCount, searchNodes, upsertNode, findById } from "./src/store/store.ts";
 import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
@@ -38,6 +38,7 @@ import { setTimingEnabled } from "./src/timing.ts";
 import { extractInBackground } from "./src/services/extract-service.ts";  // v2.3.4 ARCH-1: 从 index.ts 拆出
 import { getSessionRecallCache, resetSessionRecallCache } from "./src/recaller/session-recall-cache.ts";
 import type { TuneCycleResult } from "./src/evolution/auto-tuner.ts";
+import { startHeartbeat, type HeartbeatHandle, type HeartbeatProbe } from "./src/server/heartbeat.ts";  // v2.5.x 心跳自愈
 
 const log = createLogger("index");
 
@@ -93,6 +94,8 @@ let _apiServerAutoStarted = false;
 // 跟踪 API 服务器当前使用的 driver 实例
 // 当 gateway_start 替换了自建 driver 时，需要重启 API 服务器
 let _apiServerDriver: Driver | null = null;
+// v2.5.x: 心跳自愈服务句柄（探测 API/MCP/driver，崩溃后自动重建）
+let _heartbeatHandle: HeartbeatHandle | null = null;
 
 // ─── 辅助函数 ──────────────────────────────────────────
 
@@ -535,6 +538,9 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
         log.warn(`[graph-memory-pro] background maintenance start failed: ${err}`);
       }
     }
+
+    // 9. 启动心跳自愈服务（v2.5.x）
+    startHeartbeatMonitor();
   } catch (err) {
     log.error(`API server start failed: ${err}`);
   }
@@ -645,6 +651,153 @@ function startBackgroundMaintenance(
   };
   setTimeout(runOnce, initialDelay);
   return setInterval(runOnce, interval);
+}
+
+// ─── 心跳自愈（v2.5.x）────────────────────────────────
+//
+// 周期性探测关键能力并在降级/崩溃后自动重建，避免 API 接口丢失：
+//   - api-server:  HTTP /health
+//   - mcp-server:  HTTP /health（mcp.enabled=true 时）
+//   - neo4j-driver: verifyConnectivity 握手
+// 通过模块级 _heartbeatHandle 防重复启动（self-init 与宿主 register() 均会调用）。
+
+/** 重建 API server（先关闭旧句柄，再以当前组件重新启动） */
+async function restartApiServer(): Promise<void> {
+  if (!_driver || !_cfg) return;
+  if (_apiServerHandle) {
+    try { await _apiServerHandle.close(); } catch { /* ignore */ }
+    _apiServerHandle = null;
+  }
+  const apiLogger = { info: (m: string) => log.info(m), error: (m: string) => log.error(m), warn: (m: string) => log.warn(m) };
+  try {
+    const { startApiServer } = await import("./src/server/http-server.ts");
+    const apiServerCfg = _cfg.apiServer ?? { enabled: true, port: 7850, host: "127.0.0.1" };
+    _apiServerHandle = await startApiServer(
+      _driver, _cfg,
+      {
+        enabled: true,
+        port: apiServerCfg.port ?? 7850,
+        host: apiServerCfg.host ?? "127.0.0.1",
+        authToken: apiServerCfg.authToken,
+      },
+      apiLogger,
+      _llm ?? undefined,
+      _embed ?? undefined,
+      _recaller ?? undefined,
+    );
+    log.info("[heartbeat] API server re-established");
+  } catch (err) {
+    log.error(`[heartbeat] API server restart failed: ${err}`);
+  }
+}
+
+/** 重建 MCP server（先关闭旧句柄，再以当前组件重新启动） */
+async function restartMcpServer(): Promise<void> {
+  if (!_driver || !_cfg || _cfg.mcp?.enabled !== true) return;
+  if (_mcpServerHandle) {
+    try { await _mcpServerHandle.close(); } catch { /* ignore */ }
+    _mcpServerHandle = null;
+  }
+  try {
+    const { startMcpServer } = await import("./src/mcp/server.ts");
+    _mcpServerHandle = await startMcpServer(
+      _driver, _cfg,
+      _llm ?? undefined,
+      _embed ?? undefined,
+      _recaller ?? undefined,
+      _batchEmbed ?? undefined,
+    );
+    log.info("[heartbeat] MCP server re-established");
+  } catch (err) {
+    log.error(`[heartbeat] MCP server restart failed: ${err}`);
+  }
+}
+
+/** 重建 Neo4j driver（成功后用新 driver 重建两个 server，保证引用一致） */
+async function recoverDriver(): Promise<void> {
+  if (!_cfg) return;
+  try {
+    const d = initDriver(_cfg.neo4j); // initDriver 内部先 close 旧 driver 再创建
+    const ok = await verifyWithRetry(d);
+    if (ok) {
+      _driver = d;
+      setDbDriver(d);
+      _apiServerDriver = d;
+      log.info("[heartbeat] Neo4j driver re-established; restarting servers with new driver");
+      await restartApiServer();
+      await restartMcpServer();
+    } else {
+      closeDriver(); // 新 driver 不可用，清空 db 层引用，下一轮心跳继续重试
+      log.warn("[heartbeat] Neo4j re-init failed (will retry next tick)");
+    }
+  } catch (err) {
+    log.error(`[heartbeat] Neo4j driver recover failed: ${err}`);
+  }
+}
+
+/** 启动心跳自愈服务（幂等：已有句柄则跳过） */
+function startHeartbeatMonitor(): void {
+  if (_heartbeatHandle) return;
+  if (_cfg?.heartbeat?.enabled === false) {
+    log.info("[heartbeat] monitor disabled via config");
+    return;
+  }
+
+  const intervalMs = _cfg?.heartbeat?.intervalMs ?? 30_000;
+  const probes: HeartbeatProbe[] = [];
+
+  // API server 探针
+  const apiPort = _cfg?.apiServer?.port ?? 7850;
+  const apiHost = _cfg?.apiServer?.host ?? "127.0.0.1";
+  probes.push({
+    name: "api-server",
+    check: async () => {
+      if (!_apiServerHandle) return false;
+      try {
+        const resp = await fetch(`http://${apiHost}:${apiPort}/health`, { signal: AbortSignal.timeout(3000) });
+        return resp.ok;
+      } catch { return false; }
+    },
+    recover: restartApiServer,
+  });
+
+  // MCP server 探针（仅启用时）
+  if (_cfg?.mcp?.enabled === true) {
+    const mcpPort = _cfg.mcp?.port ?? 7800;
+    const mcpHost = _cfg.mcp?.host ?? "127.0.0.1";
+    probes.push({
+      name: "mcp-server",
+      check: async () => {
+        if (!_mcpServerHandle) return false;
+        try {
+          const resp = await fetch(`http://${mcpHost}:${mcpPort}/health`, { signal: AbortSignal.timeout(3000) });
+          return resp.ok;
+        } catch { return false; }
+      },
+      recover: restartMcpServer,
+    });
+  }
+
+  // Neo4j driver 探针
+  probes.push({
+    name: "neo4j-driver",
+    check: async () => {
+      if (!_driver) return false;
+      return verifyConnectivity(_driver);
+    },
+    recover: recoverDriver,
+  });
+
+  _heartbeatHandle = startHeartbeat(probes, {
+    intervalMs,
+    logger: {
+      info: (m: string) => log.info(m),
+      warn: (m: string) => log.warn(m),
+      error: (m: string) => log.error(m),
+      debug: (m: string) => log.debug?.(m),
+    },
+  });
+  log.info(`[heartbeat] monitor started (interval=${intervalMs}ms, probes=[${probes.map(p => p.name).join(", ")}])`);
 }
 
 async function autoStartApiServer(): Promise<void> {
@@ -901,6 +1054,9 @@ async function doGatewayInit(api: any, logger: LoggerLike): Promise<void> {
 
   log.info("initialized");
   logger?.info?.("[graph-memory-pro] initialized");
+
+  // v2.5.x: 启动心跳自愈服务（幂等，self-init 已启动则跳过）
+  startHeartbeatMonitor();
 }
 
 // ─── Plugin Entry ──────────────────────────────────────
@@ -952,6 +1108,11 @@ export default definePluginEntry({
     background: Type.Optional(Type.Object({
       extractorIntervalMs: Type.Optional(Type.Number({ default: 60_000 })),
       maintenanceIntervalMs: Type.Optional(Type.Number({ default: 6 * 3600_000 })),
+    })),
+    // ── v2.5.x 心跳自愈 ────────────
+    heartbeat: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+      intervalMs: Type.Optional(Type.Number({ default: 30_000, description: "心跳探测周期 ms（默认 30s）" })),
     })),
     // ── v2.1.2 第一批 Schema 升级 + 监控基础 ────────────
     temporal: Type.Optional(Type.Object({
@@ -1158,6 +1319,7 @@ export default definePluginEntry({
       if (_extractorTimer) { clearInterval(_extractorTimer); _extractorTimer = null; }
       if (_maintenanceTimer) { clearInterval(_maintenanceTimer); _maintenanceTimer = null; }
       if (_autoStartRetryTimer) { clearInterval(_autoStartRetryTimer); _autoStartRetryTimer = null; }
+      if (_heartbeatHandle) { _heartbeatHandle.stop(); _heartbeatHandle = null; }
       resetSessionRecallCache();
       // 注意：不再 closeDriver() / 关闭 API server / null 化组件
       // compaction 后 register() 会检测到 _driver 已存在并跳过重复初始化

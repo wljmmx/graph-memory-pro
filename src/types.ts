@@ -73,6 +73,11 @@ export interface GmConfig {
     extractorIntervalMs?: number;
     maintenanceIntervalMs?: number;
   };
+  /** v2.5.x 心跳自愈配置（探测 API/MCP/driver，崩溃后自动重建） */
+  heartbeat?: {
+    enabled?: boolean;
+    intervalMs?: number;
+  };
 
   // ── v2.1.2 第一批 Schema 升级 + 监控基础 ────────────
 
