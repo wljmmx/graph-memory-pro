@@ -18,7 +18,7 @@ export interface GmFeedback {
   unusedNodeIds: string[];
   timestamp: number;
   sessionId?: string;
-  matchedBy: "heuristic" | "llm" | "cold-start" | "custom";
+  matchedBy: "heuristic" | "llm" | "cold-start" | "custom" | "get-signal";
 }
 
 /**

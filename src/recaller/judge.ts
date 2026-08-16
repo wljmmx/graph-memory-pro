@@ -26,7 +26,7 @@ import { withTimeoutSignal } from "../utils.ts";
 const log = createLogger("judge");
 
 export type JudgeTier = 1 | 2 | 3;
-export type JudgeMatchedBy = "heuristic" | "llm" | "cold-start" | "custom";
+export type JudgeMatchedBy = "heuristic" | "llm" | "cold-start" | "custom" | "get-signal";
 
 export interface JudgeConfig {
   enabled: boolean;

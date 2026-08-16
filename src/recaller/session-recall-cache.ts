@@ -139,6 +139,32 @@ export class SessionRecallCache {
     return result;
   }
 
+  /**
+   * v2.5.3: 消费并清除超过 maxAgeMs 未被 agent_end 消费的"陈旧"会话。
+   *
+   * 长任务场景：agent 执行 100+ 工具调用期间 agent_end 尚未触发，
+   * SessionRecallCache 中的召回/get 信号一直堆积却无法进入反馈链路。
+   * 此方法供后台定时器周期调用，将陈旧 session 按 get() 信号直接处理为反馈，
+   * 让 M 矩阵在长任务期间也能增量更新，而非等到 agent_end 才一次性处理。
+   *
+   * @param maxAgeMs 最大静默时间（自上次访问起）
+   * @returns 被消费的 session 列表（sessionKey + ConsumedRecall）
+   */
+  consumeStale(maxAgeMs: number): Array<{ sessionKey: string; consumed: ConsumedRecall }> {
+    const now = Date.now();
+    const result: Array<{ sessionKey: string; consumed: ConsumedRecall }> = [];
+    for (const [key, entry] of this.sessions) {
+      if (now - entry.lastAccess < maxAgeMs) continue;
+      if (entry.records.length === 0 && entry.getNodeIds.size === 0) {
+        this.sessions.delete(key);
+        continue;
+      }
+      const consumed = this.consume(key);
+      if (consumed) result.push({ sessionKey: key, consumed });
+    }
+    return result;
+  }
+
   /** 当前缓存的 session 数（健康检查/诊断用） */
   size(): number {
     return this.sessions.size;

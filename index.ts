@@ -615,6 +615,28 @@ function startBackgroundExtractor(
       if (marked > 0 || processed > 0) {
         logger?.info?.(`[graph-memory-pro] extractor: ${processed} pairs processed, ${marked} GmMessage marked, ${pendingCount > 0 ? `kept ${pendingCount} pending` : 'queue drained'}`);
       }
+
+      // v2.5.3: 刷新陈旧会话反馈（长任务期间 M 矩阵增量更新）
+      // agent_end 只在整轮对话结束时触发；长任务中 agent 进行多轮工具调用时
+      // agent_end 尚未触发，SessionRecallCache 中的 get() 信号一直堆积。
+      // 此处周期性消费静默超过 90s 的 session，用 get() 信号直接更新 M。
+      if (_recaller && _cfg?.associationMatrix?.enabled === true) {
+        try {
+          const staleSessions = getSessionRecallCache().consumeStale(90_000);
+          for (const { sessionKey, consumed } of staleSessions) {
+            if (consumed.getNodeIds.length === 0) continue;
+            await _recaller.processGetBasedFeedback(
+              consumed.query,
+              consumed.nodeIds,
+              consumed.getNodeIds,
+              sessionKey,
+            );
+            logger?.info?.(`[graph-memory-pro] stale-session feedback flushed (session=${sessionKey}, getHits=${consumed.getNodeIds.length}, recalled=${consumed.nodeIds.length})`);
+          }
+        } catch (flushErr) {
+          logger?.warn?.(`[graph-memory-pro] stale-session feedback flush failed: ${flushErr}`);
+        }
+      }
     } catch (err) {
       logger?.warn?.(`[graph-memory-pro] extractor tick failed: ${err}`);
     } finally {
@@ -1493,6 +1515,25 @@ export default definePluginEntry({
             await writeFile(queuePath, remaining).catch(() => {});
             if (marked > 0 || processed > 0) {
               logger?.info?.(`[graph-memory-pro] extractor: ${processed} pairs processed, ${marked} GmMessage marked, ${pendingCount > 0 ? `kept ${pendingCount} pending` : 'queue drained'}`);
+            }
+
+            // v2.5.3: 刷新陈旧会话反馈（长任务期间 M 矩阵增量更新）
+            if (_recaller && _cfg?.associationMatrix?.enabled === true) {
+              try {
+                const staleSessions = getSessionRecallCache().consumeStale(90_000);
+                for (const { sessionKey, consumed } of staleSessions) {
+                  if (consumed.getNodeIds.length === 0) continue;
+                  await _recaller.processGetBasedFeedback(
+                    consumed.query,
+                    consumed.nodeIds,
+                    consumed.getNodeIds,
+                    sessionKey,
+                  );
+                  logger?.info?.(`[graph-memory-pro] stale-session feedback flushed (session=${sessionKey}, getHits=${consumed.getNodeIds.length}, recalled=${consumed.nodeIds.length})`);
+                }
+              } catch (flushErr) {
+                logger?.warn?.(`[graph-memory-pro] stale-session feedback flush failed: ${flushErr}`);
+              }
             }
           } catch (err) {
             logger?.warn?.(`[graph-memory-pro] extractor tick failed: ${err}`);

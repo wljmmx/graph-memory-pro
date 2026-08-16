@@ -299,6 +299,67 @@ export class Recaller {
     }
   }
 
+  /**
+   * v2.5.3: 基于 get() 展开信号的轻量反馈处理（不依赖 agent_end / assistantReply）。
+   *
+   * 长任务场景：agent 执行多轮工具调用期间 agent_end 尚未触发，
+   * 但 memory_search + get() 已经产生了明确的"使用"信号。
+   * 此方法用 get() 命中节点作为确定性正反馈（used），
+   * 召回但未被 get() 展开的节点作为负反馈（unused），
+   * 直接更新 M 矩阵 + 持久化反馈 + 累计计数，跳过 judge 判定。
+   *
+   * @param query 触发召回的用户查询
+   * @param recalledNodeIds 该 session 累计召回的去重节点
+   * @param getNodeIds 通过 get() 展开过的节点（确定性"已使用"）
+   * @param sessionId 会话 ID
+   */
+  async processGetBasedFeedback(
+    query: string,
+    recalledNodeIds: string[],
+    getNodeIds: string[],
+    sessionId?: string,
+  ): Promise<void> {
+    if (!this.associationMatrix?.isEnabled() || !this.embed) return;
+    if (getNodeIds.length === 0) return;
+
+    // get() 命中 = 确定性正反馈；召回但未展开 = 负反馈
+    const usedSet = new Set(getNodeIds);
+    const usedNodeIds = recalledNodeIds.filter(id => usedSet.has(id));
+    // 若 recalledNodes 为空但 getNodeIds 有值（如 get() 未经过 search()），
+    // 直接用 getNodeIds 作为 used
+    const finalUsed = usedNodeIds.length > 0 ? usedNodeIds : getNodeIds;
+    const unusedNodeIds = recalledNodeIds.filter(id => !usedSet.has(id));
+
+    // 持久化反馈记录（与 processFeedback 链路一致）
+    const timestamp = Date.now();
+    const feedbackId = `${createHash("md5").update(query + timestamp + (sessionId ?? "")).digest("hex").slice(0, 16)}`;
+    try {
+      await upsertFeedback(this.driver, {
+        id: feedbackId,
+        query,
+        recalledNodeIds,
+        usedNodeIds: finalUsed,
+        unusedNodeIds,
+        timestamp,
+        sessionId,
+        matchedBy: "get-signal",
+      });
+    } catch (err) {
+      log.warn("get-based feedback persistence failed", { error: String(err) });
+    }
+
+    // 累计反馈计数（用于冷启动判断）
+    this.judgeManager?.incrementFeedback();
+
+    // 直接更新 M（跳过 judge，因为 get() 是确定性信号）
+    try {
+      await this.updateAssociationMatrix(query, finalUsed, unusedNodeIds);
+      log.debug("get-based M update", { used: finalUsed.length, unused: unusedNodeIds.length });
+    } catch (err) {
+      log.warn("get-based M update failed", { error: String(err) });
+    }
+  }
+
   private async recallPrecise(
     query: string,
     limit: number,
