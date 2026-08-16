@@ -44,7 +44,7 @@ export async function extractInBackground(
   }
 
   let extracted = 0;
-  const maxPairs = 3;
+  const maxPairs = 2;
   const pairs = pendingMessages.slice(0, maxPairs);
 
   for (const pair of pairs) {
@@ -176,7 +176,8 @@ export async function extractInterimTexts(
   if (!llmBreaker.allow()) return 0;
 
   let extracted = 0;
-  const maxTexts = 20;
+  // v2.5.4: 单次最多处理 5 条中间文本，配合后台更长间隔，避免 LLM 调用过密
+  const maxTexts = 5;
   const batch = texts.slice(0, maxTexts);
   for (const text of batch) {
     try {

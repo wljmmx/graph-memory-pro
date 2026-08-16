@@ -91,11 +91,16 @@ const MEMORY_TOOL_NAMES = new Set([
 //   INTERIM_MIN_LEN: 短于该长度的 assistant 文本（如"让我搜索一下"）无提取价值，直接跳过
 //   INTERIM_MAX_LEN: 单条文本截断长度，避免超大文本灌入 LLM
 //   INTERIM_SEEN_LIMIT: 内存去重集合上限（防内存无限增长）
+//   INTERIM_TURNS: 每 N 轮 llm_output 才批量入队一次（按轮数节流，避免后台 LLM 密集）
 const INTERIM_MIN_LEN = 40;
 const INTERIM_MAX_LEN = 4000;
 const INTERIM_SEEN_LIMIT = 4000;
+const INTERIM_TURNS = 5;
 // 内容 hash 去重集合（进程内，防同一段中间文本被反复提取入库）
 const _interimSeen = new Set<string>();
+// v2.5.4: 轮数节流缓冲 —— llm_output 累积最近若干轮的文本，满 INTERIM_TURNS 轮才入队
+let _interimTurnBuf: string[] = [];
+let _interimTurnCount = 0;
 
 let _driver: Driver | null = null;
 let _cfg: GmConfig | null = null;
@@ -543,7 +548,7 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
     // 逻辑对称启动，并用模块级 timer + 防重复保护避免与宿主注册重复。
     if (!_extractorTimer) {
       try {
-        const interval = cfg.background?.extractorIntervalMs ?? 60_000;
+        const interval = cfg.background?.extractorIntervalMs ?? 300_000;
         _extractorTimer = startBackgroundExtractor(interval, apiLogger);
         log.info(`[graph-memory-pro] background extractor scheduled (interval=${interval}ms)`);
       } catch (err) {
@@ -788,9 +793,12 @@ async function processInterimQueue(logger: LoggerLike): Promise<void> {
     if (texts.length === 0) return;
 
     const extracted = await extractInterimTexts(_extractor, _driver, _llm, _cfg, texts);
-    // 处理完即清空队列（失败条目由去重 + 下次重提兜底）
+    // v2.5.4: 只移除本批已处理的条目（extractInterimTexts 有单次上限），剩余写回队列，
+    // 避免批量丢失未处理数据。
     await mkdir(dirname(queuePath), { recursive: true }).catch(() => {});
-    await writeFile(queuePath, "").catch(() => {});
+    const processedCount = Math.min(lines.length, 5);
+    const remaining = lines.slice(processedCount).join("\n");
+    await writeFile(queuePath, remaining ? remaining + "\n" : "").catch(() => {});
     if (extracted > 0) {
       logger?.info?.(`[graph-memory-pro] interim extractor: ${extracted} assistant turns extracted to graph`);
     }
@@ -1281,7 +1289,7 @@ export default definePluginEntry({
       reportEveryN: Type.Optional(Type.Number({ default: 50 })),
     })),
     background: Type.Optional(Type.Object({
-      extractorIntervalMs: Type.Optional(Type.Number({ default: 60_000 })),
+      extractorIntervalMs: Type.Optional(Type.Number({ default: 300_000 })),
       maintenanceIntervalMs: Type.Optional(Type.Number({ default: 6 * 3600_000 })),
     })),
     // ── v2.5.x 心跳自愈 ────────────
@@ -1612,9 +1620,28 @@ export default definePluginEntry({
       if (!_driver || !_extractor || !_llm) return;
       const texts = Array.isArray(event?.assistantTexts) ? event.assistantTexts : [];
       if (texts.length === 0) return;
+
+      // v2.5.4: 按轮数节流 —— 累积最近几轮的中间文本，满 INTERIM_TURNS 轮才批量入队一次。
+      // 避免后台提取 LLM 频率超过主对话 LLM 频率（对话密集时 60s 提取会过于频繁）。
       const ctx = (rawCtx ?? {}) as { sessionKey?: string; sessionId?: string };
       const sessionKey = ctx?.sessionKey ?? ctx?.sessionId ?? event?.sessionId;
-      await enqueueInterimAssistant(sessionKey, texts);
+      for (const t of texts) {
+        if (typeof t !== "string" || t.trim().length < INTERIM_MIN_LEN) continue;
+        const trimmed = t.trim().slice(0, INTERIM_MAX_LEN);
+        const h = simpleHash(trimmed);
+        if (_interimSeen.has(h)) continue;
+        if (_interimSeen.size >= INTERIM_SEEN_LIMIT) _interimSeen.clear();
+        _interimSeen.add(h);
+        _interimTurnBuf.push(trimmed);
+      }
+      _interimTurnCount++;
+      if (_interimTurnCount >= INTERIM_TURNS) {
+        if (_interimTurnBuf.length > 0) {
+          await enqueueInterimAssistant(sessionKey, _interimTurnBuf);
+        }
+        _interimTurnBuf = [];
+        _interimTurnCount = 0;
+      }
     }, { name: "graph-memory-pro-interim-extract" });
 
     // ─────────────────────────────────────────────────────────────────
@@ -1641,7 +1668,7 @@ export default definePluginEntry({
       async start(_ctx: unknown) {
         // v2.5.x: self-init 已启动定时器，避免宿主 register() 重复 setInterval（旧 timer 泄漏）
         if (_extractorTimer) return;
-        const interval = _cfg?.background?.extractorIntervalMs ?? 60_000;
+        const interval = _cfg?.background?.extractorIntervalMs ?? 300_000;
         _extractorTimer = setInterval(async () => {
           if (!_driver || !_extractor || !_llm) return;
           // v2.3.2 S3: 重入保护 — 上一次 tick 仍在执行时跳过本次
