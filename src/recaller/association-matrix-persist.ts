@@ -22,7 +22,7 @@ import type { GmConfig } from "../types.ts";
 export interface AssociationMatrixPersistOptions {
   /** 覆盖默认状态文件路径 */
   path?: string;
-  /** 覆盖默认缓存根目录（默认 ~/.openclaw/graph-memory-pro） */
+  /** 覆盖默认缓存根目录（默认插件目录下的 association-matrix 子目录） */
   baseDir?: string;
 }
 
@@ -34,12 +34,24 @@ export interface AssociationMatrixSaveResult {
   rejectedCount: number;
 }
 
-/** 默认缓存根目录（与 auto-tuner 对齐） */
-export function getDefaultBaseDir(): string {
-  return join(
-    process.env.HOME || process.env.USERPROFILE || ".",
-    ".openclaw", "graph-memory-pro",
+/** 插件默认安装目录（OpenClaw extensions 目录，可在 env 覆盖） */
+export function getDefaultPluginDir(): string {
+  return (
+    process.env.GRAPH_MEMORY_PRO_PLUGIN_DIR ??
+    join(
+      process.env.HOME || process.env.USERPROFILE || ".",
+      ".openclaw", "extensions", "graph-memory-pro",
+    )
   );
+}
+
+/**
+ * M 默认缓存根目录：插件目录下的独立子目录。
+ * 一般插件位于 ~/.openclaw/extensions/graph-memory-pro，M 保存到
+ * ~/.openclaw/extensions/graph-memory-pro/association-matrix/ 下。
+ */
+export function getDefaultBaseDir(): string {
+  return join(getDefaultPluginDir(), "association-matrix");
 }
 
 /** 解析 M 状态文件路径 */
