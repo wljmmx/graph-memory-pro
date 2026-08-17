@@ -61,6 +61,16 @@ export function getAssociationMatrixPath(opts: AssociationMatrixPersistOptions =
 }
 
 /**
+ * 旧版默认路径（v2.6.x 之前）：~/.openclaw/graph-memory-pro/association-matrix.json。
+ * M 默认目录改到插件目录下后，用于把历史学习成果自动迁移到新位置，避免
+ * 升级后加载到全新单位矩阵导致 updateCount/historySize 归零、学习痕迹丢失。
+ */
+export function getLegacyAssociationMatrixPath(): string {
+  const home = process.env.HOME || process.env.USERPROFILE || ".";
+  return join(home, ".openclaw", "graph-memory-pro", "association-matrix.json");
+}
+
+/**
  * 保存关联矩阵 M 到磁盘（JSON，含 M/bias/gain/rowScale + Adam/BatchNorm 状态）
  *
  * @param am 关联矩阵实例
@@ -108,12 +118,28 @@ export async function loadAssociationMatrix(
   try {
     json = await readFile(path, "utf-8");
   } catch {
-    return false; // 首次运行无状态文件
+    // v2.6.x: 新路径无文件时,尝试从旧版默认路径(~/.openclaw/graph-memory-pro)迁移，
+    // 保留升级前的学习成果(矩阵权重 + updateCount)。仅当调用方未显式指定 path/baseDir
+    // 时迁移,显式指向的文件仍按原路径处理。
+    if (opts.path || opts.baseDir) return false;
+    try {
+      json = await readFile(getLegacyAssociationMatrixPath(), "utf-8");
+    } catch {
+      return false; // 全新安装，无任何状态文件
+    }
+    await migrateMatrixFile(getLegacyAssociationMatrixPath(), path);
   }
   if (!json || !json.trim()) return false;
 
   am.deserialize(json);
   return true;
+}
+
+/** 把旧路径文件复制到新路径（自动迁移，升级后保留历史 M） */
+async function migrateMatrixFile(from: string, to: string): Promise<void> {
+  const { copyFile } = await import("node:fs/promises");
+  await mkdir(dirname(to), { recursive: true });
+  await copyFile(from, to);
 }
 
 /**
