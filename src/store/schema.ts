@@ -60,22 +60,22 @@ export async function ensureSchema(driver: Driver, dimension: number = 1024): Pr
     // FULLTEXT 索引：用于全文搜索（替代 CONTAINS）
     try {
       await session.run(
-        `CREATE FULLTEXT INDEX task_search IF NOT EXISTS FOR (n:Task) ON EACH [n.name, n.description, n.content] OPTIONS { indexConfig: { fulltext: { analyzer: "cjk" } } }`
+        `CREATE FULLTEXT INDEX task_search IF NOT EXISTS FOR (n:Task) ON EACH [n.name, n.description, n.content]`
       );
     } catch { /* may exist */ }
     try {
       await session.run(
-        `CREATE FULLTEXT INDEX skill_search IF NOT EXISTS FOR (n:Skill) ON EACH [n.name, n.description, n.content] OPTIONS { indexConfig: { fulltext: { analyzer: "cjk" } } }`
+        `CREATE FULLTEXT INDEX skill_search IF NOT EXISTS FOR (n:Skill) ON EACH [n.name, n.description, n.content]`
       );
     } catch { /* may exist */ }
     try {
       await session.run(
-        `CREATE FULLTEXT INDEX event_search IF NOT EXISTS FOR (n:Event) ON EACH [n.name, n.description, n.content] OPTIONS { indexConfig: { fulltext: { analyzer: "cjk" } } }`
+        `CREATE FULLTEXT INDEX event_search IF NOT EXISTS FOR (n:Event) ON EACH [n.name, n.description, n.content]`
       );
     } catch { /* may exist */ }
     try {
       await session.run(
-        `CREATE FULLTEXT INDEX conversation_search IF NOT EXISTS FOR (n:ConversationMessage) ON EACH [n.content] OPTIONS { indexConfig: { fulltext: { analyzer: "cjk" } } }`
+        `CREATE FULLTEXT INDEX conversation_search IF NOT EXISTS FOR (n:ConversationMessage) ON EACH [n.content]`
       );
     } catch { /* may exist */ }
 
@@ -84,21 +84,14 @@ export async function ensureSchema(driver: Driver, dimension: number = 1024): Pr
     // 旧实现按 label 分离 3 个索引，查询需并行 3 次 session + 合并去重。
     // 新实现单索引跨 3 label 检索，省 2 个 session + 去重逻辑，连接池压力降 2/3。
     //
-    // v2.4.1 (Neo4j 2026.07+): 添加精细化 HNSW 和量化参数，针对个人 NAS 场景调优。
+    // v2.4.1 (Neo4j 2026.07+): 合并索引 + 量化实测修正（2026-08-17）。
     // 配置要点（针对 1024 维 embedding，SSD/内存有限的个人设备）：
     //  - m=16: 每个 HNSW 节点默认连接数 → 平衡内存占用和召回，默认足够
     //  - ef_construction=128: 构建时探索深度 → 比默认 100 略高，提升召回，构建慢一点可接受
-    //  - ef_search=64: 查询时探索深度 → 比 48 略高，保证 recall；NAS 查询 QPS 不高可接受
-    //  - vector.quantization.type: 'HFQ' (企业版) → 8-bit 高保真量化（2026.07+ GA），
-    //    相对 SCALAR 召回精度更高、存储更省；2.4.1 之前用 'scalar' 标量量化压缩约 50% 存储。
-    //    生产已核实 2026.07.1 Enterprise，HFQ 可用。
-    //    （注意：binary 默认 search_expansion_factor 由 2.0 升为 3.0，未采用）
-    //
-    // v2.4.1 企业版识别 + 量化分支（2026-08-17 决策）：
-    // 量化/HFQ 等精细 OPTIONS 仅 Enterprise 支持，Community 上不可用。因此：
-    //   - Enterprise：精细 OPTIONS + HFQ 高保真量化（提升 1024 维向量召回精度）
-    //   - Community/未知：基础语法，不设置 quantization（Community 不支持该选项，即"普通"）
-    //   - 两者失败均回落过程化调用，保证可用性
+    //  - vector.quantization.type: 'SCALAR' → 标量量化（压缩约 50% 存储，社区/企业都支持）。
+    //    实测（Neo4j 2026.07.1 Enterprise）：'HFQ' 不支持
+    //    （'HFQ' is an unsupported 'vector.quantization.type'. Supported: [BINARY, NONE, SCALAR]）；
+    //    ef_search 键也不被接受。故 Enterprise/Community 统一走 SCALAR，不做 HFQ 分支。
     //
     // 兼容策略：保留创建 3 个旧索引的语句（IF NOT EXISTS 语义，已存在则 no-op），
     //          避免破坏旧环境；查询层优先用合并索引，旧索引仅向后兼容。
@@ -117,10 +110,9 @@ export async function ensureSchema(driver: Driver, dimension: number = 1024): Pr
             indexConfig: {
               \`vector.dimensions\`: ${dimension},
               \`vector.similarity_function\`: 'cosine',
-              \`vector.quantization.type\`: 'HFQ',
+              \`vector.quantization.type\`: 'SCALAR',
               \`vector.hnsw.m\`: 16,
-              \`vector.hnsw.ef_construction\`: 128,
-              \`vector.hnsw.ef_search\`: 64
+              \`vector.hnsw.ef_construction\`: 128
             }
           }
         `);
