@@ -91,7 +91,10 @@ export async function ensureSchema(driver: Driver, dimension: number = 1024): Pr
     //  - vector.quantization.type: 'SCALAR' → 标量量化（压缩约 50% 存储，社区/企业都支持）。
     //    实测（Neo4j 2026.07.1 Enterprise）：'HFQ' 不支持
     //    （'HFQ' is an unsupported 'vector.quantization.type'. Supported: [BINARY, NONE, SCALAR]）；
-    //    ef_search 键也不被接受。故 Enterprise/Community 统一走 SCALAR，不做 HFQ 分支。
+    //    ef_search 键也不被接受。故量化统一走 SCALAR；
+    //    HFQ（High-Fidelity Quantized 检索增强重打分）不是 quantization 类型，而是靠
+    //    vector.default_search_expansion_factor > 1.0 开启：先 SCALAR 扩大召回 → 原始 FP32 二次重打分。
+    //    故 Enterprise 用 SCALAR + default_search_expansion_factor=1.5，正确启用 HFQ 而不改量化类型。
     //
     // 兼容策略：保留创建 3 个旧索引的语句（IF NOT EXISTS 语义，已存在则 no-op），
     //          避免破坏旧环境；查询层优先用合并索引，旧索引仅向后兼容。
@@ -111,6 +114,7 @@ export async function ensureSchema(driver: Driver, dimension: number = 1024): Pr
               \`vector.dimensions\`: ${dimension},
               \`vector.similarity_function\`: 'cosine',
               \`vector.quantization.type\`: 'SCALAR',
+              \`vector.default_search_expansion_factor\`: 1.5,
               \`vector.hnsw.m\`: 16,
               \`vector.hnsw.ef_construction\`: 128
             }
