@@ -89,15 +89,15 @@ export async function ensureSchema(driver: Driver, dimension: number = 1024): Pr
     //  - m=16: 每个 HNSW 节点默认连接数 → 平衡内存占用和召回，默认足够
     //  - ef_construction=128: 构建时探索深度 → 比默认 100 略高，提升召回，构建慢一点可接受
     //  - ef_search=64: 查询时探索深度 → 比 48 略高，保证 recall；NAS 查询 QPS 不高可接受
-    //  - vector.quantization.type: 'scalar' → 标量量化压缩约 50% 存储，适合内存有限场景；
-    //          若追求极致精度（向量量少+高 recall）可改 'none'；
-    //          2026.07 起 HFQ/Binary quantization 已 GA，需更省内存可试 'binary'
-    //          （注意：binary 默认 search_expansion_factor 由 2.0 升为 3.0）
+    //  - vector.quantization.type: 'HFQ' (企业版) → 8-bit 高保真量化（2026.07+ GA），
+    //    相对 SCALAR 召回精度更高、存储更省；2.4.1 之前用 'scalar' 标量量化压缩约 50% 存储。
+    //    生产已核实 2026.07.1 Enterprise，HFQ 可用。
+    //    （注意：binary 默认 search_expansion_factor 由 2.0 升为 3.0，未采用）
     //
-    // v2.4.1 企业版识别：CREATE VECTOR INDEX ... OPTIONS 的精细 HNSW/量化参数
-    // 在 Community 上支持有限（量化/HFQ 等部分选项不可用）。因此：
-    //   - Enterprise：尝试带精细 OPTIONS 的 CREATE VECTOR INDEX 语法
-    //   - Community/未知：使用不带 OPTIONS 的基础 CREATE VECTOR INDEX 语法
+    // v2.4.1 企业版识别 + 量化分支（2026-08-17 决策）：
+    // 量化/HFQ 等精细 OPTIONS 仅 Enterprise 支持，Community 上不可用。因此：
+    //   - Enterprise：精细 OPTIONS + HFQ 高保真量化（提升 1024 维向量召回精度）
+    //   - Community/未知：基础语法，不设置 quantization（Community 不支持该选项，即"普通"）
     //   - 两者失败均回落过程化调用，保证可用性
     //
     // 兼容策略：保留创建 3 个旧索引的语句（IF NOT EXISTS 语义，已存在则 no-op），
@@ -117,7 +117,7 @@ export async function ensureSchema(driver: Driver, dimension: number = 1024): Pr
             indexConfig: {
               \`vector.dimensions\`: ${dimension},
               \`vector.similarity_function\`: 'cosine',
-              \`vector.quantization.type\`: 'scalar',
+              \`vector.quantization.type\`: 'HFQ',
               \`vector.hnsw.m\`: 16,
               \`vector.hnsw.ef_construction\`: 128,
               \`vector.hnsw.ef_search\`: 64
