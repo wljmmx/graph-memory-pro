@@ -78,6 +78,11 @@ export async function ensureSchema(driver: Driver, dimension: number = 1024): Pr
         `CREATE FULLTEXT INDEX conversation_search IF NOT EXISTS FOR (n:ConversationMessage) ON [n.content] OPTIONS { analyzer: "cjk" }`
       );
     } catch { /* may exist */ }
+    try {
+      await session.run(
+        `CREATE FULLTEXT INDEX experience_search IF NOT EXISTS FOR (n:Experience) ON [n.name, n.description, n.content] OPTIONS { analyzer: "cjk" }`
+      );
+    } catch { /* may exist */ }
 
     // 向量索引 (Neo4j 5.11+):
     // v2.3.2 阶段二: 合并为单一多 label 索引（Task|Skill|Event 共用 'embedding' 属性）
