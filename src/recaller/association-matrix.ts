@@ -355,6 +355,12 @@ export class AssociationMatrix {
     // 序列化时 JSON.stringify(NaN)→null，反序列化 Float32Array.from(null)→0，
     // 导致 M 全零矩阵（含对角 1 也被清零）。此处检查并跳过 NaN 向量。
     if (hasNaN(vec)) {
+      // v2.5.2: 记录日志，避免静默丢弃学习信号
+      console.warn(`[graph-memory-pro:association-matrix] NaN 向量被拦截，未提交 M 更新`, {
+        vecLen: vec.length,
+        reward,
+        timestamp: Date.now(),
+      });
       return { applied: false, neighborhoodGain: 0 };
     }
 

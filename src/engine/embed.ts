@@ -253,7 +253,24 @@ async function performEmbedRequest(
           }
         }
       }
-      return vecs;
+      // v2.5.2: 过滤含 NaN/Infinity 的向量，防止下游污染 M 矩阵
+      const cleanVecs: number[][] = [];
+      for (let i = 0; i < vecs.length; i++) {
+        const v = vecs[i];
+        let hasBad = false;
+        for (let j = 0; j < v.length; j++) {
+          if (!Number.isFinite(v[j])) { hasBad = true; break; }
+        }
+        if (hasBad) {
+          console.warn(`[graph-memory-pro:embed] 向量含 NaN/Infinity，已丢弃`, { model, inputIndex: i, inputLen: inputs.length });
+        } else {
+          cleanVecs.push(v);
+        }
+      }
+      if (cleanVecs.length === 0 && vecs.length > 0) {
+        throw new Error(`Embedding model returned all NaN vectors (model=${model})`);
+      }
+      return cleanVecs;
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       lastErr.push(error);
