@@ -518,6 +518,18 @@ export class AssociationMatrix {
    * 注意：M 矩阵 4MB，序列化较重，仅在 gm_maintain 周期性保存
    */
   serialize(): string {
+    // v2.5.3: 写盘前防御 —— 若已学习过但 M 全 0（死锁），重置为单位矩阵，
+    // 防止坏状态被持久化永久化。
+    if (this.t > 0 && isAllZero(this.M)) {
+      console.warn("[association-matrix] serialize: M 全 0（死锁），重置为单位矩阵");
+      this.M = createIdentityMatrix(this.dim);
+      this.mW = new Float32Array(this.dim * this.dim);
+      this.vW = new Float32Array(this.dim * this.dim);
+      this.mBias = new Float32Array(this.dim);
+      this.vBias = new Float32Array(this.dim);
+      this.t = 0;
+      this.updateCount = 0;
+    }
     return JSON.stringify({
       dim: this.dim,
       // v2.5.2: 序列化时把 NaN/Infinity 归一为 0，避免 JSON.stringify(NaN)→null，
@@ -545,32 +557,60 @@ export class AssociationMatrix {
     if (data.dim !== this.dim) {
       throw new Error(`dim mismatch: expected ${this.dim}, got ${data.dim}`);
     }
-    // v2.5.2: 兼容历史污染文件。旧版本若 M 被 NaN 污染，JSON 里 NaN→null，
-    // Float32Array.from(null) 得不到期望值；这里显式把 null/NaN 归一为 0，
-    // 避免读到 undefined/NaN 破坏矩阵维度。
-    this.M = fromJsonArray(data.M, this.dim * this.dim);
-    this.bias = fromJsonArray(data.bias, this.dim);
-    this.gain = fromJsonArray(data.gain, this.dim);
-    this.rowScale = fromJsonArray(data.rowScale, this.dim);
-    this.mW = fromJsonArray(data.mW, this.dim * this.dim);
-    this.vW = fromJsonArray(data.vW, this.dim * this.dim);
-    this.mBias = fromJsonArray(data.mBias, this.dim);
-    this.vBias = fromJsonArray(data.vBias, this.dim);
+    // v2.5.3: fromJsonArray 对非数组数据返回 null，此处逐字段回退——
+    // M 损坏 → 单位矩阵（保证可学习、不丢对角），其余 → 零阵。
+    // 绝不静默接受全 0 矩阵（会进入 Adam 死锁且无法自愈）。
+    const dim = this.dim;
+    const M = fromJsonArray(data.M, dim * dim);
+    this.M = M ?? createIdentityMatrix(dim);
+    this.bias = fromJsonArray(data.bias, dim) ?? new Float32Array(dim);
+    this.gain = fromJsonArray(data.gain, dim) ?? new Float32Array(dim).fill(1);
+    this.rowScale = fromJsonArray(data.rowScale, dim) ?? new Float32Array(dim).fill(1);
+    this.mW = fromJsonArray(data.mW, dim * dim) ?? new Float32Array(dim * dim);
+    this.vW = fromJsonArray(data.vW, dim * dim) ?? new Float32Array(dim * dim);
+    this.mBias = fromJsonArray(data.mBias, dim) ?? new Float32Array(dim);
+    this.vBias = fromJsonArray(data.vBias, dim) ?? new Float32Array(dim);
     this.t = data.t ?? 0;
-    this.bnRunningMean = fromJsonArray(data.bnRunningMean, this.dim) ?? new Float32Array(this.dim);
+    this.bnRunningMean = fromJsonArray(data.bnRunningMean, dim) ?? new Float32Array(dim);
     this.bnRunningVar = data.bnRunningVar != null
-      ? fromJsonArray(data.bnRunningVar, this.dim)
-      : new Float32Array(this.dim).fill(1);
+      ? (fromJsonArray(data.bnRunningVar, dim) ?? new Float32Array(dim).fill(1))
+      : new Float32Array(dim).fill(1);
     this.updateCount = data.updateCount ?? 0;
     this.rejectedCount = data.rejectedCount ?? 0;
     // 学习曲线采样（兼容旧文件无此字段）
     this.learningHistory = Array.isArray(data.learningHistory)
       ? data.learningHistory.slice(-this.learningHistoryMaxSize)
       : [];
+
+    // v2.5.3: 死锁自愈 —— 已学习过（t>0）但 M 全 0 = 状态损坏
+    // （曾因旧版 fromJsonArray 静默归零导致）。重置为单位矩阵并清空动量，
+    // 否则零梯度 → Adam 动量恒 0 → 矩阵永远学不回来。
+    if (this.t > 0 && isAllZero(this.M)) {
+      console.warn("[association-matrix] deserialize: M 全 0（状态损坏），重置为单位矩阵并清空动量");
+      this.M = createIdentityMatrix(dim);
+      this.mW = new Float32Array(dim * dim);
+      this.vW = new Float32Array(dim * dim);
+      this.mBias = new Float32Array(dim);
+      this.vBias = new Float32Array(dim);
+      this.bias = new Float32Array(dim);
+      this.gain = new Float32Array(dim).fill(1);
+      this.rowScale = new Float32Array(dim).fill(1);
+      this.t = 0;
+      this.updateCount = 0;
+      this.rejectedCount = 0;
+    }
   }
 }
 
 // ── 辅助函数 ──────────────────────────────────────
+
+/** v2.5.3: 判断 Float32Array 是否全 0（死锁检测用） */
+function isAllZero(arr: ArrayLike<number>): boolean {
+  for (let i = 0; i < arr.length; i++) {
+    if (arr[i] !== 0) return false;
+  }
+  return true;
+}
 
 /** v2.5.2: 检查数组是否含 NaN（含 Infinity 一并处理），用于防污染入 M */
 function hasNaN(arr: ArrayLike<number>): boolean {
@@ -591,18 +631,18 @@ function sanitizeForJson(arr: ArrayLike<number>): number[] {
 }
 
 /**
- * v2.5.2: 从 JSON 数据构建 Float32Array。
- * 兼容旧文件中的 null（NaN→JSON null）与缺失值，统一归一为 0，
- * 保证返回数组长度恒为 expectedLen（不足补 0，超出截断）。
+ * v2.5.3: 从 JSON 数据构建 Float32Array。
+ * 兼容旧文件中的 null（NaN→JSON null）与缺失值，统一归一为 0。
+ * 若 data 不是数组（字段缺失/损坏/被截断），返回 null 交由调用方回退，
+ * 绝不静默返回全 0 —— 全 0 矩阵会让学习进入死锁且无法自愈。
  */
-function fromJsonArray(data: unknown, expectedLen: number): Float32Array {
+function fromJsonArray(data: unknown, expectedLen: number): Float32Array | null {
+  if (!Array.isArray(data)) return null;
   const out = new Float32Array(expectedLen);
-  if (Array.isArray(data)) {
-    const n = Math.min(data.length, expectedLen);
-    for (let i = 0; i < n; i++) {
-      const v = data[i];
-      out[i] = typeof v === "number" && Number.isFinite(v) ? v : 0;
-    }
+  const n = Math.min(data.length, expectedLen);
+  for (let i = 0; i < n; i++) {
+    const v = data[i];
+    out[i] = typeof v === "number" && Number.isFinite(v) ? v : 0;
   }
   return out;
 }
