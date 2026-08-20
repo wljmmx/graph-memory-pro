@@ -11,7 +11,7 @@ dist/
 # v2.1.2 AutoTuner 持久化状态
 auto-tuner-state.json
 ~/.openclaw/graph-memory-pro/
-~/.openclaw/extensions/graph-memory-pro/association-matrix/
+association-matrix/
 
 # v2.2.0 本地配置 / Benchmark 数据
 config.local.json
@@ -24,3 +24,4 @@ actionlint
 *.bak.*
 
 
+*.bak
