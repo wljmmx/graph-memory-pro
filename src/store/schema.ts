@@ -22,7 +22,17 @@ export function computeEmbeddingHash(name: string, description: string, content:
 
 // ─── Schema 初始化 ──────────────────────────────────────────
 
+// v2.6.x: 最近一次 ensureSchema 使用的向量维度。供社区向量索引缺失时自愈复用
+// （community.ts triggerCommunityIndexHeal 无需再次解析配置，直接用本值重建索引）。
+let _lastEnsuredDimension = 1024;
+
+/** 最近一次 ensureSchema 使用的向量维度（默认 1024） */
+export function getLastEnsuredDimension(): number {
+  return _lastEnsuredDimension;
+}
+
 export async function ensureSchema(driver: Driver, dimension: number = 1024): Promise<void> {
+  _lastEnsuredDimension = dimension;
   const session = getSession(driver);
   try {
     // 约束: 节点 id 唯一
@@ -170,16 +180,53 @@ export async function ensureSchema(driver: Driver, dimension: number = 1024): Pr
       `);
     } catch { /* may exist */ }
 
-    // 社区摘要向量索引
+    // 社区摘要向量索引（v2.6.x: 迁移到新式 CREATE VECTOR INDEX 语法）。
+    //
+    // 根因修复（recall-generalized failed × N）：
+    //   旧实现用 CALL db.index.vector.createNodeIndex 过程化 API 创建该索引，外层 catch {}
+    //   静默吞掉错误。在 Neo4j 2026.x 上该过程已被移除 → 创建必然失败 → 索引永远不存在 →
+    //   召回时 communityVectorSearchWithReps 报 "There is no such vector schema index:
+    //   gm_community_embedding"，导致 generalized 召回 100% 失效。
+    // 现与节点索引（gm_node_embedding）对齐：Enterprise 启用量化/HNSW 精细参数，
+    // Community 走基础配置；新语法失败时回退到旧式过程调用（兼容老版本 Neo4j）。
     try {
-      await session.run(`
-        CALL db.index.vector.createNodeIndex(
-          'gm_community_embedding', ['GmCommunity'], 'embedding',
-          ${dimension}, 'cosine'
-        )
-      `);
+      if (isEnterprise) {
+        await session.run(`
+          CREATE VECTOR INDEX gm_community_embedding IF NOT EXISTS
+          FOR (c:GmCommunity) ON c.embedding
+          OPTIONS {
+            indexConfig: {
+              \`vector.dimensions\`: ${dimension},
+              \`vector.similarity_function\`: 'cosine',
+              \`vector.quantization.type\`: 'SCALAR',
+              \`vector.default_search_expansion_factor\`: 1.5,
+              \`vector.hnsw.m\`: 16,
+              \`vector.hnsw.ef_construction\`: 128
+            }
+          }
+        `);
+      } else {
+        await session.run(`
+          CREATE VECTOR INDEX gm_community_embedding IF NOT EXISTS
+          FOR (c:GmCommunity) ON c.embedding
+          OPTIONS {
+            indexConfig: {
+              \`vector.dimensions\`: ${dimension},
+              \`vector.similarity_function\`: 'cosine'
+            }
+          }
+        `);
+      }
     } catch {
-      // 可能已存在
+      // 老版本 Neo4j（无 CREATE VECTOR INDEX 语法）→ 回退旧式过程化 API（可能已存在）
+      try {
+        await session.run(`
+          CALL db.index.vector.createNodeIndex(
+            'gm_community_embedding', ['GmCommunity'], 'embedding',
+            ${dimension}, 'cosine'
+          )
+        `);
+      } catch { /* may exist */ }
     }
 
     // 社区摘要约束

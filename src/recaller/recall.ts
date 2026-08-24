@@ -632,7 +632,14 @@ export class Recaller {
       logPhase("recall_generalized", Date.now() - tGen, { finalNodes: finalNodes.length });
       return { nodes: finalNodes, edges: [], tokenEstimate: finalNodes.length * 30 };
     } catch (e) {
-      log.warn("recall-generalized failed", { error: String(e) });
+      // v2.6.x 告警降噪：社区向量索引缺失是 schema 问题（由 community.ts 自愈 + 优雅降级，
+      // 此处一般不触发；仅作防御性兜底），降为 debug 避免同秒多次误导性 warn。
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/no such vector schema index/i.test(msg) && msg.includes("gm_community_embedding")) {
+        log.debug("recall-generalized skipped (community vector index missing — self-healing in progress)");
+      } else {
+        log.warn("recall-generalized failed", { error: msg });
+      }
       return { nodes: [], edges: [], tokenEstimate: 0 };
     }
   }

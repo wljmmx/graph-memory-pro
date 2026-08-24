@@ -8,7 +8,57 @@ import type { Driver } from "neo4j-driver";
 import neo4j from "neo4j-driver";
 import type { GmNode, CommunitySummary } from "../types.ts";
 import { getSession } from "./db.ts";
-import { recordToNode } from "./schema.ts";
+import { recordToNode, getLastEnsuredDimension } from "./schema.ts";
+
+// ─── v2.6.x: 社区向量索引缺失的自愈 + 优雅降级 ──────────────
+//
+// 背景：旧版 ensureSchema 用已被 Neo4j 2026.x 移除的过程化 API
+//   CALL db.index.vector.createNodeIndex('gm_community_embedding', ...)
+// 创建社区索引，错误被外层 catch 静默吞掉 → 索引永不存在 →
+// communityVectorSearch* 每次调用都抛 "no such vector schema index" →
+// recall-generalized 每轮都打误导性 warn 并返回空（generalized 召回 100% 失效）。
+//
+// 处理：检测到索引缺失时
+//   1. 优雅降级返回空数组（与节点搜索 Promise.allSettled 的兜底策略一致），不再抛错；
+//   2. 节流触发一次 ensureSchema 自愈（fire-and-forget，幂等 IF NOT EXISTS），
+//      下次召回自动恢复，无需重启插件。
+
+const COMMUNITY_INDEX_NAME = "gm_community_embedding";
+const SELF_HEAL_COOLDOWN_MS = 5 * 60 * 1000;
+let _lastCommunityIndexHeal = 0;
+
+/** 判定是否为「社区向量索引缺失」错误 */
+function isMissingCommunityIndex(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /no such vector schema index/i.test(msg) && msg.includes(COMMUNITY_INDEX_NAME);
+}
+
+/**
+ * 节流触发社区索引自愈（不阻塞召回）。
+ * 幂等（CREATE ... IF NOT EXISTS），失败静默（下次召回再试）。
+ */
+function triggerCommunityIndexHeal(driver: Driver): void {
+  const now = Date.now();
+  if (now - _lastCommunityIndexHeal < SELF_HEAL_COOLDOWN_MS) return;
+  _lastCommunityIndexHeal = now;
+  const dim = getLastEnsuredDimension();
+  import("./schema.ts").then(async ({ ensureSchema }) => {
+    try {
+      await ensureSchema(driver, dim);
+    } catch {
+      // 自愈失败不影响本次召回，留待下次触发
+    }
+  }).catch(() => { /* 动态导入失败忽略 */ });
+}
+
+/** 捕获索引缺失错误：返回空数组并触发自愈；其他错误原样抛出 */
+function degradeOnMissingIndex<T>(err: unknown, driver: Driver, fallback: T): T {
+  if (isMissingCommunityIndex(err)) {
+    triggerCommunityIndexHeal(driver);
+    return fallback;
+  }
+  throw err;
+}
 
 // ─── 社区管理 ──────────────────────────────────────────────
 
@@ -165,17 +215,22 @@ export async function communityVectorSearch(
 ): Promise<Array<{ id: string; summary: string; score: number }>> {
   const session = getSession(driver);
   try {
-    const result = await session.run(
-      `CALL db.index.vector.queryNodes('gm_community_embedding', 5, $vec)
-       YIELD node, score
-       RETURN node, score
-       ORDER BY score DESC`,
-      { vec },
-    );
-    return result.records.map((r) => {
-      const props = r.get("node").properties;
-      return { id: props.id, summary: props.summary, score: r.get("score") };
-    });
+    try {
+      const result = await session.run(
+        `CALL db.index.vector.queryNodes('gm_community_embedding', 5, $vec)
+         YIELD node, score
+         RETURN node, score
+         ORDER BY score DESC`,
+        { vec },
+      );
+      return result.records.map((r) => {
+        const props = r.get("node").properties;
+        return { id: props.id, summary: props.summary, score: r.get("score") };
+      });
+    } catch (err) {
+      // v2.6.x: 索引缺失 → 优雅降级返回空 + 节流自愈；其他错误原样抛出
+      return degradeOnMissingIndex(err, driver, []);
+    }
   } finally {
     await session.close();
   }
@@ -204,21 +259,26 @@ export async function communityVectorSearchWithReps(
 ): Promise<Array<{ node: GmNode; communityScore: number }>> {
   const session = getSession(driver);
   try {
-    const result = await session.run(
-      `CALL db.index.vector.queryNodes('gm_community_embedding', toInteger($maxCommunities), $vec)
-       YIELD node, score
-       WITH node.id AS cid, score AS cscore
-       WHERE cid IS NOT NULL
-       MATCH (n:Task|Skill|Event {status: 'active'})
-       WHERE n.communityId = cid
-       RETURN n, cscore
-       ORDER BY cscore DESC, n.pagerank DESC, n.validatedCount DESC`,
-      { vec, maxCommunities },
-    );
-    return result.records.map((r) => ({
-      node: recordToNode(r.get("n")),
-      communityScore: r.get("cscore"),
-    })).filter((r): r is { node: GmNode; communityScore: number } => r.node !== null);
+    try {
+      const result = await session.run(
+        `CALL db.index.vector.queryNodes('gm_community_embedding', toInteger($maxCommunities), $vec)
+         YIELD node, score
+         WITH node.id AS cid, score AS cscore
+         WHERE cid IS NOT NULL
+         MATCH (n:Task|Skill|Event {status: 'active'})
+         WHERE n.communityId = cid
+         RETURN n, cscore
+         ORDER BY cscore DESC, n.pagerank DESC, n.validatedCount DESC`,
+        { vec, maxCommunities },
+      );
+      return result.records.map((r) => ({
+        node: recordToNode(r.get("n")),
+        communityScore: r.get("cscore"),
+      })).filter((r): r is { node: GmNode; communityScore: number } => r.node !== null);
+    } catch (err) {
+      // v2.6.x: 索引缺失 → 优雅降级返回空 + 节流自愈；其他错误原样抛出
+      return degradeOnMissingIndex(err, driver, []);
+    }
   } finally {
     await session.close();
   }
