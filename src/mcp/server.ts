@@ -37,12 +37,50 @@ import { VERSION } from "../version.ts";
 
 export interface McpServerHandle {
   httpServer: http.Server;
+  /** 实际监听端口（EADDRINUSE 自动重试后可能 ≠ cfg.mcp.port） */
+  port: number;
   close(): Promise<void>;
 }
 
 /** 将强类型对象转为 MCP SDK 要求的 Record<string, unknown> 结构 */
 function asStructured<T>(obj: T): Record<string, unknown> {
   return obj as unknown as Record<string, unknown>;
+}
+
+/**
+ * 优雅关闭 HTTP server，避免挂起的连接导致 close() 无法 resolve。
+ *   - 先尝试正常 close（等待活跃 sockets 自然关闭）
+ *   - 超时后调用 closeAllConnections / closeIdleConnections 强制回收
+ *   - 无论超时与否最终都 resolve，保证重启链路不被卡住
+ */
+function closeHttpServer(server: http.Server, timeoutMs = 2000): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      try { server.closeAllConnections?.(); } catch { /* ignore */ }
+      try { server.closeIdleConnections?.(); } catch { /* ignore */ }
+      // 二次尝试 close（如果仍抛出，直接放弃；启动方已经 null 化 handle 进入下一轮）
+      try {
+        server.close(() => done());
+      } catch {
+        done();
+      }
+    }, timeoutMs);
+    try {
+      server.close((_err) => {
+        clearTimeout(timer);
+        done();
+      });
+    } catch {
+      clearTimeout(timer);
+      done();
+    }
+  });
 }
 
 /**
@@ -53,6 +91,7 @@ function asStructured<T>(obj: T): Record<string, unknown> {
  * @param llm LLM complete 函数（可选）
  * @param embed Embedding 函数（可选）
  * @param recaller Recaller 实例（可选，gm_feedback 需要）
+ * @returns McpServerHandle（含实际监听端口，便于心跳用真实端口探测）
  */
 export async function startMcpServer(
   driver: Driver,
@@ -62,11 +101,13 @@ export async function startMcpServer(
   recaller?: Recaller,
   batchEmbed?: BatchEmbedFn,
 ): Promise<McpServerHandle> {
-  const port = cfg.mcp?.port ?? 7800;
+  const basePort = cfg.mcp?.port ?? 7800;
   const host = cfg.mcp?.host ?? "127.0.0.1";
   const path = cfg.mcp?.path ?? "/mcp";
   const authToken = cfg.mcp?.authToken;
   const enabledTools = cfg.mcp?.enabledTools; // 省略 = 全部启用
+  // v2.5.x fix: 与 API server 对称，EADDRINUSE 时自动 +1/+2/+3 重试
+  const MAX_PORT_RETRIES = 3;
 
   /** 检查工具是否启用 */
   function toolEnabled(name: string): boolean {
@@ -554,22 +595,47 @@ export async function startMcpServer(
     }
   });
 
-  // 启动监听
-  await new Promise<void>((resolve, reject) => {
-    httpServer.on("error", reject);
-    httpServer.listen(port, host, () => {
-      console.log(`[graph-memory-pro] MCP server listening on http://${host}:${port}${path}`);
-      resolve();
+  // 启动监听：EADDRINUSE 时自动 +1/+2/+3 重试（与 http-server.ts API server 对称）
+  let listenError: Error | null = null;
+  let actualPort = basePort;
+  for (let attempt = 0; attempt <= MAX_PORT_RETRIES; attempt++) {
+    listenError = null;
+    const tryPort = basePort + attempt;
+    actualPort = tryPort;
+    await new Promise<void>((resolve, reject) => {
+      const onError = (err: NodeJS.ErrnoException) => {
+        httpServer.removeListener("listening", onListening);
+        if (err.code === "EADDRINUSE" && attempt < MAX_PORT_RETRIES) {
+          console.warn(`[graph-memory-pro] MCP server port ${tryPort} in use (EADDRINUSE), trying ${tryPort + 1}...`);
+          resolve();
+        } else {
+          listenError = err;
+          reject(err);
+        }
+      };
+      const onListening = () => {
+        httpServer.removeListener("error", onError);
+        actualPort = tryPort;
+        console.log(`[graph-memory-pro] MCP server listening on http://${host}:${tryPort}${path}`);
+        resolve();
+      };
+      httpServer.once("error", onError);
+      httpServer.once("listening", onListening);
+      httpServer.listen(tryPort, host);
+    }).catch((err) => {
+      listenError = err;
     });
-  });
+    if (!listenError && httpServer.listening) break;
+    if (listenError) throw listenError;
+  }
 
   return {
     httpServer,
+    port: actualPort,
     async close() {
-      await mcpServer.close();
-      await new Promise<void>((resolve, reject) => {
-        httpServer.close((err) => err ? reject(err) : resolve());
-      });
+      // 先关 SDK 层，再优雅关 HTTP server（超时强回收）
+      try { await mcpServer.close(); } catch { /* ignore */ }
+      await closeHttpServer(httpServer, 2000);
       console.log("[graph-memory-pro] MCP server closed");
     },
   };

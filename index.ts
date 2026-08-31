@@ -169,7 +169,7 @@ let _maintenanceTimer: ReturnType<typeof setInterval> | null = null;
 // v2.3.2 S3: 后台 timer 重入保护 — 防止单次执行超过 interval 时下一次 tick 重叠执行
 let _extractorRunning = false;
 let _maintenanceRunning = false;
-let _mcpServerHandle: { close(): Promise<void> } | null = null;
+let _mcpServerHandle: { port: number; close(): Promise<void> } | null = null;
 let _apiServerHandle: { close(): Promise<void> } | null = null;
 let _apiServerAutoStarted = false;
 // 跟踪 API 服务器当前使用的 driver 实例
@@ -575,17 +575,18 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
           _batchEmbed ?? undefined,
         );
         // v2.3.3 MCP-1: 启动后健康探测，确认 server 真正就绪（非仅 listen 成功）
-        const port = cfg.mcp?.port ?? 7800;
+        // v2.5.x fix: 用 handle.port（自动重试后可能 ≠ cfg.mcp.port），避免端口漂移时误判
+        const actualPort = _mcpServerHandle.port;
         const host = cfg.mcp?.host ?? "127.0.0.1";
         try {
-          const resp = await fetch(`http://${host}:${port}/health`, { signal: AbortSignal.timeout(3000) });
+          const resp = await fetch(`http://${host}:${actualPort}/health`, { signal: AbortSignal.timeout(3000) });
           if (resp.ok) {
-            log.info(`[graph-memory-pro] MCP server started + health OK (port=${port})`);
+            log.info(`[graph-memory-pro] MCP server started + health OK (port=${actualPort})`);
           } else {
-            log.warn(`[graph-memory-pro] MCP server started but /health returned ${resp.status}`);
+            log.warn(`[graph-memory-pro] MCP server started but /health returned ${resp.status} (port=${actualPort})`);
           }
         } catch (probeErr) {
-          log.warn(`[graph-memory-pro] MCP server started but health probe failed: ${probeErr}`);
+          log.warn(`[graph-memory-pro] MCP server started but health probe failed: ${probeErr} (port=${actualPort})`);
         }
       } catch (err) {
         log.error(`[graph-memory-pro] MCP server start failed: ${err}`);
@@ -972,6 +973,9 @@ async function restartMcpServer(): Promise<void> {
   if (_mcpServerHandle) {
     try { await _mcpServerHandle.close(); } catch { /* ignore */ }
     _mcpServerHandle = null;
+    // v2.5.x fix: close() 后短暂等待，给内核释放端口（TIME_WAIT → 释放）的时间窗口；
+    //   MCP Streamable HTTP 常有 hold-sockets 场景，close 不等于端口立刻可用。
+    await new Promise<void>((r) => setTimeout(r, 200));
   }
   try {
     const { startMcpServer } = await import("./src/mcp/server.ts");
@@ -982,7 +986,7 @@ async function restartMcpServer(): Promise<void> {
       _recaller ?? undefined,
       _batchEmbed ?? undefined,
     );
-    log.info("[heartbeat] MCP server re-established");
+    log.info(`[heartbeat] MCP server re-established (port=${_mcpServerHandle.port})`);
   } catch (err) {
     log.error(`[heartbeat] MCP server restart failed: ${err}`);
   }
@@ -1038,14 +1042,16 @@ function startHeartbeatMonitor(): void {
 
   // MCP server 探针（仅启用时）
   if (_cfg?.mcp?.enabled === true) {
-    const mcpPort = _cfg.mcp?.port ?? 7800;
     const mcpHost = _cfg.mcp?.host ?? "127.0.0.1";
     probes.push({
       name: "mcp-server",
       check: async () => {
         if (!_mcpServerHandle) return false;
+        // v2.5.x fix: 用 handle.port（自动重试后可能 ≠ cfg.mcp.port），避免
+        //   端口漂移后仍探测 7800 持续 false → 反复触发重启
+        const port = _mcpServerHandle.port;
         try {
-          const resp = await fetch(`http://${mcpHost}:${mcpPort}/health`, { signal: AbortSignal.timeout(3000) });
+          const resp = await fetch(`http://${mcpHost}:${port}/health`, { signal: AbortSignal.timeout(3000) });
           return resp.ok;
         } catch { return false; }
       },
