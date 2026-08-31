@@ -2070,11 +2070,28 @@ export default definePluginEntry({
         id?: string;
         provenanceLabel?: string;
         sourceType?: string;
+        // v2.4.3 SDK 2026.8.1 合规：Memory result status 契约
+        //   "ok" = 成功读取；"not_found" = 允许范围内的文件/节点不存在
+        //   （SDK migration guide：“At registration, every statusless result from an older
+        //    external memory manager preserves its legacy successful-read semantics and
+        //    becomes status: 'ok'. Only an explicit status: 'not_found' reports absence.”）
+        status?: "ok" | "not_found";
       } | null> {
         if (!_driver) return null;
         try {
           const n = await findById(_driver, params.lookup);
-          if (!n) return null;
+          if (!n) {
+            // v2.4.3 SDK 2026.8.1：必须用 status:"not_found" 显式报告不存在，
+            // 而非依靠 null 或缺内容来暗示（否则 compat 层会误判为空成功读取）。
+            return {
+              corpus: "graph-memory-pro",
+              path: params.lookup,
+              content: "",
+              fromLine: 0,
+              lineCount: 0,
+              status: "not_found",
+            };
+          }
           // v2.3.5 方案 C: get() 展开视为强使用信号，记录到 session 缓存
           if (params.agentSessionKey) {
             _lastSessionKey = params.agentSessionKey; // v2.5.4: 缓存供钩子降级
@@ -2089,6 +2106,7 @@ export default definePluginEntry({
             fromLine: 0,
             lineCount: 0,
             id: n.id,
+            status: "ok",
           };
         } catch {
           return null;

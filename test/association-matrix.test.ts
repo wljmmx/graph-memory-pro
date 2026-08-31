@@ -99,7 +99,7 @@ describe("AssociationMatrix 构造与默认值", () => {
     expect(DEFAULT_AM_CONFIG.momentum).toBe(0.9);
     expect(DEFAULT_AM_CONFIG.adamBeta1).toBe(0.9);
     expect(DEFAULT_AM_CONFIG.adamBeta2).toBe(0.999);
-    expect(DEFAULT_AM_CONFIG.warmupFeedbacks).toBe(100);
+    expect(DEFAULT_AM_CONFIG.warmupFeedbacks).toBe(40);
   });
 
   it("DEFAULT_MU_CONFIG 默认值符合源码规格", () => {
@@ -573,15 +573,15 @@ describe("createAssociationMatrix 工厂", () => {
     expect(vecEqual(am.transform(vec, 50), vec)).toBe(false);
   });
 
-  it("两者都缺失时 warmupFeedbacks 默认 100", () => {
+  it("两者都缺失时 warmupFeedbacks 默认 40", () => {
     const cfg = makeCfg({ associationMatrix: { enabled: true } });
     const am = createAssociationMatrix(4, cfg);
     const vec = new Float32Array([1, 2, 3, 4]);
     am.updateBatchNormStats(vec);
-    // feedbackCount=99 < 100 → 冷启动
-    expect(vecEqual(am.transform(vec, 99), vec)).toBe(true);
-    // feedbackCount=100 >= 100 → 热启动
-    expect(vecEqual(am.transform(vec, 100), vec)).toBe(false);
+    // feedbackCount=39 < 40 → 冷启动
+    expect(vecEqual(am.transform(vec, 39), vec)).toBe(true);
+    // feedbackCount=40 >= 40 → 热启动
+    expect(vecEqual(am.transform(vec, 40), vec)).toBe(false);
   });
 
   it("marginalUtility 配置被提取（neighborhoodSize / minImprovement 生效）", () => {

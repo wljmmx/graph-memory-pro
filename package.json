@@ -1,6 +1,6 @@
 {
   "name": "@openclaw/graph-memory-pro",
-  "version": "2.4.2",
+  "version": "2.4.3",
   "description": "Neo4j Knowledge Graph Memory Engine for OpenClaw — GDS PageRank, community detection, vector index",
   "author": "Ananas <Wywelljob@gmail.com>",
   "license": "MIT",
@@ -13,6 +13,10 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     }
+  },
+  "engines": {
+    "node": ">=22.22.3 <23 || >=24.15 <25 || >=25.9 <26 || >=26",
+    "npm": ">=11.16"
   },
   "scripts": {
     "build": "tsup",
@@ -32,7 +36,7 @@
     "zod": "^3.24.0"
   },
   "devDependencies": {
-    "@types/node": "^20.19.43",
+    "@types/node": "^22.15.21",
     "@typescript-eslint/eslint-plugin": "^8.62.1",
     "@typescript-eslint/parser": "^8.62.1",
     "eslint": "^9.39.4",
@@ -43,19 +47,19 @@
     "vitest": "^1.4.0"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.3.24-beta.2"
+    "openclaw": ">=2026.8.1"
   },
   "openclaw": {
     "extensions": [
       "./dist/index.js"
     ],
     "compat": {
-      "pluginApi": ">=2026.3.24-beta.2",
-      "minGatewayVersion": "2026.3.24-beta.2"
+      "pluginApi": ">=2026.8.1",
+      "minGatewayVersion": "2026.8.1"
     },
     "build": {
-      "openclawVersion": "2026.3.24-beta.2",
-      "pluginSdkVersion": "2026.3.24-beta.2"
+      "openclawVersion": "2026.8.1",
+      "pluginSdkVersion": "2026.8.1"
     }
   },
   "files": [

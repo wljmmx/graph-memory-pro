@@ -238,7 +238,7 @@ describe("clampAction", () => {
 describe("ACTION_BOUNDS", () => {
   it("包含全部 8 个参数的 bounds", () => {
     const keys = Object.keys(ACTION_BOUNDS);
-    expect(keys).toHaveLength(8);
+    expect(keys).toHaveLength(10);
     expect(keys).toEqual(
       expect.arrayContaining([
         "recallMaxNodes",
@@ -249,6 +249,8 @@ describe("ACTION_BOUNDS", () => {
         "freshTailCount",
         "vectorSearchTopK",
         "compactTurnCount",
+        "interimTurnsThreshold",
+        "extractorIntervalMs",
       ]),
     );
   });
@@ -262,6 +264,7 @@ describe("ACTION_BOUNDS", () => {
       expect([
         "recallMaxNodes", "recallMaxDepth", "pagerankDamping", "pagerankIterations",
         "dedupThreshold", "freshTailCount", "vectorSearchTopK", "compactTurnCount",
+        "interimTurnsThreshold", "extractorIntervalMs",
       ]).toContain(key);
     }
   });
@@ -275,6 +278,8 @@ describe("ACTION_BOUNDS", () => {
     expect(ACTION_BOUNDS.freshTailCount).toEqual({ min: 5, max: 20 });
     expect(ACTION_BOUNDS.vectorSearchTopK).toEqual({ min: 5, max: 30 });
     expect(ACTION_BOUNDS.compactTurnCount).toEqual({ min: 3, max: 12 });
+    expect(ACTION_BOUNDS.interimTurnsThreshold).toEqual({ min: 5, max: 30 });
+    expect(ACTION_BOUNDS.extractorIntervalMs).toEqual({ min: 15 * 60 * 1000, max: 60 * 60 * 1000 });
   });
 });
 
@@ -302,6 +307,8 @@ describe("AutoTuner 构造与默认值", () => {
       freshTailCount: 10,
       vectorSearchTopK: 12,
       compactTurnCount: 6,
+      interimTurnsThreshold: 15,
+      extractorIntervalMs: 20 * 60 * 1000,
     });
   });
 

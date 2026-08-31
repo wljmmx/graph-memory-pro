@@ -129,7 +129,7 @@ describe("ensureSchema 向量索引企业版条件参数", () => {
     expect(vectorCall).toBeTruthy();
     expect(vectorCall.query).toContain("vector.quantization.type");
     expect(vectorCall.query).toContain("ef_construction");
-    expect(vectorCall.query).toContain("ef_search");
+    expect(vectorCall.query).not.toContain("ef_search");
   });
 
   it("11. Community 使用基础参数（不含精细化选项）", async () => {
