@@ -28,6 +28,7 @@ export {
   graphWalk,
   getNodeCount,
   getNodesByType,
+  getNodesByTimeRange,
   getTopNodes,
 } from "./nodes.ts";
 

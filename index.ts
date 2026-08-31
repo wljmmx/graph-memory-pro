@@ -21,13 +21,13 @@
 import { definePluginEntry, buildJsonPluginConfigSchema } from "openclaw/plugin-sdk/plugin-entry";
 import { Type } from "typebox";
 import type { Driver } from "neo4j-driver";
-import type { GmConfig, GmNode, NodeType } from "./src/types.ts";
+import type { GmConfig, GmNode, GmEdge, EdgeType, NodeType } from "./src/types.ts";
 import type { CompleteFn } from "./src/engine/llm.ts";
 import type { EmbedFn, BatchEmbedFn } from "./src/engine/embed.ts";
 import { createCompleteFn, createRuntimeCompleteFn, type AgentModelContext } from "./src/engine/llm.ts";
 import { createEmbedFn, createBatchEmbedFn } from "./src/engine/embed.ts";
 import { initDriver, closeDriver, verifyWithRetry, verifyConnectivity, getDriver, setDriver as setDbDriver } from "./src/store/db.ts";
-import { ensureSchema, getNodeCount, getEdgeCount, searchNodes, upsertNode, findById } from "./src/store/store.ts";
+import { ensureSchema, getNodeCount, getEdgeCount, searchNodes, upsertNode, upsertEdge, findById, getNodesByTimeRange as getNodesByTimeRangeInternal } from "./src/store/store.ts";
 import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
 import { runMaintenance, type GraphHealthReport } from "./src/graph/maintenance.ts";
@@ -35,10 +35,14 @@ import { resolveBenchmarkDataDir } from "./src/benchmark/dataDir.ts";
 import { reEmbedNodes } from "./src/graph/reembed.ts";
 import { setExternalLogger, createLogger } from "./src/logger.ts";
 import { setTimingEnabled } from "./src/timing.ts";
-import { extractInBackground, extractInterimTexts } from "./src/services/extract-service.ts";  // v2.3.4 ARCH-1: 从 index.ts 拆出 // v2.5.4: 中间 assistant 文本提取
+import { extractInBackground, extractInterimTexts, writeExtractResult } from "./src/services/extract-service.ts";  // v2.3.4 ARCH-1: 从 index.ts 拆出 // v2.5.4: 中间 assistant 文本提取
 import { getSessionRecallCache, resetSessionRecallCache } from "./src/recaller/session-recall-cache.ts";
 import type { TuneCycleResult } from "./src/evolution/auto-tuner.ts";
 import { startHeartbeat, type HeartbeatHandle, type HeartbeatProbe } from "./src/server/heartbeat.ts";  // v2.5.x 心跳自愈
+import { embedNode } from "./src/store/embed-helper.ts";
+import { runIncrementalMaintenance } from "./src/graph/incremental-maintenance.ts";
+import type { IncrementalMaintenanceResult } from "./src/graph/incremental-maintenance.ts";
+import type { JudgeResult } from "./src/recaller/judge.ts";
 
 const log = createLogger("index");
 
@@ -1161,6 +1165,133 @@ export function getRecaller(): Recaller | null {
  */
 export function getEffectiveConfig(): GmConfig | null {
   return _cfg;
+}
+
+/**
+ * v2.4.2 顶层导出（薄封装，兼容 ROADMAP 规划功能）：
+ * 判定召回节点是否被最终回答实际使用（Judge 链路）。
+ *
+ * 依赖模块级 Recaller 单例（须在初始化后调用，未初始化抛错）。
+ *
+ * @param recalledNodes 召回节点列表
+ * @param assistantReply 最终 assistant 回答
+ * @returns Judge 判定结果（usedNodeIds / unusedNodeIds 等）
+ */
+export async function judgeRecall(
+  recalledNodes: GmNode[],
+  assistantReply: string,
+): Promise<JudgeResult> {
+  const jm = _recaller?.getJudgeManager();
+  if (!jm) throw new Error("JudgeManager not initialized — call init() first");
+  return jm.judge(recalledNodes, assistantReply);
+}
+
+/**
+ * v2.4.2 顶层导出（薄封装）：进化单个节点的内容并重新嵌入。
+ *
+ * 更新节点字段（name/description/content 等），写入库并重新生成 embedding。
+ *
+ * @param nodeId 节点 id
+ * @param updates 需要更新的字段（部分更新）
+ */
+export async function evolveNode(
+  nodeId: string,
+  updates: Partial<GmNode>,
+): Promise<void> {
+  if (!_driver || !_embed) throw new Error("Driver or embed not initialized — call init() first");
+  const node = await findById(_driver, nodeId);
+  if (!node) throw new Error(`Node ${nodeId} not found`);
+  const updatedNode: GmNode = { ...node, ...updates, updatedAt: Date.now() };
+  await upsertNode(_driver, updatedNode, _cfg ?? undefined);
+  await embedNode(_driver, _embed, nodeId, {
+    name: updatedNode.name,
+    description: updatedNode.description,
+    content: updatedNode.content,
+  }, _cfg ?? undefined);
+}
+
+/**
+ * v2.4.2 顶层导出（薄封装）：按时间范围查询节点。
+ *
+ * @param params start/end（毫秒时间戳）、timeField（createdAt|updatedAt）、
+ *              可选 type 与 limit
+ * @returns 命中的节点列表（按 timeField 倒序）
+ */
+export async function getNodesByTimeRange(
+  params: {
+    start: number;
+    end: number;
+    timeField: "createdAt" | "updatedAt";
+    type?: NodeType;
+    limit?: number;
+  },
+): Promise<GmNode[]> {
+  if (!_driver) throw new Error("Driver not initialized — call init() first");
+  return getNodesByTimeRangeInternal(_driver, params);
+}
+
+/**
+ * v2.4.2 顶层导出（薄封装）：将暂存节点内容合并为一次提取并写入图谱。
+ *
+ * 将 nodes 的 content 拼接后交给 Extractor 提取三元组，并把结果写入 Neo4j。
+ *
+ * @param nodes 待合并的节点（取其 content 作为提取输入）
+ * @returns 本次提取落库的节点名列表
+ */
+export async function consolidateBuffer(nodes: GmNode[]): Promise<string[]> {
+  if (!_driver || !_extractor || !_llm || !_cfg) {
+    throw new Error("Dependencies not initialized — call init() first");
+  }
+  const result = await _extractor.extract(
+    _llm,
+    "",
+    nodes.map((n) => n.content).join("\n"),
+  );
+  await writeExtractResult(_driver, _cfg, result);
+  return result.nodes.map((n) => n.name);
+}
+
+/**
+ * v2.4.2 顶层导出（薄封装）：在两个节点之间创建一条关系边。
+ *
+ * @param fromId 起点节点 id
+ * @param toId 终点节点 id
+ * @param type 边类型
+ */
+export async function linkNodes(
+  fromId: string,
+  toId: string,
+  type: EdgeType,
+): Promise<void> {
+  if (!_driver) throw new Error("Driver not initialized — call init() first");
+  const edge: GmEdge = {
+    id: `edge-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    type,
+    fromId,
+    toId,
+    instruction: "",
+    weight: 1,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  await upsertEdge(_driver, edge);
+}
+
+/**
+ * v2.4.2 顶层导出（薄封装）：运行一次增量维护。
+ *
+ * 仅处理 markDirty 标记的脏节点（去重 / 陈旧性检查等），执行后清除标记。
+ *
+ * @returns 增量维护结果统计
+ */
+export async function incrementalMaintain(): Promise<IncrementalMaintenanceResult> {
+  if (!_driver || !_cfg) throw new Error("Driver or config not initialized — call init() first");
+  return runIncrementalMaintenance(
+    _driver,
+    _cfg,
+    _llm ?? undefined,
+    _embed ?? undefined,
+  );
 }
 
 // 在模块加载时触发自动启动（不阻塞模块导入）

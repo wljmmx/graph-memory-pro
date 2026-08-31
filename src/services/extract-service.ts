@@ -77,7 +77,7 @@ export async function extractInBackground(
  * @param cfg 插件配置（读取 embedding.model）
  * @param result 提取结果（nodes + edges）
  */
-async function writeExtractResult(
+export async function writeExtractResult(
   driver: Driver,
   cfg: GmConfig | null,
   result: ExtractResult,

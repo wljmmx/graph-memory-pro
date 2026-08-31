@@ -6,7 +6,7 @@
 
 import type { Driver, Node, Relationship } from "neo4j-driver";
 import neo4j from "neo4j-driver";
-import type { GmNode, GmEdge, GmConfig } from "../types.ts";
+import type { GmNode, GmEdge, GmConfig, NodeType } from "../types.ts";
 import { getSession, getFlowScope } from "./db.ts";
 import {
   typeToLabel,
@@ -555,6 +555,43 @@ export async function getNodesByType(
       ? `MATCH (n:${label}) WHERE (n.status = 'active' OR n.status IS NULL)${benchmarkExclusion("n")} RETURN n ORDER BY n.validatedCount DESC LIMIT toInteger($limit)`
       : `MATCH (n:${label}) WHERE (n.status = 'active' OR n.status IS NULL)${benchmarkExclusion("n")} RETURN n ORDER BY n.validatedCount DESC`;
     const result = await session.run(q, { limit: limit ?? 0 });
+    return result.records.map((r) => recordToNode(r.get("n"))).filter((n): n is GmNode => n !== null);
+  } finally {
+    await session.close();
+  }
+}
+
+/**
+ * v2.4.2 顶层导出：按时间范围查询节点。
+ *
+ * @param driver Neo4j driver
+ * @param params 查询参数（start/end 毫秒时间戳，timeField 指定 createdAt 或 updatedAt）
+ * @returns 命中的节点列表（按 timeField 倒序）
+ */
+export async function getNodesByTimeRange(
+  driver: Driver,
+  params: {
+    start: number;
+    end: number;
+    timeField: "createdAt" | "updatedAt";
+    type?: NodeType;
+    limit?: number;
+  },
+): Promise<GmNode[]> {
+  const { start, end, timeField, type, limit } = params;
+  const label = type ? typeToLabel(type) : "Task|Skill|Event";
+  const session = getSession(driver);
+  try {
+    const q = `
+      MATCH (n:${label})
+      WHERE (n.status = 'active' OR n.status IS NULL)
+        AND n.${timeField} >= toFloat($start)
+        AND n.${timeField} <= toFloat($end)${benchmarkExclusion("n")}
+      RETURN n
+      ORDER BY n.${timeField} DESC
+      ${limit ? "LIMIT toInteger($limit)" : ""}
+    `;
+    const result = await session.run(q, { start, end, limit: limit ?? 0 });
     return result.records.map((r) => recordToNode(r.get("n"))).filter((n): n is GmNode => n !== null);
   } finally {
     await session.close();
