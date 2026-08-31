@@ -1168,16 +1168,21 @@ export function getEffectiveConfig(): GmConfig | null {
 }
 
 /**
- * v2.4.2 顶层导出（薄封装，兼容 ROADMAP 规划功能）：
- * 判定召回节点是否被最终回答实际使用（Judge 链路）。
+ * v2.4.2 顶层导出（薄封装，对齐 ROADMAP 第七节预留 API）：
+ * 启发式召回质量评估（I-2，Tier 1）——判定召回节点是否被最终回答实际使用。
  *
+ * 签名对齐 ROADMAP：judgeRecall(query, nodes, response)。
  * 依赖模块级 Recaller 单例（须在初始化后调用，未初始化抛错）。
  *
+ * @param query 触发召回的原始 query（ROADMAP 契约保留参数：当前启发式判定
+ *              仅对 assistant 回复做字符串匹配，query 暂不参与，保留以兼容
+ *              lcm-graph-extra R-2 调用约定）
  * @param recalledNodes 召回节点列表
  * @param assistantReply 最终 assistant 回答
  * @returns Judge 判定结果（usedNodeIds / unusedNodeIds 等）
  */
 export async function judgeRecall(
+  query: string,
   recalledNodes: GmNode[],
   assistantReply: string,
 ): Promise<JudgeResult> {
@@ -1187,23 +1192,24 @@ export async function judgeRecall(
 }
 
 /**
- * v2.4.2 顶层导出（薄封装）：进化单个节点的内容并重新嵌入。
+ * v2.4.2 顶层导出（薄封装，对齐 ROADMAP 第七节预留 API）：
+ * 触发节点演化（S-11）——更新节点内容并重新嵌入。
  *
  * 更新节点字段（name/description/content 等），写入库并重新生成 embedding。
  *
- * @param nodeId 节点 id
+ * @param id 节点 id
  * @param updates 需要更新的字段（部分更新）
  */
 export async function evolveNode(
-  nodeId: string,
+  id: string,
   updates: Partial<GmNode>,
 ): Promise<void> {
   if (!_driver || !_embed) throw new Error("Driver or embed not initialized — call init() first");
-  const node = await findById(_driver, nodeId);
-  if (!node) throw new Error(`Node ${nodeId} not found`);
+  const node = await findById(_driver, id);
+  if (!node) throw new Error(`Node ${id} not found`);
   const updatedNode: GmNode = { ...node, ...updates, updatedAt: Date.now() };
   await upsertNode(_driver, updatedNode, _cfg ?? undefined);
-  await embedNode(_driver, _embed, nodeId, {
+  await embedNode(_driver, _embed, id, {
     name: updatedNode.name,
     description: updatedNode.description,
     content: updatedNode.content,
