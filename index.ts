@@ -450,6 +450,14 @@ async function trySelfInitDriver(): Promise<Driver | null> {
  * 同时初始化 LLM/Embedding/Recaller 等组件，确保 API 接口可用。
  */
 async function startApiServerFromDriver(driver: Driver): Promise<void> {
+  // v2.5.x fix: 幂等强单例 — 与 register()→doGatewayInit 并发时，仅允许一条链真正启动。
+  //   调用方（autoStartApiServer）在调用前已同步置位 _apiServerAutoStarted；此处再复查
+  //   句柄，若已由其它链启动则直接返回，避免重复 startApiServer → EADDRINUSE 端口漂移
+  //   （7850→7852）与双监听泄漏。
+  if (_apiServerHandle) {
+    log.info("startApiServerFromDriver: API server already started, skipping (idempotent guard)");
+    return;
+  }
   // 同步 index.ts 的 _driver（供 tools / services 使用）
   if (!_driver) {
     _driver = driver;
@@ -1095,6 +1103,12 @@ async function autoStartApiServer(): Promise<void> {
 
   // 阶段 1：快速轮询 — 等待 register()/gateway_start 设置 driver
   for (let i = 0; i < FAST_ATTEMPTS; i++) {
+    // v2.5.x fix: 每轮复查，避免 register()→doGatewayInit 已在上一轮 await 期间
+    // 声明占用（_apiServerAutoStarted=true）后，本循环仍启动第二个 API server。
+    if (_apiServerAutoStarted || _apiServerHandle) {
+      log.info("auto-start: API server already started, skipping fast-loop");
+      return;
+    }
     const driver = getDriver();
     if (driver) {
       _apiServerAutoStarted = true;
@@ -1106,6 +1120,7 @@ async function autoStartApiServer(): Promise<void> {
 
   // 阶段 2：自驱动初始化 — 轮询失败，尝试自建 driver
   log.warn("auto-start: gateway driver not ready after 10s, trying self-init...");
+  if (_apiServerAutoStarted || _apiServerHandle) return;
   const selfDriver = await trySelfInitDriver();
   if (selfDriver) {
     _apiServerAutoStarted = true;
@@ -1132,6 +1147,8 @@ async function autoStartApiServer(): Promise<void> {
 
     // 再次尝试自建 driver（Neo4j 可能刚启动）
     const selfDriverRetry = await trySelfInitDriver();
+    // v2.5.x fix: await 后复查——期间 doGatewayInit 可能已完成启动
+    if (_apiServerAutoStarted || _apiServerHandle) return;
     if (selfDriverRetry) {
       _apiServerAutoStarted = true;
       if (_autoStartRetryTimer) { clearInterval(_autoStartRetryTimer); _autoStartRetryTimer = null; }
@@ -1463,30 +1480,23 @@ async function doGatewayInit(api: any, logger: LoggerLike): Promise<void> {
   }
 
   if (!_apiServerAutoStarted) {
-    const apiServerCfg = _cfg.apiServer;
-    if (apiServerCfg?.enabled !== false) {
+    // v2.5.x fix: 委托 startApiServerFromDriver 统一做 full init（API + MCP + 后台
+    // extractor/maintenance），与模块顶层 autoStartApiServer 共用同一条启动链。
+    //   1) 同步置位声明"我正启动"，避免两条链（register→doGatewayInit 与
+    //      autoStartApiServer 轮询）在 await 期间都读到 false → 各启动一个 API server
+    //      （7850→7851/7852 端口漂移 + 双监听泄漏）。
+    //   2) full init 只发生一次，MCP（=7800）与后台服务不会因另一条链被跳过而缺失。
+    _apiServerAutoStarted = true;
+    if (_cfg.apiServer?.enabled === false) {
+      logger?.info?.("[graph-memory-pro] API server disabled via config (apiServer.enabled=false)");
+    } else {
       try {
-        const { startApiServer } = await import("./src/server/http-server.ts");
-        _apiServerHandle = await startApiServer(
-          driver, _cfg,
-          {
-            enabled: true,
-            port: apiServerCfg?.port ?? 7850,
-            host: apiServerCfg?.host ?? "127.0.0.1",
-            authToken: apiServerCfg?.authToken,
-          },
-          logger,
-          _llm ?? undefined,
-          _embed ?? undefined,
-          _recaller ?? undefined,
-        );
-        _apiServerAutoStarted = true;
-        _apiServerDriver = driver;
+        await startApiServerFromDriver(driver);
       } catch (err) {
+        // 启动失败：回滚声明，允许后续 autoStart 重试
+        _apiServerAutoStarted = false;
         logger?.error?.(`[graph-memory-pro] API server failed to start: ${err}`);
       }
-    } else {
-      logger?.info?.("[graph-memory-pro] API server disabled via config (apiServer.enabled=false)");
     }
   }
 
