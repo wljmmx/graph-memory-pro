@@ -25,6 +25,8 @@ export interface ApiServerConfig {
 
 export interface ApiServerHandle {
   httpServer: http.Server;
+  /** 实际监听端口（EADDRINUSE 自动重试后可能 ≠ 配置端口） */
+  port: number;
   close(): Promise<void>;
 }
 
@@ -244,6 +246,7 @@ export async function startApiServer(
 
   return {
     httpServer,
+    port: actualPort,
     async close() {
       logger.info?.("[graph-memory-pro] API server closing...");
       await new Promise<void>((resolve, reject) => {

@@ -41,6 +41,13 @@ export class Recaller {
     this.queryCache = new QueryCache(cfg.queryCache);
   }
 
+  /**
+   * v2.5.x: 心跳驱动恢复后热替换 driver，保持单例对象身份不变
+   * （外部插件如 graph-adapter/lcm 复用本 Recaller，重建对象会使其引用失效）。
+   * Recaller 不缓存 driver 派生状态，替换后所有查询即走新 driver。
+   */
+  setDriver(driver: Driver): void { this.driver = driver; }
+
   setEmbedFn(fn: EmbedFn): void { this.embed = fn; }
 
   /**

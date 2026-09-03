@@ -159,6 +159,9 @@ function isValidEdge(edge: unknown): boolean {
 export class Extractor {
   constructor(private _driver: Driver) {}
 
+  /** v2.5.x: 心跳驱动恢复后热替换 driver（Extractor 不缓存 driver 派生状态） */
+  setDriver(driver: Driver): void { this._driver = driver; }
+
   async extract(
     llm: CompleteFn,
     userContent: string,

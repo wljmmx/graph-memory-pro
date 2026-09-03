@@ -170,7 +170,7 @@ let _maintenanceTimer: ReturnType<typeof setInterval> | null = null;
 let _extractorRunning = false;
 let _maintenanceRunning = false;
 let _mcpServerHandle: { port: number; close(): Promise<void> } | null = null;
-let _apiServerHandle: { close(): Promise<void> } | null = null;
+let _apiServerHandle: { port: number; close(): Promise<void> } | null = null;
 let _apiServerAutoStarted = false;
 // 跟踪 API 服务器当前使用的 driver 实例
 // 当 gateway_start 替换了自建 driver 时，需要重启 API 服务器
@@ -969,7 +969,7 @@ async function restartApiServer(): Promise<void> {
       _embed ?? undefined,
       _recaller ?? undefined,
     );
-    log.info("[heartbeat] API server re-established");
+    log.info(`[heartbeat] API server re-established (port=${_apiServerHandle.port})`);
   } catch (err) {
     log.error(`[heartbeat] API server restart failed: ${err}`);
   }
@@ -1010,6 +1010,13 @@ async function recoverDriver(): Promise<void> {
       _driver = d;
       setDbDriver(d);
       _apiServerDriver = d;
+      // v2.5.x fix: 热替换持有旧 driver 的模块级单例（Recaller/Extractor）。
+      //   之前只换 _driver + 重启 HTTP 路由，但 _recaller（被 graph-adapter/lcm 复用）
+      //   与 _extractor 仍持有已被 close 的旧 driver → 恢复后所有经由它们的查询
+      //   持续 session:query 连接错误，graph-adapter 反复进入 recovery 循环。
+      //   setDriver 保持对象身份不变，外部复用引用不失效，内存态（judge/矩阵）不丢失。
+      _recaller?.setDriver(d);
+      _extractor?.setDriver(d);
       log.info("[heartbeat] Neo4j driver re-established; restarting servers with new driver");
       await restartApiServer();
       await restartMcpServer();
@@ -1034,14 +1041,16 @@ function startHeartbeatMonitor(): void {
   const probes: HeartbeatProbe[] = [];
 
   // API server 探针
-  const apiPort = _cfg?.apiServer?.port ?? 7850;
   const apiHost = _cfg?.apiServer?.host ?? "127.0.0.1";
   probes.push({
     name: "api-server",
     check: async () => {
       if (!_apiServerHandle) return false;
+      // v2.5.x fix: 用 handle.port（自动重试后可能 ≠ cfg.apiServer.port），避免
+      //   端口漂移（EADDRINUSE → 7851/7852）后仍探测 7850 持续 false → 抖动重启循环
+      const port = _apiServerHandle.port;
       try {
-        const resp = await fetch(`http://${apiHost}:${apiPort}/health`, { signal: AbortSignal.timeout(3000) });
+        const resp = await fetch(`http://${apiHost}:${port}/health`, { signal: AbortSignal.timeout(3000) });
         return resp.ok;
       } catch { return false; }
     },
@@ -1361,7 +1370,14 @@ async function doGatewayInit(api: any, logger: LoggerLike): Promise<void> {
 
   // 1. 连接 Neo4j
   const driver = await getOrCreateDriver(_cfg, logger);
-  if (!driver) return;
+  if (!driver) {
+    // v2.5.x fix: 连接失败也要启动心跳兜底自愈。此前直接 return，startHeartbeatMonitor()
+    //   在函数末尾不会执行 → 冷启动时 Neo4j 短暂不可用，插件永久"禁用"，
+    //   只能依赖 autoStartApiServer 的 10s 慢轮询恢复。心跳幂等，已有句柄则跳过；
+    //   neo4j-driver 探针在 _driver 为 null 时返回 false，连续失败后由 recoverDriver 重连。
+    startHeartbeatMonitor();
+    return;
+  }
   _driver = driver;
 
   // 2. 初始化 Schema
