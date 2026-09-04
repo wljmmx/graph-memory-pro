@@ -31,7 +31,7 @@ const EXTRACT_SYSTEM_PROMPT = `你是知识图谱三元组提取专家。
 - 用户的每一个有实际信息的请求都应该尝试提取
 - 只提取明确提及的信息，不要猜测或编造
 - 如果当前内容没有可提取的信息，返回空数组
-- 节点name统一使用英文
+- 节点name保留原文语言：中文内容使用中文名，英文内容使用英文名（与启发式提取一致，避免中文概念被碎片化成不同英文名）
 - 每个节点/边都提供description
 - edge.instruction: 描述这条关系具体是什么意思
 - 因果关系（CAUSED_BY/LEADS_TO）单轮即可识别："因为 X 所以 Y"的因果链
@@ -39,10 +39,10 @@ const EXTRACT_SYSTEM_PROMPT = `你是知识图谱三元组提取专家。
 ## 输出格式 (JSON)
 {
   "nodes": [
-    { "type": "TASK|SKILL|EVENT", "name": "英文名", "description": "描述", "content": "具体内容" }
+    { "type": "TASK|SKILL|EVENT", "name": "节点名(保留原文语言，中文内容用中文)", "description": "描述", "content": "具体内容" }
   ],
   "edges": [
-    { "type": "USED_SKILL|SOLVED_BY|REQUIRES|PATCHES|CONFLICTS_WITH|RELATES_TO|CAUSED_BY|LEADS_TO", "fromName": "节点名", "toName": "节点名", "instruction": "关系说明", "condition": "条件（可选）" }
+    { "type": "USED_SKILL|SOLVED_BY|REQUIRES|PATCHES|CONFLICTS_WITH|RELATES_TO|CAUSED_BY|LEADS_TO", "fromName": "节点名(与nodes.name一致)", "toName": "节点名(与nodes.name一致)", "instruction": "关系说明", "condition": "条件（可选）" }
   ]
 }`;
 

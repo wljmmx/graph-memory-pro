@@ -388,3 +388,30 @@ describe("Extractor", () => {
     expect(result.edges).toEqual([]);
   });
 });
+
+// ============================================================
+// 中文支持 (v2.6.0)
+// ============================================================
+
+describe("extractTriplets 中文支持 (v2.6.0)", () => {
+  it("prompt 不再强制英文命名，要求保留原文语言", async () => {
+    let capturedPrompt = "";
+    const fakeLlm: any = async (_sys: string, prompt: string) => {
+      capturedPrompt = _sys;
+      return `{"nodes":[],"edges":[]}`;
+    };
+    await extractTriplets(fakeLlm, "用户中文消息", "助手中文回复");
+    expect(capturedPrompt).toContain("保留原文语言");
+    expect(capturedPrompt).not.toContain("节点name统一使用英文");
+  });
+
+  it("中文节点名正常通过验证并保留", async () => {
+    const fakeLlm: any = async () =>
+      JSON.stringify({
+        nodes: [{ type: "SKILL", name: "Redis 缓存优化", description: "优化缓存命中率", content: "用 Redis 加速" }],
+        edges: [],
+      });
+    const result = await extractTriplets(fakeLlm, "使用Redis", "用 Redis 缓存优化性能");
+    expect(result.nodes[0].name).toBe("Redis 缓存优化");
+  });
+});
