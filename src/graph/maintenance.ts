@@ -24,7 +24,7 @@ const log = createLogger("maintenance");
 
 // ── 子模块函数 import（用于 runMaintenance 编排） ───────────────
 import { computeStalenessScores } from "./maintenance/staleness.ts";
-import { healthCheck } from "./maintenance/health.ts";
+import { healthCheck, computeGraphHealthScore } from "./maintenance/health.ts";
 import { computeImportanceScores } from "./maintenance/importance.ts";
 import { resolveConflicts } from "./maintenance/conflict.ts";
 import { adjustEdgeWeights } from "./maintenance/edge-weights.ts";
@@ -39,6 +39,8 @@ export { resolveConflicts, type ConflictResolutionConfig } from "./maintenance/c
 export { adjustEdgeWeights, type EdgeWeightsConfig } from "./maintenance/edge-weights.ts";
 export { applyReverseMemory, type ReverseMemoryConfig } from "./maintenance/reverse-memory.ts";
 export { backfillTimestamps, type TimestampBackfillResult } from "./maintenance/timestamp-backfill.ts";
+export { computeGraphHealthScore, persistGraphHealthMetric, type GraphHealthScore } from "./maintenance/health.ts";
+export { runSelfHeal, revertSelfHeal, cjkBigramSim, type SelfHealResult, type SelfHealConfig } from "./maintenance/self-heal.ts";
 
 export interface RepairEdgeResult {
   relatesToCreated: number;
@@ -255,6 +257,16 @@ export async function runMaintenance(
         } else if (report.anomalies.length === 0) {
           log.info("health: OK", { activeNodes: report.nodes.active, edges: report.edges.total });
         }
+        // v2.6.0: 图谱 0-100 健康评分 + 落盘（供趋势/自愈判定）
+        if (cfg?.graphHealth?.scoring?.enabled !== false) {
+          try {
+            const score = await computeGraphHealthScore(driver);
+            await persistGraphHealthMetric(driver, score, cfg?.graphHealth?.scoring?.historyKeep ?? 200);
+            log.info("health-score", { score: score.score, sparse: score.sparse });
+          } catch (e) {
+            log.warn("health score failed", { error: String(e) });
+          }
+        }
       } catch (err) {
         log.warn("health check failed", { error: String(err) });
       }
@@ -341,6 +353,41 @@ export async function runMaintenance(
       }
     }
     _lockTimestamp = Date.now();
+
+    // ── Phase 12: 稀疏图自愈（v2.6.0，默认开启） ──
+    // 依赖：Phase 6 评分（computeGraphHealthScore 内部重算，不依赖先落盘）
+    // 保守策略：稀疏时补边/合并/社区重连；若自愈后评分未改善且建过边则回滚
+    if (cfg?.sparseHeal?.enabled !== false) {
+      try {
+        const { runSelfHeal, revertSelfHeal } = await import("./maintenance/self-heal.ts");
+        const healResult = await runSelfHeal(driver, {
+          scoreThreshold: cfg.sparseHeal?.scoreThreshold,
+          inferSimMin: cfg.sparseHeal?.inferSimMin,
+          inferSimMax: cfg.sparseHeal?.inferSimMax,
+          maxEdgesPerNode: cfg.sparseHeal?.maxEdgesPerNode,
+          maxEdgesPerCycle: cfg.sparseHeal?.maxEdgesPerCycle,
+          mergeSimThreshold: cfg.sparseHeal?.mergeSimThreshold,
+          confidenceFactor: cfg.sparseHeal?.confidenceFactor,
+          cjkWeight: cfg.sparseHeal?.cjkWeight,
+        });
+        if (healResult.scored && healResult.sparse && healResult.edgesAdded > 0) {
+          log.info("self-heal", {
+            edgesAdded: healResult.edgesAdded,
+            mergesApplied: healResult.mergesApplied,
+            reLinks: healResult.reLinks,
+            score: healResult.score?.score,
+          });
+          // 自愈后复评：未改善则回滚本次自愈边
+          const after = await computeGraphHealthScore(driver, cfg.sparseHeal?.scoreThreshold ?? 60);
+          if (after.score <= (healResult.score?.score ?? 0)) {
+            const reverted = await revertSelfHeal(driver);
+            log.warn("self-heal reverted: no improvement", { before: healResult.score?.score, after: after.score, removed: reverted.removed });
+          }
+        }
+      } catch (err) {
+        log.warn("self-heal failed", { error: String(err) });
+      }
+    }
 
     // ── Phase 11: G-4 嵌入版本迁移（v2.1.2 第四批） ──
     // 检测节点 embeddingModel 分布，若存在不一致（旧模型遗留）则触发重嵌入

@@ -380,3 +380,18 @@ describe("applyReverseMemory (L-4)", () => {
     expect(calls[2].params.newStaleness).toBeCloseTo(0.4, 5);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════
+// v2.6.0 自愈与评分导出 — barrel 导出存在性
+// ═══════════════════════════════════════════════════════════════
+
+describe("v2.6.0 自愈与评分导出", () => {
+  it("barrel 导出 computeGraphHealthScore / persistGraphHealthMetric / runSelfHeal / revertSelfHeal", async () => {
+    const m = await import("../src/graph/maintenance.ts");
+    expect(typeof m.computeGraphHealthScore).toBe("function");
+    expect(typeof m.persistGraphHealthMetric).toBe("function");
+    expect(typeof m.runSelfHeal).toBe("function");
+    expect(typeof m.revertSelfHeal).toBe("function");
+    expect(typeof m.cjkBigramSim).toBe("function");
+  });
+});
