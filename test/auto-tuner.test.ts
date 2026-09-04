@@ -238,7 +238,7 @@ describe("clampAction", () => {
 describe("ACTION_BOUNDS", () => {
   it("包含全部 8 个参数的 bounds", () => {
     const keys = Object.keys(ACTION_BOUNDS);
-    expect(keys).toHaveLength(10);
+    expect(keys).toHaveLength(14);
     expect(keys).toEqual(
       expect.arrayContaining([
         "recallMaxNodes",
@@ -251,6 +251,10 @@ describe("ACTION_BOUNDS", () => {
         "compactTurnCount",
         "interimTurnsThreshold",
         "extractorIntervalMs",
+        "edgeInferThreshold",
+        "selfHealMaxEdgesPerCycle",
+        "isolatedMergeThreshold",
+        "graphScoreAlertThreshold",
       ]),
     );
   });
@@ -265,6 +269,7 @@ describe("ACTION_BOUNDS", () => {
         "recallMaxNodes", "recallMaxDepth", "pagerankDamping", "pagerankIterations",
         "dedupThreshold", "freshTailCount", "vectorSearchTopK", "compactTurnCount",
         "interimTurnsThreshold", "extractorIntervalMs",
+        "edgeInferThreshold", "selfHealMaxEdgesPerCycle", "isolatedMergeThreshold", "graphScoreAlertThreshold",
       ]).toContain(key);
     }
   });
@@ -309,6 +314,10 @@ describe("AutoTuner 构造与默认值", () => {
       compactTurnCount: 6,
       interimTurnsThreshold: 15,
       extractorIntervalMs: 20 * 60 * 1000,
+      edgeInferThreshold: 0.7,
+      selfHealMaxEdgesPerCycle: 50,
+      isolatedMergeThreshold: 0.85,
+      graphScoreAlertThreshold: 60,
     });
   });
 
@@ -529,5 +538,25 @@ describe("runTuneCycle disabled", () => {
 
     expect(result.applied).toBe(false);
     expect(result.reason).toBe("auto-tuner disabled");
+  });
+});
+
+// ─── 9. 稀疏感知动作空间 (v2.6.0) ────────────────────────
+
+describe("稀疏感知动作空间 (v2.6.0)", () => {
+  it("extractActionSpace 含默认稀疏参数", () => {
+    const space = extractActionSpace({} as any);
+    expect(space.edgeInferThreshold).toBe(0.7);
+    expect(space.selfHealMaxEdgesPerCycle).toBe(50);
+    expect(space.isolatedMergeThreshold).toBe(0.85);
+    expect(space.graphScoreAlertThreshold).toBe(60);
+  });
+
+  it("clampAction 将稀疏参数裁剪到范围", () => {
+    const clamped = clampAction({ edgeInferThreshold: 0.1, selfHealMaxEdgesPerCycle: 9999, isolatedMergeThreshold: 0.5, graphScoreAlertThreshold: 10 } as any);
+    expect(clamped.edgeInferThreshold).toBe(0.6);
+    expect(clamped.selfHealMaxEdgesPerCycle).toBe(200);
+    expect(clamped.isolatedMergeThreshold).toBe(0.75);
+    expect(clamped.graphScoreAlertThreshold).toBe(40);
   });
 });

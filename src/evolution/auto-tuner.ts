@@ -16,6 +16,7 @@
  */
 
 import type { GmConfig } from "../types.ts";
+import type { GraphHealthScore } from "../graph/maintenance/health.ts";
 import type { CompleteFn } from "../engine/llm.ts";
 import type { EmbedFn } from "../engine/embed.ts";
 import type { Driver } from "neo4j-driver";
@@ -46,6 +47,11 @@ export interface EvolveActionSpace {
   // v2.5.4: 后台资源节流参数（autoTurn 调优纳入）
   interimTurnsThreshold: number;   // 5-30 轮：中间轮 assistant 文本提取的轮数节流阈值
   extractorIntervalMs: number;     // 900_000-3_600_000 ms (15min~60min)：后台提取定时器间隔
+  // v2.6.0: 稀疏图自愈参数（与 sparseHeal 静态配置联动，调优器启用时覆盖）
+  edgeInferThreshold: number;        // 0.60-0.95 补边相似度下限
+  selfHealMaxEdgesPerCycle: number;  // 10-200 每周期补边上限
+  isolatedMergeThreshold: number;    // 0.75-0.98 孤立节点合并阈值
+  graphScoreAlertThreshold: number;  // 40-80 图谱评分告警阈值
 }
 
 export const ACTION_BOUNDS: Record<keyof EvolveActionSpace, { min: number; max: number }> = {
@@ -60,6 +66,11 @@ export const ACTION_BOUNDS: Record<keyof EvolveActionSpace, { min: number; max: 
   // v2.5.4: 后台提取相关参数范围
   interimTurnsThreshold: { min: 5, max: 30 },
   extractorIntervalMs: { min: 15 * 60 * 1000, max: 60 * 60 * 1000 }, // 15min ~ 60min
+  // v2.6.0: 稀疏自愈参数范围
+  edgeInferThreshold: { min: 0.6, max: 0.95 },
+  selfHealMaxEdgesPerCycle: { min: 10, max: 200 },
+  isolatedMergeThreshold: { min: 0.75, max: 0.98 },
+  graphScoreAlertThreshold: { min: 40, max: 80 },
 };
 
 /** 默认动作空间（基于 GmConfig 提取） */
@@ -76,6 +87,11 @@ export function extractActionSpace(cfg: GmConfig): EvolveActionSpace {
     // v2.5.4: 后台提取相关参数，默认值与运行时常量一致
     interimTurnsThreshold: cfg.background?.interimTurnsThreshold ?? 15,
     extractorIntervalMs: cfg.background?.extractorIntervalMs ?? 20 * 60 * 1000,
+    // v2.6.0: 稀疏自愈参数，默认与 sparseHeal 静态配置一致
+    edgeInferThreshold: cfg.sparseHeal?.inferSimMin ?? 0.7,
+    selfHealMaxEdgesPerCycle: cfg.sparseHeal?.maxEdgesPerCycle ?? 50,
+    isolatedMergeThreshold: cfg.sparseHeal?.mergeSimThreshold ?? 0.85,
+    graphScoreAlertThreshold: cfg.sparseHeal?.scoreThreshold ?? 60,
   };
 }
 
@@ -95,6 +111,14 @@ export function applyActionSpace(cfg: GmConfig, action: EvolveActionSpace): GmCo
       ...(cfg.background ?? {}),
       interimTurnsThreshold: Math.round(action.interimTurnsThreshold),
       extractorIntervalMs: Math.round(action.extractorIntervalMs),
+    },
+    // v2.6.0: 稀疏自愈参数写入 sparseHeal
+    sparseHeal: {
+      ...(cfg.sparseHeal ?? {}),
+      inferSimMin: action.edgeInferThreshold,
+      maxEdgesPerCycle: Math.round(action.selfHealMaxEdgesPerCycle),
+      mergeSimThreshold: action.isolatedMergeThreshold,
+      scoreThreshold: Math.round(action.graphScoreAlertThreshold),
     },
   };
 }
@@ -186,6 +210,8 @@ export class AutoTuner {
   private tuneRound = 0;
   private stagnationCount = 0;
   private bestMetrics: { p1: number; p3: number; mrr: number; f1: number; p99: number } | null = null;
+  /** v2.6.0: 最近一次图谱健康评分（供稀疏诊断） */
+  private lastGraphScore: GraphHealthScore | null = null;
 
   constructor(cfg: Partial<AutoTunerConfig> = {}, llm?: CompleteFn) {
     this.cfg = { ...DEFAULT_AUTOTUNER_CONFIG, ...cfg };
@@ -202,6 +228,11 @@ export class AutoTuner {
       // v2.5.4: 后台提取相关参数默认值
       interimTurnsThreshold: 15,
       extractorIntervalMs: 20 * 60 * 1000, // 20min
+      // v2.6.0: 稀疏自愈参数初始值
+      edgeInferThreshold: 0.7,
+      selfHealMaxEdgesPerCycle: 50,
+      isolatedMergeThreshold: 0.85,
+      graphScoreAlertThreshold: 60,
     };
   }
 
@@ -230,6 +261,11 @@ export class AutoTuner {
    */
   setInitialAction(cfg: GmConfig): void {
     this.currentAction = extractActionSpace(cfg);
+  }
+
+  /** v2.6.0: 注入最近一次图谱健康评分（自愈阶段在调优前调用） */
+  setGraphHealthScore(score: GraphHealthScore | null): void {
+    this.lastGraphScore = score;
   }
 
   /**
@@ -521,6 +557,19 @@ ${JSON.stringify(ACTION_BOUNDS, null, 2)}
       proposed.recallMaxDepth = Math.min(4, this.currentAction.recallMaxDepth + 1);
     }
 
+    // 启发式 5（v2.6.0）：图谱稀疏 → 收紧补边阈值、提高补边上限、放宽合并阈值
+    // 依赖注入：runTuneCycle 传入 graphScore 时生效（无评分时跳过）
+    if (this.lastGraphScore !== null && this.lastGraphScore.score < this.currentAction.graphScoreAlertThreshold) {
+      causes.push({
+        cause: "graph sparse (health score below threshold)",
+        count: 1,
+        examples: [`score=${this.lastGraphScore.score}`],
+      });
+      proposed.edgeInferThreshold = Math.max(0.6, this.currentAction.edgeInferThreshold - 0.05);
+      proposed.selfHealMaxEdgesPerCycle = Math.min(200, this.currentAction.selfHealMaxEdgesPerCycle + 25);
+      proposed.isolatedMergeThreshold = Math.max(0.75, this.currentAction.isolatedMergeThreshold - 0.02);
+    }
+
     return {
       rootCauses: causes,
       proposedAdjustments: proposed,
@@ -592,6 +641,11 @@ ${JSON.stringify(ACTION_BOUNDS, null, 2)}
       // v2.5.4: 后台提取相关参数填充
       interimTurnsThreshold: partial.interimTurnsThreshold ?? this.currentAction.interimTurnsThreshold,
       extractorIntervalMs: partial.extractorIntervalMs ?? this.currentAction.extractorIntervalMs,
+      // v2.6.0: 稀疏自愈参数填充
+      edgeInferThreshold: partial.edgeInferThreshold ?? this.currentAction.edgeInferThreshold,
+      selfHealMaxEdgesPerCycle: partial.selfHealMaxEdgesPerCycle ?? this.currentAction.selfHealMaxEdgesPerCycle,
+      isolatedMergeThreshold: partial.isolatedMergeThreshold ?? this.currentAction.isolatedMergeThreshold,
+      graphScoreAlertThreshold: partial.graphScoreAlertThreshold ?? this.currentAction.graphScoreAlertThreshold,
     };
   }
 
