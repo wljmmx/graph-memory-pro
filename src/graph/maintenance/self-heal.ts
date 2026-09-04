@@ -116,8 +116,7 @@ export async function runSelfHeal(driver: Driver, cfg?: SelfHealConfig): Promise
 
   log.info("self-heal: graph sparse, running recovery", { score: score.score, isolatedRatio: score.metrics.isolatedRatio });
   const session = getSession(driver);
-  const edgesAdded = 0;
-  const mergesApplied = 0;
+  let mergesApplied = 0;
   const mergeCandidates: Array<{ a: string; b: string; sim: number }> = [];
   let reLinks = 0;
   try {
@@ -264,7 +263,6 @@ export async function runSelfHeal(driver: Driver, cfg?: SelfHealConfig): Promise
       }
     }
 
-    const total = edgesAdded + created;
     log.info("self-heal: recovery done", { edgesAdded: created, mergesApplied, reLinks, candidates: mergeCandidates.length });
     return {
       scored: true, score, sparse: true,

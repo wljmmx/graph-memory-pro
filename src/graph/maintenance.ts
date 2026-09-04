@@ -24,7 +24,7 @@ const log = createLogger("maintenance");
 
 // ── 子模块函数 import（用于 runMaintenance 编排） ───────────────
 import { computeStalenessScores } from "./maintenance/staleness.ts";
-import { healthCheck, computeGraphHealthScore } from "./maintenance/health.ts";
+import { healthCheck, computeGraphHealthScore, persistGraphHealthMetric } from "./maintenance/health.ts";
 import { computeImportanceScores } from "./maintenance/importance.ts";
 import { resolveConflicts } from "./maintenance/conflict.ts";
 import { adjustEdgeWeights } from "./maintenance/edge-weights.ts";
