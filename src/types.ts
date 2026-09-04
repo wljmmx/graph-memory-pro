@@ -132,6 +132,12 @@ export interface GmConfig {
     enabled?: boolean;
     /** 异常告警（孤立节点突增等） */
     alertOnAnomaly?: boolean;
+    /** v2.6.0: 图谱 0-100 健康评分（Phase 6 计算并落盘 GraphHealthMetric） */
+    scoring?: {
+      enabled?: boolean;
+      /** 历史评分保留条数（默认 200） */
+      historyKeep?: number;
+    };
   };
 
   // ── v2.1.2 第二批 反馈闭环 + 冷启动 ────────────
@@ -305,6 +311,29 @@ export interface GmConfig {
     llmDiagnosis?: boolean;
     /** 冷启动阈值（累计反馈 < 此值时不触发，默认 100） */
     warmupFeedbacks?: number;
+  };
+
+  // ── v2.6.0 稀疏图自愈（默认开启，Phase 12） ────────────
+
+  /** 稀疏图自维护：补边/合并/社区重连（保守、可回滚） */
+  sparseHeal?: {
+    enabled?: boolean;
+    /** 触发稀疏判定：评分低于此值视为稀疏（默认 60） */
+    scoreThreshold?: number;
+    /** 补边相似度下限（默认 0.70） */
+    inferSimMin?: number;
+    /** 补边相似度上限（默认 0.90，须低于 dedupThreshold 避免与去重冲突） */
+    inferSimMax?: number;
+    /** 每节点补边上限（默认 5） */
+    maxEdgesPerNode?: number;
+    /** 每周期补边上限（默认 50） */
+    maxEdgesPerCycle?: number;
+    /** 孤立节点自动合并相似度阈值（默认 0.85） */
+    mergeSimThreshold?: number;
+    /** 补边权重 = 相似度 × 该系数（默认 1.0） */
+    confidenceFactor?: number;
+    /** 中文 CJK 文本相似度融合权重（默认 0.3） */
+    cjkWeight?: number;
   };
 
   /**
