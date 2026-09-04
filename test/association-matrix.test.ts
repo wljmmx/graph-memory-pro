@@ -625,3 +625,31 @@ describe("createAssociationMatrix 工厂", () => {
     expect(am.getStats().historySize).toBe(0);
   });
 });
+
+// ─── 9. 稀疏信号与共现潜在边 (v2.6.0) ─────────────────
+
+describe("稀疏信号与共现潜在边 (v2.6.0)", () => {
+  it("getSparsitySignal：冷启动/无历史 → value=0", () => {
+    const am = new AssociationMatrix(8, { enabled: true, warmupFeedbacks: 0 });
+    const sig = am.getSparsitySignal();
+    expect(sig.value).toBe(0);
+    expect(sig.recentLowGainRatio).toBe(0);
+  });
+
+  it("getCoUsedNodePairs：正向奖励共用的节点对按权重返回", () => {
+    const am = new AssociationMatrix(8, { enabled: true, warmupFeedbacks: 0 });
+    // 禁止 R-3 拒绝（minImprovement=-2，保证更新一定提交）
+    const vec1 = new Float32Array(8); vec1[0] = 1;
+    const vec2 = new Float32Array(8); vec2[1] = 1;
+    am.updateWithMarginalUtility(vec1, 1); // 记录样本并提交
+    am.recordHistorySample(vec2, 1);       // 仅记录（构造历史池，供邻域/共现）
+    // 手动注入带 usedNodeIds 的样本（模拟召回侧传递）
+    am.recordHistorySampleWithNodes(vec1, 1, ["n1", "n2"]);
+    am.recordHistorySampleWithNodes(vec2, 1, ["n2", "n3"]);
+
+    const pairs = am.getCoUsedNodePairs(5);
+    expect(pairs.length).toBeGreaterThan(0);
+    const n2n3 = pairs.find(p => (p.a === "n2" && p.b === "n3") || (p.a === "n3" && p.b === "n2"));
+    expect(n2n3).toBeTruthy();
+  });
+});

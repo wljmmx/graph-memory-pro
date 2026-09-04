@@ -95,6 +95,8 @@ interface HistorySample {
   reward: number;
   /** 当前 M 在该样本上的预测分数（transform 后与原向量的 cosine） */
   predictedScore: number;
+  /** v2.6.0: 该样本被正向使用的节点 id（稀疏图共现潜在边信号） */
+  usedNodeIds?: string[];
 }
 
 /**
@@ -130,6 +132,10 @@ export class AssociationMatrix {
   // R-3 历史样本池
   private history: HistorySample[] = [];
   private readonly historyMaxSize = 200;
+
+  // v2.6.0: 稀疏信号滚动窗口（记录最近 gain 序列，上限 50）
+  private recentGains: number[] = [];
+  private readonly recentGainsMaxSize = 50;
 
   // 训练统计
   private updateCount = 0;
@@ -320,7 +326,7 @@ export class AssociationMatrix {
   /**
    * 记录一个历史样本（用于 R-3 邻域评估）
    */
-  recordHistorySample(queryEmbedding: number[] | Float32Array, reward: number): void {
+  recordHistorySample(queryEmbedding: number[] | Float32Array, reward: number, usedNodeIds?: string[]): void {
     if (!this.cfg.enabled || !this.muCfg.enabled) return;
     const storedVec = Float32Array.from(queryEmbedding);
     const predictedScore = this.evaluateSample(storedVec);
@@ -328,10 +334,16 @@ export class AssociationMatrix {
       queryEmbedding: storedVec,
       reward,
       predictedScore,
+      usedNodeIds,
     });
     if (this.history.length > this.historyMaxSize) {
       this.history.shift();
     }
+  }
+
+  /** v2.6.0: 带 usedNodeIds 的记录入口（供召回侧反馈链使用，等价于 recordHistorySample 带节点信息） */
+  recordHistorySampleWithNodes(queryEmbedding: number[] | Float32Array, reward: number, usedNodeIds: string[]): void {
+    this.recordHistorySample(queryEmbedding, reward, usedNodeIds);
   }
 
   /**
@@ -377,6 +389,10 @@ export class AssociationMatrix {
         ? neighbors.reduce((sum, s) => sum + reward * s.similarity, 0) / neighbors.length
         : reward;
 
+      // v2.6.0: 记录本次 gain 到稀疏信号滚动窗口
+      this.recentGains.push(neighborhoodGain);
+      if (this.recentGains.length > this.recentGainsMaxSize) this.recentGains.shift();
+
       // 邻域整体提升未达阈值 → 拒绝更新（防过拟合）
       if (neighborhoodGain < this.muCfg.minImprovement) {
         this.rejectedCount++;
@@ -393,6 +409,49 @@ export class AssociationMatrix {
     // 记录样本
     this.recordHistorySample(vec, reward);
     return { applied: true, neighborhoodGain: reward };
+  }
+
+  /**
+   * v2.6.0: 稀疏信号。
+   * value = 最近 50 次更新中 neighborhoodGain < 0.1 的比例（0-1，越高越稀疏）。
+   * 供自愈阶段/调优诊断消费；不直接写图。
+   */
+  getSparsitySignal(): { value: number; recentLowGainRatio: number } {
+    if (this.recentGains.length === 0) return { value: 0, recentLowGainRatio: 0 };
+    let low = 0;
+    for (const g of this.recentGains) if (g < 0.1) low++;
+    const ratio = low / this.recentGains.length;
+    return { value: ratio, recentLowGainRatio: ratio };
+  }
+
+  /**
+   * v2.6.0: 共现潜在边。
+   * 统计历史样本中「reward>0 且 usedNodeIds 非空」的样本内节点对共现累积权重，
+   * 返回权重最高的 maxK 对（自愈补边优先级信号，比纯相似度更可信）。
+   */
+  getCoUsedNodePairs(maxK: number): Array<{ a: string; b: string; reward: number }> {
+    const weights = new Map<string, number>();
+    const addPair = (x: string, y: string, w: number): void => {
+      const key = x < y ? `${x}|${y}` : `${y}|${x}`;
+      weights.set(key, (weights.get(key) ?? 0) + w);
+    };
+    for (const h of this.history) {
+      if (h.reward <= 0 || !h.usedNodeIds || h.usedNodeIds.length < 2) continue;
+      const ids = [...new Set(h.usedNodeIds)];
+      const w = h.reward;
+      for (let i = 0; i < ids.length; i++) {
+        for (let j = i + 1; j < ids.length; j++) {
+          addPair(ids[i], ids[j], w);
+        }
+      }
+    }
+    const sorted = Array.from(weights.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, Math.max(0, maxK));
+    return sorted.map(([key, w]) => {
+      const [a, b] = key.split("|");
+      return { a, b, reward: Math.round(w * 1000) / 1000 };
+    });
   }
 
   /** 统计信息 */
