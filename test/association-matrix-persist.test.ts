@@ -121,7 +121,7 @@ describe("loadAssociationMatrix 旧路径自动迁移（v2.6.x）", () => {
   it("默认路径无文件、旧路径有文件时，迁移并恢复 updateCount", async () => {
     const { getLegacyAssociationMatrixPath } = await import("../src/recaller/association-matrix-persist.ts");
     // 临时把 HOME 指向 tmp，使旧路径(getLegacyAssociationMatrixPath)落在 tmp 下、
-    // 而新默认路径(基于真实 HOME 的 ~/.openclaw/extensions/...)不变 → 模拟"旧文件存在、新路径无文件"。
+    // 而新默认路径(基于 fakeHome 的 ~/.openclaw/data/association-matrix)无文件 → 模拟"旧文件存在、新路径无文件"。
     const origHome = process.env.HOME;
     const fakeHome = join(tmp, "fakehome");
     process.env.HOME = fakeHome;
@@ -134,7 +134,7 @@ describe("loadAssociationMatrix 旧路径自动迁移（v2.6.x）", () => {
       await mkdir(dirname(legacyPath), { recursive: true });
       await writeFile(legacyPath, src.serialize(), "utf-8");
 
-      // 新默认路径(此时仍是当前 HOME，即 fakeHome 下的 extensions 目录,无文件)
+      // 新默认路径(此时仍是当前 HOME，即 fakeHome 下的 data 目录,无文件)
       const am = makeEnabledMatrix();
       const loaded = await loadAssociationMatrix(am); // 不传 opts → 走默认 + 迁移
       expect(loaded).toBe(true);
