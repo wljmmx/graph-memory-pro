@@ -95,6 +95,15 @@ describe("GmConfig 路线图字段完整性", () => {
     expect(cfg.autoTuner?.regressionThreshold).toBe(0.02);
     expect(cfg.autoTuner?.stagnationThreshold).toBe(5);
   });
+
+  it("v2.6.1 字段：llm.requestTimeoutMs / background.maintenanceTimeoutMs（超时可配）", () => {
+    const cfg: GmConfig = {
+      llm: { model: "m", baseURL: "http://localhost:11434", requestTimeoutMs: 60000 },
+      background: { maintenanceIntervalMs: 21600000, maintenanceTimeoutMs: 300000 },
+    };
+    expect(cfg.llm?.requestTimeoutMs).toBe(60000);
+    expect(cfg.background?.maintenanceTimeoutMs).toBe(300000);
+  });
 });
 
 describe("GmNode 路线图字段完整性", () => {

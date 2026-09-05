@@ -106,6 +106,8 @@ export async function startMcpServer(
   const path = cfg.mcp?.path ?? "/mcp";
   const authToken = cfg.mcp?.authToken;
   const enabledTools = cfg.mcp?.enabledTools; // 省略 = 全部启用
+  // v2.6.1: 维护类工具超时（gm_maintain / gm_reembed / gm_tune），默认 120s，可配
+  const maintenanceTimeoutMs = cfg.background?.maintenanceTimeoutMs ?? 120_000;
   // v2.5.x fix: 与 API server 对称，EADDRINUSE 时自动 +1/+2/+3 重试
   const MAX_PORT_RETRIES = 3;
 
@@ -340,7 +342,7 @@ export async function startMcpServer(
       },
       async () => {
         try {
-          const result = await withTimeout(() => runMaintenance(driver, cfg, llm, embed), 120_000, "gm_maintain");
+          const result = await withTimeout(() => runMaintenance(driver, cfg, llm, embed), maintenanceTimeoutMs, "gm_maintain");
           return {
             content: [{ type: "text", text: `Maintenance done: ${result.dedup.merged} merged, ${result.community.count} communities, ${result.durationMs}ms` }],
             structuredContent: asStructured(result),
@@ -377,7 +379,7 @@ export async function startMcpServer(
               structuredContent: asStructured({ cleared, note: "database cleared; re-run import then reembed" }),
             };
           }
-          const result = await withTimeout(() => reEmbedNodes(driver, embed, batchSize ?? 50, cfg.embedding?.model, undefined, batchEmbed), 120_000, "gm_reembed");
+          const result = await withTimeout(() => reEmbedNodes(driver, embed, batchSize ?? 50, cfg.embedding?.model, undefined, batchEmbed), maintenanceTimeoutMs, "gm_reembed");
           return {
             content: [{ type: "text", text: `Re-embedded ${result.reEmbedded}/${result.totalScanned} nodes, ${result.failed} failed, ${result.durationMs}ms` }],
             structuredContent: asStructured(result),
@@ -520,7 +522,7 @@ export async function startMcpServer(
           for (let i = 0; i < r; i++) {
             const res = await withTimeout(
               () => tuner.runTuneCycle(recaller!, driver, cfg),
-              120_000,
+              maintenanceTimeoutMs,
               "gm_tune",
             );
             results.push(res);

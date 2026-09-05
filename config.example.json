@@ -15,7 +15,9 @@
     "$comment_apiKey": "v2.3.3 SEC-2: 生产环境请通过环境变量注入（如 OPENAI_API_KEY），不要硬编码到配置文件。此处仅为示例占位",
     "baseURL": "https://api.openai.com/v1",
     "model": "gpt-4o-mini",
-    "keepAlive": "5m"
+    "keepAlive": "5m",
+    "$comment_requestTimeoutMs": "v2.6.1: 单次 LLM 请求超时 ms（默认 30000）。本地推理型模型（如 Qwen3 思考模式）慢启动可调大至 60000+；云端可调小以更快失败",
+    "requestTimeoutMs": 30000
   },
   "embedding": {
     "$comment": "Ollama 原生 /api/embed。baseURL 不含 /v1（embed.ts 会自动剥离 /v1）。模型须是 embedding 模型（如 nomic-embed-text），不能用 LLM 模型（如 qwen3.5:9b）",
@@ -36,7 +38,9 @@
   "timing": { "enabled": false, "reportEveryN": 50, "maxSamples": 1000 },
   "background": {
     "extractorIntervalMs": 60000,
-    "maintenanceIntervalMs": 21600000
+    "maintenanceIntervalMs": 21600000,
+    "$comment_maintenanceTimeoutMs": "v2.6.1: 维护类操作超时 ms（默认 120000）。覆盖 MCP gm_maintain/gm_reembed/gm_tune 及 runMaintenance 内部锁超时，大型图谱或慢速 LLM 场景可调大",
+    "maintenanceTimeoutMs": 120000
   },
   "temporal": { "enabled": true, "defaultSource": "experience" },
   "state": { "enabled": true, "filterSupersededInRecall": false },

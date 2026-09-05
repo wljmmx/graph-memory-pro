@@ -288,6 +288,38 @@ describe("createCompleteFn", () => {
     const [url] = fetchSpy.mock.calls[0];
     expect(url).toBe("https://api.openai.com/v1/chat/completions");
   });
+
+  it("v2.6.1: 默认单次请求带内部超时信号（30s，未配置时 fetch signal 为 AbortSignal 且不提前 abort）", async () => {
+    fetchSpy.mockResolvedValue(
+      mockResponse({ choices: [{ message: { content: "ok" } }] }),
+    );
+    const complete = createCompleteFn({ model: "m", baseURL: "https://api.openai.com/v1" });
+    await complete("s", "u");
+    const signal = fetchSpy.mock.calls[0][1]?.signal as AbortSignal | undefined;
+    expect(signal).toBeTruthy();
+    expect(signal?.aborted).toBe(false);
+  });
+
+  it("v2.6.1: requestTimeoutMs 可配置（100ms 超时后 fetch 信号 abort）", async () => {
+    // fetch 永不 resolve，直到测试显式释放（mock fetch 不感知 signal，需手动 resolve）
+    let releaseFetch: (r: Response) => void;
+    fetchSpy.mockReturnValue(new Promise<Response>((res) => { releaseFetch = res; }));
+    const complete = createCompleteFn({
+      model: "m", baseURL: "https://api.openai.com/v1", requestTimeoutMs: 100,
+    });
+    const promise = complete("s", "u");
+    // 等待信号量 acquire + fetch 调用完成（真实微任务）
+    await new Promise((r) => setTimeout(r, 0));
+    const signal = fetchSpy.mock.calls[0][1]?.signal as AbortSignal | undefined;
+    expect(signal).toBeTruthy();
+    expect(signal?.aborted).toBe(false);
+    // 真实等待超过 100ms 超时 → AbortSignal.timeout 内部定时器触发
+    await new Promise((r) => setTimeout(r, 200));
+    expect(signal?.aborted).toBe(true);
+    // 清理：释放 fetch，让 promise 正常 resolve
+    releaseFetch!(mockResponse({ choices: [{ message: { content: "ok" } }] }));
+    await expect(promise).resolves.toBe("ok");
+  });
 });
 
 // ────────────────────────────────────────────────────────────
@@ -598,6 +630,28 @@ describe("createRuntimeCompleteFn", () => {
     expect(realCall.maxTokens).toBe(1024);
     expect(realCall.temperature).toBe(0.3);
     expect(realCall.purpose).toBe("graph-memory-pro:llm");
+  });
+
+  it("v2.6.1: fallbackConfig.requestTimeoutMs 透传到 runtime 调用超时", async () => {
+    const runtimeLlm = mockRuntimeLlm(async (params) => ({
+      text: "ok",
+      provider: "ollama",
+      model: "qwen3.5:9b",
+      agentId: "main",
+    }));
+
+    const complete = createRuntimeCompleteFn(
+      runtimeLlm,
+      { model: "gpt-4o-mini", baseURL: "https://api.openai.com/v1", requestTimeoutMs: 100 },
+    );
+    await complete("sys", "usr"); // probe + 一次真实调用（均立即 resolve）
+    const realCall = runtimeLlm.complete.mock.calls[1][0];
+    const signal = realCall.signal as AbortSignal | undefined;
+    expect(signal).toBeTruthy();
+    expect(signal?.aborted).toBe(false);
+    // AbortSignal.timeout 使用内部定时器，需真实等待超过 100ms 超时
+    await new Promise((r) => setTimeout(r, 200));
+    expect(signal?.aborted).toBe(true);
   });
 
   it("probe 调用使用小 maxTokens（v2.4.2 提到 64 以兼容推理模型）+ purpose 标识", async () => {

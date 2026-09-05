@@ -28,6 +28,12 @@ export interface LlmConfig {
    * OpenAI 兼容端点透传 think 字段（不支持的服务会忽略）。默认不传（保持服务默认行为）。
    */
   thinking?: boolean;
+  /**
+   * v2.6.1: 单次 LLM 请求超时（毫秒，默认 30000）。
+   * 硬编码 30s 改为可配：本地推理型模型（如 Qwen3 思考模式）慢启动可调大；
+   * 云端可调小以更快失败。
+   */
+  requestTimeoutMs?: number;
 }
 
 export interface EmbeddingConfig {
@@ -76,6 +82,12 @@ export interface GmConfig {
     maintenanceInitialDelayMs?: number;
     /** v2.5.4: 中间轮 assistant 文本提取的轮数节流阈值（默认 15 轮），满 N 轮才批量入队一次 */
     interimTurnsThreshold?: number;
+    /**
+     * v2.6.1: 维护类操作超时（毫秒，默认 120000）。
+     * 覆盖 MCP gm_maintain / gm_reembed / gm_tune 的 withTimeout 及 runMaintenance 内部锁超时。
+     * 大型图谱维护或慢速 LLM 场景可调大。
+     */
+    maintenanceTimeoutMs?: number;
   };
   /** v2.5.4: 社区摘要节流配置（避免 maintenance 与主会话 / compaction 抢 LLM 导致 503） */
   communitySummary?: {

@@ -36,6 +36,9 @@ const RETRY_JITTER_MAX_MS = 500;
 // 无外部依赖，基于 Promise 队列实现
 const DEFAULT_LLM_MAX_CONCURRENCY = 1;
 
+// v2.6.1: 单次 LLM 请求内部安全超时（默认 30s，可由 LlmConfig.requestTimeoutMs 覆盖）
+const DEFAULT_LLM_TIMEOUT_MS = 30_000;
+
 // v2.5.1: 周期性重探测间隔。同 session 内用户可能用 /model 切换模型。
 // 即使切换后未触发 runtime 调用（如 远程→本地 跨路径切换），至多每 5min
 // 重探测一次，避免 decision 长期停留在过期路径。
@@ -172,10 +175,10 @@ function createOpenAICompatibleComplete(config: LlmConfig): CompleteFn {
         let response: Response;
         let apiFormat: 'openai' | 'ollama';
 
-        // v2.3.5 B2: 合并外部 signal（调用方超时）与 30s 内部安全超时。
-        // 每次重试重新计算，确保每次 attempt 有独立的 30s 预算。
+        // v2.3.5 B2: 合并外部 signal（调用方超时）与内部安全超时（可配，默认 30s）。
+        // 每次重试重新计算，确保每次 attempt 有独立的超时预算。
         // 任一信号 abort 即取消底层 fetch，避免 orphan request。
-        const requestSignal = combineSignals(signal, AbortSignal.timeout(30_000));
+        const requestSignal = combineSignals(signal, AbortSignal.timeout(config.requestTimeoutMs ?? DEFAULT_LLM_TIMEOUT_MS));
 
         if (isOllamaNative) {
           // Ollama 原生 /api/chat 端点：keep_alive 完整支持
@@ -600,6 +603,7 @@ export function createRuntimeCompleteFn(
       keepAlive: fallbackConfig?.keepAlive,
       thinking: fallbackConfig?.thinking,
       maxConcurrency: fallbackConfig?.maxConcurrency,
+      requestTimeoutMs: fallbackConfig?.requestTimeoutMs,
     });
     cachedDirectKey = key;
     logger?.info?.(
@@ -644,8 +648,8 @@ export function createRuntimeCompleteFn(
     const release = await runtimeSemaphore.acquire();
     try {
       // v2.3.3 ERR-1: runtime LLM 也需要超时控制，防 SDK complete 挂起导致信号量槽位永久占用
-      // v2.3.5 B2: 合并外部 signal（调用方超时）与 30s 内部安全超时
-      const requestSignal = combineSignals(signal, AbortSignal.timeout(30_000));
+      // v2.3.5 B2: 合并外部 signal（调用方超时）与内部安全超时（可配，默认 30s）
+      const requestSignal = combineSignals(signal, AbortSignal.timeout(fallbackConfig?.requestTimeoutMs ?? DEFAULT_LLM_TIMEOUT_MS));
       const result = await runtimeLlm.complete({
         messages: [
           { role: "system", content: system },
@@ -702,7 +706,7 @@ export function createRuntimeCompleteFn(
         maxTokens: 64,
         temperature: 0,
         purpose: "graph-memory-pro:provider-detect",
-        signal: AbortSignal.timeout(30_000),  // v2.4.2: 思考模型慢启动，放宽到 30s
+        signal: AbortSignal.timeout(fallbackConfig?.requestTimeoutMs ?? DEFAULT_LLM_TIMEOUT_MS),  // v2.4.2: 思考模型慢启动，默认放宽到 30s；v2.6.1 可配
       });
       const provider = (result?.provider ?? "").toString();
       const model = (result?.model ?? "").toString();

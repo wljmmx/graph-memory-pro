@@ -98,13 +98,14 @@ export interface MaintenanceResult {
 
 // ─── 并发互斥锁（带超时重置） ──────────────────────────────
 let _maintenanceRunning = false;
-const LOCK_TIMEOUT_MS = 120_000; // 2 min lock max
+// v2.6.1: 锁超时可由 cfg.background.maintenanceTimeoutMs 覆盖（默认 2min）
+let lockTimeoutMs = 120_000;
 let _lockTimestamp = 0;
 
 function tryAcquireLock(): boolean {
   // Force-release if lock held beyond timeout
   if (_maintenanceRunning) {
-    if (Date.now() - _lockTimestamp > LOCK_TIMEOUT_MS) {
+    if (Date.now() - _lockTimestamp > lockTimeoutMs) {
       log.warn("maintenance lock stale, force-releasing");
       _maintenanceRunning = false;
     } else {
@@ -124,6 +125,8 @@ function releaseLock(): void {
 export async function runMaintenance(
   driver: Driver, cfg: GmConfig, llm?: CompleteFn, embedFn?: EmbedFn, batchEmbedFn?: BatchEmbedFn,
 ): Promise<MaintenanceResult> {
+  // v2.6.1: 锁超时与配置的维护超时联动（默认 2min），避免配置调大后锁提前强制释放
+  lockTimeoutMs = cfg.background?.maintenanceTimeoutMs ?? 120_000;
   if (!tryAcquireLock()) {
     log.info("maintenance already running, skip");
     return {
