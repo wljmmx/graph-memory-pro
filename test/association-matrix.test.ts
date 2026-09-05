@@ -512,6 +512,42 @@ describe("serialize / deserialize", () => {
     expect(d.M[3 * 4 + 3]).toBe(1);
     expect(d.M.length).toBe(16);
   });
+
+  it("v2.6.1: 学习曲线采样跨 serialize/deserialize 持久化（跨重启可追溯）", () => {
+    const am1 = new AssociationMatrix(4, { enabled: true, warmupFeedbacks: 1 });
+    const vec = new Float32Array([1, 0, 0, 0]);
+    am1.updateWithMarginalUtility(vec, 1.0); // applied=true
+    am1.recordLearningSample(10);
+    am1.updateWithMarginalUtility(vec, 1.0); // applied=true
+    am1.recordLearningSample(12);
+
+    // serialize 必须包含 learningHistory
+    const data = JSON.parse(am1.serialize());
+    expect(Array.isArray(data.learningHistory)).toBe(true);
+    expect(data.learningHistory).toHaveLength(2);
+    expect(data.learningHistory[0]).toMatchObject({ feedbackCount: 10 });
+    expect(data.learningHistory[1]).toMatchObject({ feedbackCount: 12 });
+
+    // 新实例（模拟重启）deserialize 后恢复学习曲线
+    const am2 = new AssociationMatrix(4, { enabled: true });
+    am2.deserialize(am1.serialize());
+    const hist = am2.getLearningHistory();
+    expect(hist).toHaveLength(2);
+    expect(hist[0].feedbackCount).toBe(10);
+    expect(hist[1].feedbackCount).toBe(12);
+    expect(hist[0].t).toBeLessThanOrEqual(hist[1].t);
+  });
+
+  it("v2.6.1: 学习曲线环形缓冲上限 200（超出裁剪最旧样本）", () => {
+    const am = new AssociationMatrix(4, { enabled: true });
+    for (let i = 0; i < 250; i++) am.recordLearningSample(i);
+    expect(am.getLearningHistory()).toHaveLength(200);
+    expect(am.getLearningHistory(5)).toHaveLength(5);
+    const oldest = am.getLearningHistory()[0];
+    expect(oldest.feedbackCount).toBe(50); // 250-200=50
+    const newest = am.getLearningHistory()[199];
+    expect(newest.feedbackCount).toBe(249);
+  });
 });
 
 // ─── 8. createAssociationMatrix 工厂 ────────────────────

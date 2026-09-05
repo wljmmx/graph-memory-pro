@@ -343,9 +343,18 @@ export async function startMcpServer(
       async () => {
         try {
           const result = await withTimeout(() => runMaintenance(driver, cfg, llm, embed), maintenanceTimeoutMs, "gm_maintain");
+          // v2.6.1: 维护后持久化 M（补齐 MCP 路径此前不落盘缺口，学习曲线随 serialize 落盘）
+          let persisted: { path: string; bytes: number } | null = null;
+          try {
+            if (recaller?.getAssociationMatrix?.()) {
+              const { saveRecallerAssociationMatrix } = await import("../recaller/association-matrix-persist.ts");
+              const saved = await saveRecallerAssociationMatrix(recaller);
+              if (saved) persisted = { path: saved.path, bytes: saved.bytes };
+            }
+          } catch { /* M 持久化失败不影响维护结果 */ }
           return {
-            content: [{ type: "text", text: `Maintenance done: ${result.dedup.merged} merged, ${result.community.count} communities, ${result.durationMs}ms` }],
-            structuredContent: asStructured(result),
+            content: [{ type: "text", text: `Maintenance done: ${result.dedup.merged} merged, ${result.community.count} communities, ${result.durationMs}ms${persisted ? `, M persisted (${(persisted.bytes / 1024).toFixed(1)}KB)` : ""}` }],
+            structuredContent: asStructured({ ...result, associationMatrixPersisted: persisted }),
           };
         } catch (err: unknown) {
           return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }] };

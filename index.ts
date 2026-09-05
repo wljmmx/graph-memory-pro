@@ -760,6 +760,26 @@ async function flushGetSignals(
 }
 
 /**
+ * v2.6.1: 维护后持久化关联矩阵 M（学习曲线随 serialize 一起落盘）。
+ *
+ * 统一在 runMaintenance 成功返回后调用，补齐后台定时维护 / service 定时维护 /
+ * MCP gm_maintain 三处此前不落盘的缺口（仅 gateway gm_maintain 与优雅关闭保存）。
+ * M 未启用或无 Recaller 时静默跳过；保存失败仅告警不影响主流程。
+ */
+async function persistAssociationMatrixAfterMaintenance(logger?: LoggerLike): Promise<void> {
+  if (!_recaller || _cfg?.associationMatrix?.enabled !== true) return;
+  try {
+    const { saveRecallerAssociationMatrix } = await import("./src/recaller/association-matrix-persist.ts");
+    const saved = await saveRecallerAssociationMatrix(_recaller);
+    if (saved) {
+      logger?.info?.(`[graph-memory-pro] association matrix persisted after maintenance (${(saved.bytes / 1024).toFixed(1)}KB @ ${saved.path})`);
+    }
+  } catch (err) {
+    logger?.warn?.(`[graph-memory-pro] association matrix persist failed after maintenance: ${err}`);
+  }
+}
+
+/**
  * v2.5.3/4: 分摊陈旧会话反馈刷新（定时器路径）。
  */
 async function flushStaleFeedback(maxAgeMs: number, logger: LoggerLike): Promise<void> {
@@ -927,6 +947,8 @@ function startBackgroundMaintenance(
       logger?.info?.("[graph-memory-pro] background maintenance start");
       const result = await runMaintenance(_driver, _cfg, _llm ?? undefined, _embed ?? undefined, _batchEmbed ?? undefined);
       logger?.info?.(`[graph-memory-pro] maintenance done: ${result.dedup.merged} merged, ${result.community.count} communities`);
+      // v2.6.1: 维护后持久化 M（此前后台定时维护不落盘，学习曲线可能丢失）
+      await persistAssociationMatrixAfterMaintenance(logger);
     } catch (err) {
       logger?.warn?.(`[graph-memory-pro] maintenance error: ${err}`);
     } finally {
@@ -2108,6 +2130,8 @@ export default definePluginEntry({
             logger?.info?.("[graph-memory-pro] background maintenance start");
             const result = await runMaintenance(_driver, _cfg, _llm ?? undefined, _embed ?? undefined, _batchEmbed ?? undefined);
             logger?.info?.(`[graph-memory-pro] maintenance done: ${result.dedup.merged} merged, ${result.community.count} communities`);
+            // v2.6.1: 维护后持久化 M（同 startBackgroundMaintenance）
+            await persistAssociationMatrixAfterMaintenance(logger);
           } catch (err) {
             logger?.warn?.(`[graph-memory-pro] maintenance error: ${err}`);
           } finally {

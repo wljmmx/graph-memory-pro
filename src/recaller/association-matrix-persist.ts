@@ -129,7 +129,7 @@ export async function loadAssociationMatrix(
   if (!am || !am.isEnabled()) return false;
 
   const path = getAssociationMatrixPath(opts);
-  let json: string;
+  let json: string = "";
   try {
     json = await readFile(path, "utf-8");
   } catch {

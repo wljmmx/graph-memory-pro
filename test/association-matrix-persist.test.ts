@@ -19,6 +19,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { AssociationMatrix } from "../src/recaller/association-matrix.ts";
 import {
   getAssociationMatrixPath,
+  getLegacyAssociationMatrixPath,
   saveAssociationMatrix,
   loadAssociationMatrix,
   tryLoadAssociationMatrix,
@@ -42,10 +43,14 @@ function makeEnabledMatrix(dim = 4): AssociationMatrix {
 }
 
 describe("getAssociationMatrixPath / getDefaultBaseDir", () => {
-  it("默认路径位于 ~/.openclaw/graph-memory-pro/association-matrix.json", () => {
+  it("v2.8.x: 默认路径位于 ~/.openclaw/data/association-matrix/association-matrix.json（已从插件目录迁移）", () => {
     const p = getAssociationMatrixPath();
     expect(p.endsWith("association-matrix.json")).toBe(true);
-    expect(p).toContain("graph-memory-pro");
+    expect(p).toContain(".openclaw");
+    expect(p).toContain("association-matrix");
+    // 旧目录 ~/.openclaw/graph-memory-pro/ 仅作为迁移源，不再是默认路径
+    expect(getLegacyAssociationMatrixPath()).toContain("graph-memory-pro");
+    expect(p).not.toContain("graph-memory-pro");
   });
 
   it("支持 baseDir 与 path 覆盖", () => {
