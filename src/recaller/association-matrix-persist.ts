@@ -9,8 +9,11 @@
  * 设计要点：
  *   - M 为 N×N Float32Array（N=1024 时 serialize 约 4MB JSON），保存较重，
  *     因此仅在 gm_maintain 维护周期、优雅关闭、以及外部显式调用时触发保存。
- *   - 提供默认状态文件路径（与 auto-tuner 对齐），同时允许调用方用 options.path 覆盖，
- *     便于 lcm-graph-extra 将 M 持久化到自己的目录。
+ *   - 提供默认状态文件路径（~/.openclaw/data/association-matrix/），同时允许调用方用 options.path 覆盖，
+ *     便于 lcm-graph-extra 将 M 持久化到别的目录。
+ *   - 默认目录位于 extensions 目录之外：避免 M 落盘触发 openclaw 对 extensions 的 watch 热重载
+ *     （写盘 → reload → 新实例首轮 heartbeat 又写盘 → 无限重启循环），
+ *     并与 lcm-graph-extra 共用同一文件，避免两份 M 数据漂移。
  */
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -22,7 +25,7 @@ import type { GmConfig } from "../types.ts";
 export interface AssociationMatrixPersistOptions {
   /** 覆盖默认状态文件路径 */
   path?: string;
-  /** 覆盖默认缓存根目录（默认插件目录下的 association-matrix 子目录） */
+  /** 覆盖默认缓存根目录（默认 ~/.openclaw/data/association-matrix） */
   baseDir?: string;
 }
 
@@ -34,7 +37,8 @@ export interface AssociationMatrixSaveResult {
   rejectedCount: number;
 }
 
-/** 插件默认安装目录（OpenClaw extensions 目录，可在 env 覆盖） */
+/** 插件默认安装目录（OpenClaw extensions 目录，可在 env 覆盖）。
+ * 注意：自 v2.8.x 起不再决定 M 默认持久化目录（见 getDefaultBaseDir）。 */
 export function getDefaultPluginDir(): string {
   return (
     process.env.GRAPH_MEMORY_PRO_PLUGIN_DIR ??
@@ -46,12 +50,23 @@ export function getDefaultPluginDir(): string {
 }
 
 /**
- * M 默认缓存根目录：插件目录下的独立子目录。
- * 一般插件位于 ~/.openclaw/extensions/graph-memory-pro，M 保存到
- * ~/.openclaw/extensions/graph-memory-pro/association-matrix/ 下。
+ * M 默认缓存根目录：~/.openclaw/data/association-matrix/。
+ * 位于 extensions 目录之外：
+ *   - 避免 M 落盘触发 openclaw 对 extensions 目录的 watch 热重载（写盘 → reload → 死循环）；
+ *   - 与 lcm-graph-extra 共用同一目录，两个插件只维护一份 M 数据。
+ * 注意：自 v2.8.x 起不再跟随 GRAPH_MEMORY_PRO_PLUGIN_DIR / 插件安装目录；
+ * 历史位置的 M 会在 loadAssociationMatrix 中自动迁移（见 getPreviousDefaultBaseDir）。
  */
 export function getDefaultBaseDir(): string {
-  return join(getDefaultPluginDir(), "association-matrix");
+  const home = process.env.HOME || process.env.USERPROFILE || ".";
+  return join(home, ".openclaw", "data", "association-matrix");
+}
+
+/** 上一版默认目录（v2.6.x~v2.7.x）：~/.openclaw/extensions/graph-memory-pro/association-matrix/。
+ *  默认目录迁移到 data 后，用于把历史学习成果自动迁移到新位置。 */
+export function getPreviousDefaultBaseDir(): string {
+  const home = process.env.HOME || process.env.USERPROFILE || ".";
+  return join(home, ".openclaw", "extensions", "graph-memory-pro", "association-matrix");
 }
 
 /** 解析 M 状态文件路径 */
@@ -118,16 +133,22 @@ export async function loadAssociationMatrix(
   try {
     json = await readFile(path, "utf-8");
   } catch {
-    // v2.6.x: 新路径无文件时,尝试从旧版默认路径(~/.openclaw/graph-memory-pro)迁移，
-    // 保留升级前的学习成果(矩阵权重 + updateCount)。仅当调用方未显式指定 path/baseDir
-    // 时迁移,显式指向的文件仍按原路径处理。
+    // v2.8.x: 新默认目录无文件时，自动迁移历史学习成果（保留矩阵权重 + updateCount）。
+    // 依次尝试：
+    //   1) v2.6.x~v2.7.x 默认目录 ~/.openclaw/extensions/graph-memory-pro/association-matrix/
+    //   2) v2.6.x 之前 ~/.openclaw/graph-memory-pro/association-matrix.json
+    // 仅当调用方未显式指定 path/baseDir 时迁移；显式指向的文件仍按原路径处理。
     if (opts.path || opts.baseDir) return false;
-    try {
-      json = await readFile(getLegacyAssociationMatrixPath(), "utf-8");
-    } catch {
-      return false; // 全新安装，无任何状态文件
+    let migrated = false;
+    for (const from of [getPreviousDefaultBaseDir(), getLegacyAssociationMatrixPath()]) {
+      try {
+        json = await readFile(from, "utf-8");
+        await migrateMatrixFile(from, path);
+        migrated = true;
+        break;
+      } catch { /* 文件不存在，继续尝试下一个 */ }
     }
-    await migrateMatrixFile(getLegacyAssociationMatrixPath(), path);
+    if (!migrated) return false; // 全新安装，无任何状态文件
   }
   if (!json || !json.trim()) return false;
 
