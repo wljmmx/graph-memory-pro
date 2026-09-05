@@ -7,6 +7,7 @@
 
 import { describe, it, expect } from "vitest";
 import type { GmConfig, GmNode, EdgeType, NodeState, NodeSource } from "../src/types.ts";
+import openclawPlugin from "../openclaw.plugin.json" with { type: "json" };
 
 describe("GmConfig 路线图字段完整性", () => {
   it("第一批字段：temporal / state / staleness / causalEdges / graphHealth", () => {
@@ -144,6 +145,36 @@ describe("GmNode 路线图字段完整性", () => {
     expect(node.topicId).toBe("topic-1");
     expect(node.domainId).toBe("domain-1");
     expect(node.embeddingModel).toBe("text-embedding-3-small");
+  });
+});
+
+describe("openclaw.plugin.json configSchema 与代码字段一致性", () => {
+  const props = openclawPlugin.configSchema.properties;
+
+  it("v2.6.1: llm.requestTimeoutMs 已在 configSchema 定义", () => {
+    const llm = props.llm.properties;
+    expect(llm.requestTimeoutMs.type).toBe("integer");
+    expect(llm.requestTimeoutMs.default).toBe(30000);
+  });
+
+  it("v2.6.1: background.maintenanceTimeoutMs 已在 configSchema 定义", () => {
+    const bg = props.background.properties;
+    expect(bg.maintenanceTimeoutMs.type).toBe("integer");
+    expect(bg.maintenanceTimeoutMs.default).toBe(120000);
+  });
+
+  it("v2.6.0: sparseHeal 整块已在 configSchema 定义（含 CJK 中文优化参数）", () => {
+    expect(props.sparseHeal).toBeDefined();
+    const sh = props.sparseHeal.properties;
+    expect(sh.scoreThreshold.default).toBe(60);
+    expect(sh.cjkWeight.default).toBe(0.3);
+    expect(sh.inferSimMin.default).toBe(0.7);
+  });
+
+  it("v2.6.0: graphHealth.scoring 已在 configSchema 定义", () => {
+    const scoring = props.graphHealth.properties.scoring;
+    expect(scoring).toBeDefined();
+    expect(scoring.properties.historyKeep.default).toBe(200);
   });
 });
 

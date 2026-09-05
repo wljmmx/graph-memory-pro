@@ -68,6 +68,11 @@
             "default": 10000,
             "minimum": 1000,
             "description": "v2.3.5: Connection acquisition timeout in ms"
+          },
+          "database": {
+            "type": "string",
+            "default": "",
+            "description": "目标数据库名（Neo4j Enterprise 多库场景），留空用默认库"
           }
         },
         "required": [
@@ -167,6 +172,12 @@
             "type": "boolean",
             "default": false,
             "description": "v2.4.1: 思考模式开关（true=开启 reasoning，false=关闭快速），仅对支持 reasoning 的服务/模型生效（如 GPT-o、DeepSeek-R1 等）"
+          },
+          "requestTimeoutMs": {
+            "type": "integer",
+            "default": 30000,
+            "minimum": 1000,
+            "description": "v2.6.1: 单次 LLM 请求超时 ms（默认 30000）。本地推理型模型（如 Qwen3 思考模式）慢启动可调大至 60000+；云端可调小以更快失败。覆盖主 complete / runtimeComplete / provider 探测三处"
           }
         }
       },
@@ -250,6 +261,12 @@
             "minimum": 1,
             "maximum": 100,
             "description": "v2.5.4: 中间轮 assistant 文本提取的轮数节流阈值（默认 15 轮），满 N 轮才批量入队，纳入 autoTurn 调优"
+          },
+          "maintenanceTimeoutMs": {
+            "type": "integer",
+            "default": 120000,
+            "minimum": 10000,
+            "description": "v2.6.1: 维护类操作超时 ms（默认 120000）。覆盖 MCP gm_maintain/gm_reembed/gm_tune 的 withTimeout 及 runMaintenance 内部锁超时，大型图谱或慢速 LLM 场景可调大"
           }
         }
       },
@@ -353,6 +370,17 @@
           }
         }
       },
+      "timestampBackfill": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "v2.4.0: 时序字段回填（Maintenance Phase 4b，默认开启）",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
       "graphHealth": {
         "type": "object",
         "additionalProperties": false,
@@ -364,6 +392,23 @@
           "alertOnAnomaly": {
             "type": "boolean",
             "default": true
+          },
+          "scoring": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "v2.6.0: 图谱 0-100 健康评分（Phase 6 计算并落盘 GraphHealthMetric）",
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "default": true
+              },
+              "historyKeep": {
+                "type": "integer",
+                "default": 200,
+                "minimum": 1,
+                "description": "历史评分保留条数（默认 200）"
+              }
+            }
           }
         }
       },
@@ -735,6 +780,16 @@
             "type": "integer",
             "default": 30000,
             "minimum": 1000
+          },
+          "database": {
+            "type": "string",
+            "default": "",
+            "description": "v2.4.0: benchmark 专用数据库（默认与生产一致，即 neo4j.database）。设置不同库名时 benchmark 全部读写切到该库，与生产物理隔离（需 Neo4j Enterprise 多库）"
+          },
+          "matrixFile": {
+            "type": "string",
+            "default": "association-matrix-benchmark.json",
+            "description": "v2.4.1: benchmark 专属关联矩阵 M 文件名，与生产 M 独立持久化，实现两个流程 M 隔离"
           }
         }
       },
@@ -776,6 +831,70 @@
             "default": 40,
             "minimum": 1,
             "description": "v2.3.5 B1: autoTuner 冷启动阈值（100→40）。"
+          }
+        }
+      },
+      "sparseHeal": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "v2.6.0: 稀疏图自维护（Maintenance Phase 12，默认开启）。补边/合并/社区重连，保守策略、inferred 标记、可回滚。",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "scoreThreshold": {
+            "type": "integer",
+            "default": 60,
+            "minimum": 0,
+            "maximum": 100,
+            "description": "触发稀疏判定：健康评分低于此值视为稀疏（默认 60）"
+          },
+          "inferSimMin": {
+            "type": "number",
+            "default": 0.7,
+            "minimum": 0,
+            "maximum": 1,
+            "description": "补边相似度下限（默认 0.70）"
+          },
+          "inferSimMax": {
+            "type": "number",
+            "default": 0.9,
+            "minimum": 0,
+            "maximum": 1,
+            "description": "补边相似度上限（默认 0.90，须低于 dedupThreshold 避免与去重冲突）"
+          },
+          "maxEdgesPerNode": {
+            "type": "integer",
+            "default": 5,
+            "minimum": 1,
+            "description": "每节点补边上限（默认 5）"
+          },
+          "maxEdgesPerCycle": {
+            "type": "integer",
+            "default": 50,
+            "minimum": 1,
+            "description": "每周期补边上限（默认 50）"
+          },
+          "mergeSimThreshold": {
+            "type": "number",
+            "default": 0.85,
+            "minimum": 0,
+            "maximum": 1,
+            "description": "孤立节点自动合并相似度阈值（默认 0.85）"
+          },
+          "confidenceFactor": {
+            "type": "number",
+            "default": 1.0,
+            "minimum": 0.1,
+            "description": "补边权重 = 相似度 × 该系数（默认 1.0）"
+          },
+          "cjkWeight": {
+            "type": "number",
+            "default": 0.3,
+            "minimum": 0,
+            "maximum": 1,
+            "description": "中文 CJK 文本相似度融合权重（默认 0.3，与 embedding 余弦加权融合）"
           }
         }
       },
