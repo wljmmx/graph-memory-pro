@@ -155,6 +155,31 @@ describe("loadAssociationMatrix 旧路径自动迁移（v2.6.x）", () => {
   });
 });
 
+describe("loadAssociationMatrix 显式默认路径仍迁移（lcm 接入场景）", () => {
+  it("显式传入默认路径时仍会从旧位置迁移", async () => {
+    const { getAssociationMatrixPath, getPreviousDefaultBaseDir } = await import("../src/recaller/association-matrix-persist.ts");
+    const origHome = process.env.HOME;
+    const fakeHome = join(tmp, "fakehome");
+    process.env.HOME = fakeHome;
+    try {
+      // 旧位置（v2.6.x~v2.7.x 默认目录）写入有学习成果的矩阵
+      const src = makeEnabledMatrix();
+      src.updateWithMarginalUtility(new Float32Array([1, 0, 0.5, -0.5]), 1);
+      const prevPath = join(getPreviousDefaultBaseDir(), "association-matrix.json");
+      await mkdir(join(getPreviousDefaultBaseDir()), { recursive: true });
+      await writeFile(prevPath, src.serialize(), "utf-8");
+
+      // lcm 侧显式传默认路径（fakeHome/.openclaw/data/association-matrix/...）也应触发迁移
+      const am = makeEnabledMatrix();
+      const loaded = await loadAssociationMatrix(am, { path: getAssociationMatrixPath() });
+      expect(loaded).toBe(true);
+      expect(am.getStats().updatesApplied).toBe(1);
+    } finally {
+      process.env.HOME = origHome;
+    }
+  });
+});
+
 describe("createAssociationMatrixPersisted", () => {
   const cfg = {
     associationMatrix: { enabled: true, warmupFeedbacks: 2 },

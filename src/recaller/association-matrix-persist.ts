@@ -137,8 +137,10 @@ export async function loadAssociationMatrix(
     // 依次尝试：
     //   1) v2.6.x~v2.7.x 默认目录 ~/.openclaw/extensions/graph-memory-pro/association-matrix/
     //   2) v2.6.x 之前 ~/.openclaw/graph-memory-pro/association-matrix.json
-    // 仅当调用方未显式指定 path/baseDir 时迁移；显式指向的文件仍按原路径处理。
-    if (opts.path || opts.baseDir) return false;
+    // 迁移条件：baseDir 显式自定义时不迁移；path 未指定或显式指定但等于默认路径时也迁移
+    // （lcm-graph-extra 会显式传 DEFAULT_AM_PERSIST_PATH，若不豁免会绕过迁移导致学习历史丢失）。
+    if (opts.baseDir) return false;
+    if (opts.path && opts.path !== getAssociationMatrixPath()) return false;
     let migrated = false;
     for (const from of [getPreviousDefaultBaseDir(), getLegacyAssociationMatrixPath()]) {
       try {
