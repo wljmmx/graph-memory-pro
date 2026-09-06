@@ -308,10 +308,11 @@ export class Recaller {
     }
 
     // 记录学习曲线采样（跨重启持久化，供 /api/association-matrix/history 展示）
-    if (result.applied) {
-      const fbCount = this.judgeManager?.getFeedbackCount?.() ?? 0;
-      this.associationMatrix.recordLearningSample(fbCount);
-    }
+    // v2.6.2: 无论更新被提交还是被 R-3 门控拒绝都记录（rejected 标记），
+    // 修复"多轮对话后曲线恒空"：中文回复下 Tier 1 判定常全未命中 → reward≤0 →
+    // 更新全被拒绝 → 旧逻辑 applied=false 零采样。现在曲线完整反映学习活动。
+    const fbCount = this.judgeManager?.getFeedbackCount?.() ?? 0;
+    this.associationMatrix.recordLearningSample(fbCount, !result.applied);
 
     if (process.env.GM_DEBUG) {
       log.info("M update", { reward: reward.toFixed(3), applied: result.applied, gain: result.neighborhoodGain.toFixed(3) });

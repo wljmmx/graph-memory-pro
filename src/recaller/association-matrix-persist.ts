@@ -142,7 +142,7 @@ export async function loadAssociationMatrix(
     if (opts.baseDir) return false;
     if (opts.path && opts.path !== getAssociationMatrixPath()) return false;
     let migrated = false;
-    for (const from of [getPreviousDefaultBaseDir(), getLegacyAssociationMatrixPath()]) {
+    for (const from of [join(getPreviousDefaultBaseDir(), "association-matrix.json"), getLegacyAssociationMatrixPath()]) {
       try {
         json = await readFile(from, "utf-8");
         await migrateMatrixFile(from, path);

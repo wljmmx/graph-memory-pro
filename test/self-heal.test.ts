@@ -70,4 +70,16 @@ describe("runSelfHeal (v2.6.0)", () => {
     expect(calls[0].query).toContain("source: 'self-heal'");
     expect(calls[0].query).toContain("DELETE r");
   });
+
+  it("v2.6.2: revertSelfHeal(batchId) 只删除指定批次", async () => {
+    const driver = mockDriver() as any;
+    driver.queueResult([{ removed: 3 }]);
+    const res = await revertSelfHeal(driver, "selfheal-1234567");
+    expect(res.removed).toBe(3);
+    const calls = driver.getAllRunCalls();
+    expect(calls[0].query).toContain("selfHealBatch: $batchId");
+    expect(calls[0].params.batchId).toBe("selfheal-1234567");
+    // 批次回滚不匹配"全部"删除路径
+    expect(calls[0].query).not.toContain("source: 'self-heal'}]");
+  });
 });

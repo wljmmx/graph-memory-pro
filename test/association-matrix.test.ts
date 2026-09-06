@@ -548,6 +548,29 @@ describe("serialize / deserialize", () => {
     const newest = am.getLearningHistory()[199];
     expect(newest.feedbackCount).toBe(249);
   });
+
+  it("v2.6.2: 被 R-3 拒绝的更新也记录采样（rejected=true），且随 serialize 持久化", () => {
+    const am = new AssociationMatrix(4, { enabled: true, warmupFeedbacks: 1 });
+    const vec = new Float32Array([1, 0, 0, 0]);
+    // 第一次更新：history 为空 → 门控跳过 → applied
+    const r1 = am.updateWithMarginalUtility(vec, 1.0);
+    am.recordLearningSample(1, !r1.applied);
+    // 负反馈：neighborhoodGain < 0 → 被门控拒绝
+    const r2 = am.updateWithMarginalUtility(vec, -1.0);
+    expect(r2.applied).toBe(false);
+    am.recordLearningSample(2, !r2.applied);
+
+    const data = JSON.parse(am.serialize());
+    expect(data.learningHistory).toHaveLength(2);
+    expect(data.learningHistory[0].rejected).toBe(false);
+    expect(data.learningHistory[1].rejected).toBe(true);
+
+    const am2 = new AssociationMatrix(4, { enabled: true });
+    am2.deserialize(am.serialize());
+    const hist = am2.getLearningHistory();
+    expect(hist[1].rejected).toBe(true);
+    expect(hist[1].updatesRejected).toBeGreaterThanOrEqual(1);
+  });
 });
 
 // ─── 8. createAssociationMatrix 工厂 ────────────────────

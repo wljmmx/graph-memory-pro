@@ -43,6 +43,8 @@ export interface SelfHealResult {
   scored: boolean;
   score?: GraphHealthScore;
   sparse: boolean;
+  /** v2.6.2: 本次自愈批次标记（回滚只删本批次，避免误删上一轮保留的自愈边） */
+  batchId: string;
   edgesAdded: number;
   mergesApplied: number;
   mergeCandidates: Array<{ a: string; b: string; sim: number }>;
@@ -107,11 +109,13 @@ export function sparsityConfigFrom(cfg: GmConfig): SelfHealConfig {
  */
 export async function runSelfHeal(driver: Driver, cfg?: SelfHealConfig): Promise<SelfHealResult> {
   const c = { ...DEFAULT_CFG, ...cfg };
+  // v2.6.2: 本次运行批次标记，写边时打标，回滚按批次精确删除
+  const batchId = `selfheal-${Date.now()}`;
   const score = await computeGraphHealthScore(driver, c.scoreThreshold);
 
   if (!score.sparse) {
     log.info("self-heal: graph healthy, skip", { score: score.score });
-    return { scored: true, score, sparse: false, edgesAdded: 0, mergesApplied: 0, mergeCandidates: [], reLinks: 0, skippedNoEmbedding: 0 };
+    return { scored: true, score, sparse: false, batchId, edgesAdded: 0, mergesApplied: 0, mergeCandidates: [], reLinks: 0, skippedNoEmbedding: 0 };
   }
 
   log.info("self-heal: graph sparse, running recovery", { score: score.score, isolatedRatio: score.metrics.isolatedRatio });
@@ -173,12 +177,14 @@ export async function runSelfHeal(driver: Driver, cfg?: SelfHealConfig): Promise
          SET r.id = $id, r.fromId = $fromId, r.toId = $toId,
              r.weight = $weight, r.instruction = $instruction,
              r.inferred = true, r.source = 'self-heal',
+             r.selfHealBatch = $batchId,
              r.createdAt = $now, r.updatedAt = $now`,
         {
           fromId: idA, toId: idB,
           id: `selfheal-${now}-${Math.random().toString(36).slice(2, 8)}`,
           weight: fusedSim * c.confidenceFactor,
           instruction: `自愈补边：相似度 ${fusedSim.toFixed(3)}`,
+          batchId,
           now,
         },
       );
@@ -220,8 +226,9 @@ export async function runSelfHeal(driver: Driver, cfg?: SelfHealConfig): Promise
              SET r.fromId = $fromId, r.toId = $toId,
                  r.weight = 0.5, r.instruction = '自愈社区重连',
                  r.inferred = true, r.source = 'self-heal',
+                 r.selfHealBatch = $batchId,
                  r.updatedAt = $now`,
-            { fromId: id, toId: String(rid), now: Date.now() },
+            { fromId: id, toId: String(rid), batchId, now: Date.now() },
           );
           reLinks++;
           continue;
@@ -263,9 +270,9 @@ export async function runSelfHeal(driver: Driver, cfg?: SelfHealConfig): Promise
       }
     }
 
-    log.info("self-heal: recovery done", { edgesAdded: created, mergesApplied, reLinks, candidates: mergeCandidates.length });
+    log.info("self-heal: recovery done", { edgesAdded: created, mergesApplied, reLinks, candidates: mergeCandidates.length, batchId });
     return {
-      scored: true, score, sparse: true,
+      scored: true, score, sparse: true, batchId,
       edgesAdded: created, mergesApplied, mergeCandidates, reLinks, skippedNoEmbedding,
     };
   } finally {
@@ -273,19 +280,35 @@ export async function runSelfHeal(driver: Driver, cfg?: SelfHealConfig): Promise
   }
 }
 
-/** 回滚全部 self-heal 边（GUARD / 手动运维用） */
-export async function revertSelfHeal(driver: Driver): Promise<{ removed: number }> {
+/**
+ * 回滚 self-heal 边（GUARD / 手动运维用）
+ *
+ * v2.6.2: 支持按批次精确回滚——维护管道复评未改善时只删除本次 runSelfHeal
+ * 创建的边，避免把上一轮已保留（评分已改善）的自愈边一并删除。
+ * @param driver Neo4j driver
+ * @param batchId 可选批次标记；不传则删除全部 source='self-heal' 的边（保留旧语义）
+ */
+export async function revertSelfHeal(driver: Driver, batchId?: string): Promise<{ removed: number }> {
   const session = getSession(driver);
   try {
-    const result = await session.run(
-      `MATCH (:Task|Skill|Event)-[r {source: 'self-heal'}]->(:Task|Skill|Event)
-       WITH collect(r) AS rs
-       UNWIND rs AS r
-       DELETE r
-       RETURN size(rs) AS removed`,
-    );
+    const result = batchId
+      ? await session.run(
+          `MATCH (:Task|Skill|Event)-[r {source: 'self-heal', selfHealBatch: $batchId}]->(:Task|Skill|Event)
+           WITH collect(r) AS rs
+           UNWIND rs AS r
+           DELETE r
+           RETURN size(rs) AS removed`,
+          { batchId },
+        )
+      : await session.run(
+          `MATCH (:Task|Skill|Event)-[r {source: 'self-heal'}]->(:Task|Skill|Event)
+           WITH collect(r) AS rs
+           UNWIND rs AS r
+           DELETE r
+           RETURN size(rs) AS removed`,
+        );
     const removed = result.records[0]?.get("removed")?.toNumber?.() ?? 0;
-    log.info("self-heal: reverted edges", { removed });
+    log.info("self-heal: reverted edges", { removed, batchId: batchId ?? "all" });
     return { removed };
   } finally {
     await session.close();

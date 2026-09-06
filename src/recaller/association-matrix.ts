@@ -46,6 +46,8 @@ export const DEFAULT_AM_CONFIG: AssociationMatrixConfig = {
  * 学习曲线采样点（跨重启持久化，随 M 一起落盘）
  *
  * 用于 dashboard /api/association-matrix/history 时序展示。
+ * v2.6.2: 无论更新被提交还是被 R-3 门控拒绝都记录采样（rejected 字段区分），
+ * 使曲线完整反映学习活动（被拒绝的学习不再不可见）。
  */
 export interface LearningSample {
   /** epoch ms */
@@ -55,6 +57,8 @@ export interface LearningSample {
   updatesApplied: number;
   updatesRejected: number;
   feedbackCount: number;
+  /** v2.6.2: 本次采样是否被 R-3 边际效用门控拒绝（false = 已提交） */
+  rejected?: boolean;
 }
 
 /** 关联矩阵 M 可视化数据 */
@@ -469,19 +473,23 @@ export class AssociationMatrix {
   /**
    * 记录一个学习曲线采样点。
    *
-   * 调用时机：每次 M 更新提交（updateWithMarginalUtility applied=true）后由 Recaller
-   * 传入当前反馈计数。采样保存在内存环形缓冲（上限 learningHistoryMaxSize），
+   * 调用时机：每次 M 更新评估后由 Recaller 传入当前反馈计数。
+   * v2.6.2: applied 与 rejected 都记录（rejected=true 表示被 R-3 门控拒绝），
+   * 曲线反映完整学习活动而非仅成功提交的更新。
+   * 采样保存在内存环形缓冲（上限 learningHistoryMaxSize），
    * 并随 serialize() 一起持久化，实现跨重启的历史可追溯。
    *
    * @param feedbackCount 当前累计反馈数（来自 JudgeManager）
+   * @param rejected 本次更新是否被 R-3 边际效用门控拒绝（默认 false）
    */
-  recordLearningSample(feedbackCount: number): void {
+  recordLearningSample(feedbackCount: number, rejected = false): void {
     this.learningHistory.push({
       timestamp: Date.now(),
       t: this.t,
       updatesApplied: this.updateCount,
       updatesRejected: this.rejectedCount,
       feedbackCount,
+      rejected,
     });
     if (this.learningHistory.length > this.learningHistoryMaxSize) {
       this.learningHistory.shift();

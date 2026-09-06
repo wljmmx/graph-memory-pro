@@ -357,41 +357,6 @@ export async function runMaintenance(
     }
     _lockTimestamp = Date.now();
 
-    // ── Phase 12: 稀疏图自愈（v2.6.0，默认开启） ──
-    // 依赖：Phase 6 评分（computeGraphHealthScore 内部重算，不依赖先落盘）
-    // 保守策略：稀疏时补边/合并/社区重连；若自愈后评分未改善且建过边则回滚
-    if (cfg?.sparseHeal?.enabled !== false) {
-      try {
-        const { runSelfHeal, revertSelfHeal } = await import("./maintenance/self-heal.ts");
-        const healResult = await runSelfHeal(driver, {
-          scoreThreshold: cfg.sparseHeal?.scoreThreshold,
-          inferSimMin: cfg.sparseHeal?.inferSimMin,
-          inferSimMax: cfg.sparseHeal?.inferSimMax,
-          maxEdgesPerNode: cfg.sparseHeal?.maxEdgesPerNode,
-          maxEdgesPerCycle: cfg.sparseHeal?.maxEdgesPerCycle,
-          mergeSimThreshold: cfg.sparseHeal?.mergeSimThreshold,
-          confidenceFactor: cfg.sparseHeal?.confidenceFactor,
-          cjkWeight: cfg.sparseHeal?.cjkWeight,
-        });
-        if (healResult.scored && healResult.sparse && healResult.edgesAdded > 0) {
-          log.info("self-heal", {
-            edgesAdded: healResult.edgesAdded,
-            mergesApplied: healResult.mergesApplied,
-            reLinks: healResult.reLinks,
-            score: healResult.score?.score,
-          });
-          // 自愈后复评：未改善则回滚本次自愈边
-          const after = await computeGraphHealthScore(driver, cfg.sparseHeal?.scoreThreshold ?? 60);
-          if (after.score <= (healResult.score?.score ?? 0)) {
-            const reverted = await revertSelfHeal(driver);
-            log.warn("self-heal reverted: no improvement", { before: healResult.score?.score, after: after.score, removed: reverted.removed });
-          }
-        }
-      } catch (err) {
-        log.warn("self-heal failed", { error: String(err) });
-      }
-    }
-
     // ── Phase 11: G-4 嵌入版本迁移（v2.1.2 第四批） ──
     // 检测节点 embeddingModel 分布，若存在不一致（旧模型遗留）则触发重嵌入
     // 仅在配置了 embedding.model 且启用了 evolvableEmbedding 时执行
@@ -417,6 +382,45 @@ export async function runMaintenance(
         };
       } catch (err) {
         log.warn("embedding migration failed", { error: String(err) });
+      }
+    }
+    _lockTimestamp = Date.now();
+
+    // ── Phase 12: 稀疏图自愈（v2.6.0，默认开启） ──
+    // 依赖：Phase 6 评分（computeGraphHealthScore 内部重算）+ Phase 11 嵌入迁移
+    // （v2.6.2 fix: 自愈必须在嵌入迁移之后执行——补边候选强依赖 a.embedding，
+    //   原顺序下无 embedding 的节点全被跳过，第一轮维护形同空转）
+    // 保守策略：稀疏时补边/合并/社区重连；若自愈后评分未改善且建过边则回滚
+    if (cfg?.sparseHeal?.enabled !== false) {
+      try {
+        const { runSelfHeal, revertSelfHeal } = await import("./maintenance/self-heal.ts");
+        const healResult = await runSelfHeal(driver, {
+          scoreThreshold: cfg.sparseHeal?.scoreThreshold,
+          inferSimMin: cfg.sparseHeal?.inferSimMin,
+          inferSimMax: cfg.sparseHeal?.inferSimMax,
+          maxEdgesPerNode: cfg.sparseHeal?.maxEdgesPerNode,
+          maxEdgesPerCycle: cfg.sparseHeal?.maxEdgesPerCycle,
+          mergeSimThreshold: cfg.sparseHeal?.mergeSimThreshold,
+          confidenceFactor: cfg.sparseHeal?.confidenceFactor,
+          cjkWeight: cfg.sparseHeal?.cjkWeight,
+        });
+        if (healResult.scored && healResult.sparse && healResult.edgesAdded > 0) {
+          log.info("self-heal", {
+            edgesAdded: healResult.edgesAdded,
+            mergesApplied: healResult.mergesApplied,
+            reLinks: healResult.reLinks,
+            score: healResult.score?.score,
+          });
+          // 自愈后复评：未改善则回滚本次自愈边（按 batchId 精确回滚，
+          // 避免误删上一轮已保留的自愈边）
+          const after = await computeGraphHealthScore(driver, cfg.sparseHeal?.scoreThreshold ?? 60);
+          if (after.score <= (healResult.score?.score ?? 0)) {
+            const reverted = await revertSelfHeal(driver, healResult.batchId);
+            log.warn("self-heal reverted: no improvement", { before: healResult.score?.score, after: after.score, removed: reverted.removed });
+          }
+        }
+      } catch (err) {
+        log.warn("self-heal failed", { error: String(err) });
       }
     }
 
