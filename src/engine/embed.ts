@@ -412,9 +412,14 @@ export function createBatchEmbedFn(config: EmbeddingConfig): BatchEmbedFn {
             if (c.cache) c.cache.set(hash64(texts[idxs[k]]), v);
           }
         }
-      } catch {
+      } catch (err) {
         // 子批次整体失败：该批置 null（调用方跳过），避免整批功亏一篑
         // 单文本失败造成的少量缺失由调用方（建图/召回）用 FTS 兜底
+        // v2.8.x: 记录错误到日志——此前完全静默，Ollama 模型 404 / baseURL 不可达时
+        // 会表现为"全部嵌入失败"且无任何线索（如 gm_reembed failed=37319）
+        console.warn(
+          `[graph-memory-pro:embed] batch sub-batch failed (model=${c.model}, ${idxs.length} texts): ${(err as Error)?.message ?? String(err)}`,
+        );
       } finally {
         release();
       }

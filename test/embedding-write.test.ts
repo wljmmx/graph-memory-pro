@@ -343,4 +343,46 @@ describe("reEmbedNodes（失败诊断与精确扫描）", () => {
     // 两次查询的 SKIP 相同（回滚到批头）
     expect(scanCalls[0].params.skip).toBe(scanCalls[1].params.skip);
   });
+
+  it("批量嵌入全部失败（返回 null）→ lastError 给出模型/连接诊断提示", async () => {
+    const driver = mockDriver();
+    driver.queueResult([
+      { id: "t1", name: "task-1", description: "d", content: "c" },
+      { id: "t2", name: "task-2", description: "d", content: "c" },
+    ]);
+    const batchEmbed = vi.fn(async () => [null, null]); // 子批次失败被吞 → 全 null
+
+    const result = await reEmbedNodes(
+      driver as unknown as Driver,
+      undefined,
+      50,
+      EMBEDDING_MODEL,
+      undefined,
+      batchEmbed,
+    );
+
+    expect(result.reEmbedded).toBe(0);
+    expect(result.lastError).toContain("0/2 vectors");
+    expect(result.lastError).toContain(EMBEDDING_MODEL);
+  });
+
+  it("单条路径节点嵌入失败 → 记录第一条失败错误", async () => {
+    const driver = mockDriver();
+    driver.queueResult([
+      { id: "t1", name: "task-1", description: "d", content: "c" },
+      { id: "t2", name: "task-2", description: "d", content: "c" },
+    ]);
+    const embedFn = vi.fn(async () => { throw new Error("Embedding API 404: model not found"); });
+
+    const result = await reEmbedNodes(
+      driver as unknown as Driver,
+      embedFn,
+      50,
+      EMBEDDING_MODEL,
+    );
+
+    expect(result.failed).toBe(2);
+    expect(result.reEmbedded).toBe(0);
+    expect(result.lastError).toContain("404");
+  });
 });

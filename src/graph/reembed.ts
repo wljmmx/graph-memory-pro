@@ -107,6 +107,12 @@ export async function reEmbedNodes(
           const embedded = await embedNodeBatch(driver, batchEmbedFn, items, cfg);
           reEmbedded += embedded;
           skipped += nodes.length - embedded;
+          // v2.8.x: 整批 0 成功且确实发起了嵌入 → 记录提示（子批次错误被 batchEmbedFn 吞掉，
+          // 需要日志/诊断才能定位，如 Ollama 模型 404、baseURL 不可达）
+          if (embedded === 0 && items.length > 0 && !lastError) {
+            lastError = `batch embed returned 0/${items.length} vectors (check embedding model "${embeddingModel ?? ""}" is pulled in Ollama, baseURL and Ollama logs)`;
+            console.warn(`[graph-memory-pro] reEmbed: ${lastError}`);
+          }
           await new Promise((r) => setTimeout(r, 200));
           continue;
         }
@@ -136,8 +142,13 @@ export async function reEmbedNodes(
             } else {
               skipped++;
             }
-          } catch {
+          } catch (err) {
+            // v2.8.x: 记录第一条失败详情（此前静默 failed++，37319 全失败时无法定位根因）
             failed++;
+            if (!lastError) {
+              lastError = (err as Error)?.message ?? String(err);
+              console.warn(`[graph-memory-pro] reEmbed: first single-node failure: ${lastError}`);
+            }
           }
         }
 
