@@ -14,7 +14,7 @@ import { describe, it, expect, vi } from "vitest";
 import type { Driver } from "neo4j-driver";
 import { embedNodesMissing } from "../src/store/embed-helper.ts";
 import { writeExtractResult } from "../src/services/extract-service.ts";
-import { detectAndMigrateEmbeddings } from "../src/graph/reembed.ts";
+import { detectAndMigrateEmbeddings, reEmbedNodes } from "../src/graph/reembed.ts";
 import { mockDriver, MockInteger } from "./helpers/neo4j-mock.ts";
 
 const EMBEDDING_MODEL = "test-embed";
@@ -216,5 +216,58 @@ describe("detectAndMigrateEmbeddings（缺失节点检测与补录）", () => {
     expect(result.migrationTriggered).toBe(false);
     expect(result.missingEmbedding).toBe(0);
     expect(driver.getAllRunCalls()).toHaveLength(0);
+  });
+});
+
+describe("reEmbedNodes（AbortSignal 超时取消）", () => {
+  it("signal 已中止 → 立即返回 aborted:true，不发起任何查询", async () => {
+    const driver = mockDriver();
+    const controller = new AbortController();
+    controller.abort(new Error("gm_reembed timed out"));
+
+    const result = await reEmbedNodes(
+      driver as unknown as Driver,
+      undefined,
+      50,
+      EMBEDDING_MODEL,
+      undefined,
+      makeBatchEmbedFn(),
+      controller.signal,
+    );
+
+    expect(result.aborted).toBe(true);
+    expect(result.reEmbedded).toBe(0);
+    expect(driver.getAllRunCalls()).toHaveLength(0);
+  });
+
+  it("处理一批后 signal 中止 → 保留已嵌入节点并提前返回部分结果", async () => {
+    const driver = mockDriver();
+    const controller = new AbortController();
+    // 第一轮查询返回 1 个缺向量节点；batchEmbed 内触发 abort，
+    // 循环回到顶部检测到 aborted → 不再发起第二轮查询
+    driver.queueResult([
+      { id: "t1", name: "task-1", description: "d", content: "c" },
+    ]);
+    const batchEmbed = vi.fn(async (texts: string[]) => {
+      controller.abort();
+      return texts.map(() => [0.1, 0.2, 0.3]);
+    });
+
+    const result = await reEmbedNodes(
+      driver as unknown as Driver,
+      undefined,
+      50,
+      EMBEDDING_MODEL,
+      undefined,
+      batchEmbed,
+      controller.signal,
+    );
+
+    expect(result.aborted).toBe(true);
+    expect(result.reEmbedded).toBe(1);
+    // 只发起一轮缺失查询（ORDER BY n.id SKIP）；中止后不再发起新批次，避免孤儿并发。
+    // 注：embedNodeBatch 内部更新 embedding 也会 session.run，故只统计查询类调用。
+    const scanCalls = driver.getAllRunCalls().filter((c) => c.query.includes("ORDER BY n.id"));
+    expect(scanCalls).toHaveLength(1);
   });
 });

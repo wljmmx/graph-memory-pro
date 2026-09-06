@@ -32,7 +32,7 @@ import { embedNode } from "../store/embed-helper.ts";
 import {
   runMaintenance, healthCheck,
 } from "../graph/maintenance.ts";
-import { reEmbedNodes } from "../graph/reembed.ts";
+import { reEmbedNodes, type ReEmbedResult } from "../graph/reembed.ts";
 import { withTimeout } from "../utils.ts";
 import { VERSION } from "../version.ts";
 
@@ -109,6 +109,12 @@ export async function startMcpServer(
   const enabledTools = cfg.mcp?.enabledTools; // 省略 = 全部启用
   // v2.6.1: 维护类工具超时（gm_maintain / gm_reembed / gm_tune），默认 120s，可配
   const maintenanceTimeoutMs = cfg.background?.maintenanceTimeoutMs ?? 120_000;
+  // v2.8.x: gm_reembed 全量重嵌入独立超时（默认 30min）——全量重嵌入量级远大于维护，
+  // 120s 只能处理约 4 批×50=200 节点（本地模型每批约 30s）就会被截断。
+  // 超时后通过 AbortSignal 通知 reEmbedNodes 优雅停止（保留已嵌入节点）。
+  const reembedTimeoutMs = cfg.background?.reembedTimeoutMs ?? 1_800_000;
+  // v2.8.x: gm_tune 单轮调优独立超时（默认 10min）——单轮含 benchmark 评测 + LLM 诊断/提案，比 gm_maintain 更重。
+  const tuneTimeoutMs = cfg.background?.tuneTimeoutMs ?? 600_000;
   // v2.5.x fix: 与 API server 对称，EADDRINUSE 时自动 +1/+2/+3 重试
   const MAX_PORT_RETRIES = 3;
 
@@ -401,9 +407,25 @@ export async function startMcpServer(
               structuredContent: asStructured({ cleared, note: "database cleared; re-run import then reembed" }),
             };
           }
-          const result = await withTimeout(() => reEmbedNodes(driver, embed, batchSize ?? 50, cfg.embedding?.model, undefined, batchEmbed), maintenanceTimeoutMs, "gm_reembed");
+          // v2.8.x: 独立超时 reembedTimeoutMs（默认 30min）+ AbortSignal 优雅停止。
+          // 不用 withTimeout 强杀：超时后 reEmbedNodes 检测 signal.aborted 停止发起
+          // 新批次并正常返回已处理部分（避免孤儿循环与下次调用并发写同一批）。
+          const controller = new AbortController();
+          const timer = setTimeout(
+            () => controller.abort(new Error(`gm_reembed timed out after ${reembedTimeoutMs}ms`)),
+            reembedTimeoutMs,
+          );
+          let result: ReEmbedResult;
+          try {
+            result = await reEmbedNodes(driver, embed, batchSize ?? 50, cfg.embedding?.model, undefined, batchEmbed, controller.signal);
+          } finally {
+            clearTimeout(timer);
+          }
+          const abortedNote = result.aborted
+            ? ` (timeout ${reembedTimeoutMs}ms — ${result.totalScanned} scanned so far, run again to continue)`
+            : "";
           return {
-            content: [{ type: "text", text: `Re-embedded ${result.reEmbedded}/${result.totalScanned} nodes, ${result.failed} failed, ${result.durationMs}ms` }],
+            content: [{ type: "text", text: `Re-embedded ${result.reEmbedded}/${result.totalScanned} nodes, ${result.failed} failed, ${result.durationMs}ms${abortedNote}` }],
             structuredContent: asStructured(result),
           };
         } catch (err: unknown) {
@@ -510,7 +532,9 @@ export async function startMcpServer(
               maxCases: maxCases ?? cfg.benchmark?.maxCases ?? 50,
               buildGraph: buildGraph ?? cfg.benchmark?.buildGraph ?? true,
             }),
-            300_000,
+            // v2.8.x: 整次评测外层超时可配（此前硬编码 300s）；默认 5min，50 cases × 30s 最坏 25min，
+            // 数据集大或 LLM 慢时可调大 benchmark.timeoutMs
+            cfg.benchmark?.timeoutMs ?? 300_000,
             "gm_benchmark",
           );
           return {
@@ -544,7 +568,8 @@ export async function startMcpServer(
           for (let i = 0; i < r; i++) {
             const res = await withTimeout(
               () => tuner.runTuneCycle(recaller!, driver, cfg),
-              maintenanceTimeoutMs,
+              // v2.8.x: 单轮调优独立超时（默认 10min），不再与 gm_maintain 共用 120s
+              tuneTimeoutMs,
               "gm_tune",
             );
             results.push(res);

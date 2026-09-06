@@ -266,7 +266,19 @@
             "type": "integer",
             "default": 120000,
             "minimum": 10000,
-            "description": "v2.6.1: 维护类操作超时 ms（默认 120000）。覆盖 MCP gm_maintain/gm_reembed/gm_tune 的 withTimeout 及 runMaintenance 内部锁超时，大型图谱或慢速 LLM 场景可调大"
+            "description": "v2.6.1: 维护类操作超时 ms（默认 120000）。覆盖 MCP gm_maintain 的 withTimeout 及 runMaintenance 内部锁超时，大型图谱或慢速 LLM 场景可调大"
+          },
+          "reembedTimeoutMs": {
+            "type": "integer",
+            "default": 1800000,
+            "minimum": 60000,
+            "description": "v2.8.x: gm_reembed 全量重嵌入超时 ms（默认 1800000=30min）。独立于 maintenanceTimeoutMs——全量重嵌入 3 万节点本地模型约需 20-30min，120s 只能处理约 200 节点。超时后优雅停止并保留已嵌入节点，可再次调用续跑"
+          },
+          "tuneTimeoutMs": {
+            "type": "integer",
+            "default": 600000,
+            "minimum": 60000,
+            "description": "v2.8.x: gm_tune 单轮调优超时 ms（默认 600000=10min）。独立于 maintenanceTimeoutMs——单轮含 benchmark 评测 + LLM 诊断/提案，比 gm_maintain 更重"
           }
         }
       },
@@ -780,6 +792,12 @@
             "type": "integer",
             "default": 30000,
             "minimum": 1000
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "default": 300000,
+            "minimum": 60000,
+            "description": "v2.8.x: 整次 benchmark 评测外层超时 ms（默认 300000=5min，此前硬编码不可配）。数据集大或 LLM 慢时可调大"
           },
           "database": {
             "type": "string",

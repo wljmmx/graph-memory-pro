@@ -88,6 +88,19 @@ export interface GmConfig {
      * 大型图谱维护或慢速 LLM 场景可调大。
      */
     maintenanceTimeoutMs?: number;
+    /**
+     * v2.8.x: gm_reembed 全量重嵌入超时（毫秒，默认 1_800_000 = 30min）。
+     * 独立于 maintenanceTimeoutMs：全量重嵌入 3 万节点本地模型约需 20-30min，
+     * 120s 只能处理 ~2000-4000 节点（约 4 批×50）就会被截断。
+     * 超时后 AbortSignal 通知 reEmbedNodes 停止发起新批次（已嵌入节点保留）。
+     */
+    reembedTimeoutMs?: number;
+    /**
+     * v2.8.x: gm_tune 单轮调优超时（毫秒，默认 600_000 = 10min）。
+     * 独立于 maintenanceTimeoutMs：单轮含 EVALUATE（benchmark）+ DIAGNOSE + PROPOSE（LLM），
+     * 比 gm_maintain 更重，不应共用 120s。
+     */
+    tuneTimeoutMs?: number;
   };
   /** v2.5.4: 社区摘要节流配置（避免 maintenance 与主会话 / compaction 抢 LLM 导致 503） */
   communitySummary?: {
@@ -300,6 +313,11 @@ export interface GmConfig {
     buildGraph?: boolean;
     /** 单样本超时（ms） */
     caseTimeoutMs?: number;
+    /**
+     * v2.8.x: 整次 benchmark 评测外层超时（ms，默认 300_000 = 5min）。
+     * 此前 MCP gm_benchmark 硬编码 300s 不可配；覆盖后允许按数据集大小/LLM 速度调整。
+     */
+    timeoutMs?: number;
     /** v2.4.0: benchmark 专用数据库（默认与生产一致，即 neo4j.database）。
      *  设置不同库名时 benchmark 全部读写切到该库，与生产物理隔离（需 Neo4j Enterprise 多库）。 */
     database?: string;

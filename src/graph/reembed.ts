@@ -9,6 +9,11 @@ export interface ReEmbedResult {
   failed: number;
   skipped: number;
   durationMs: number;
+  /**
+   * v2.8.x: 是否因 AbortSignal 中止而提前结束（如 gm_reembed 外层超时）。
+   * 为 true 时表示还有节点未处理，下次调用会从已嵌入节点之后继续。
+   */
+  aborted?: boolean;
 }
 
 export async function reEmbedNodes(
@@ -18,6 +23,7 @@ export async function reEmbedNodes(
   embeddingModel?: string,
   cfg?: GmConfig,
   batchEmbedFn?: BatchEmbedFn,
+  signal?: AbortSignal,
 ): Promise<ReEmbedResult> {
   if (!embedFn && !batchEmbedFn) {
     return { totalScanned: 0, reEmbedded: 0, failed: 0, skipped: 1, durationMs: 0 };
@@ -32,6 +38,18 @@ export async function reEmbedNodes(
   const MAX_CONSECUTIVE_FAILURES = 5;
 
   while (true) {
+    // v2.8.x: 外层 AbortSignal（如 gm_reembed 超时）触发时停止发起新批次，
+    // 避免超时后孤儿循环继续处理剩余节点、与下一次调用并发写同一批。
+    if (signal?.aborted) {
+      return {
+        totalScanned,
+        reEmbedded,
+        failed,
+        skipped,
+        durationMs: Date.now() - start,
+        aborted: true,
+      };
+    }
     try {
       const session = driver.session();
       try {
