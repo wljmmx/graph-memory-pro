@@ -30,7 +30,7 @@ import {
 } from "../store/store.ts";
 import { embedNode } from "../store/embed-helper.ts";
 import {
-  runMaintenance, healthCheck,
+  healthCheck,
 } from "../graph/maintenance.ts";
 import { reEmbedNodes, type ReEmbedResult } from "../graph/reembed.ts";
 import { withTimeout } from "../utils.ts";
@@ -355,25 +355,23 @@ export async function startMcpServer(
       "gm_maintain",
       {
         title: "Run Maintenance",
-        description: "Trigger the 11-phase maintenance pipeline (dedup, pagerank, community, staleness, health, importance, conflict, edge weights, reverse memory, embedding migration).",
+        description: "Start a background graph maintenance (14-phase pipeline: repair edges, dedup, pagerank, community, summaries, timestamp backfill, staleness, health, importance, conflict, edge weights, reverse memory, embedding migration, sparse self-heal). Returns a taskId immediately (does not block the session); poll GET {apiBase}/api/maintain/status?taskId=... or stream GET {apiBase}/api/maintain/stream?taskId=... for progress.",
         inputSchema: {},
         annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
       },
       async () => {
         try {
-          const result = await withTimeout(() => runMaintenance(driver, cfg, llm, embed), maintenanceTimeoutMs, "gm_maintain");
-          // v2.6.1: 维护后持久化 M（补齐 MCP 路径此前不落盘缺口，学习曲线随 serialize 落盘）
-          let persisted: { path: string; bytes: number } | null = null;
-          try {
-            if (recaller?.getAssociationMatrix?.()) {
-              const { saveRecallerAssociationMatrix } = await import("../recaller/association-matrix-persist.ts");
-              const saved = await saveRecallerAssociationMatrix(recaller);
-              if (saved) persisted = { path: saved.path, bytes: saved.bytes };
-            }
-          } catch { /* M 持久化失败不影响维护结果 */ }
+          // v2.8.x: 异步后台任务——立即返回 taskId，避免同步调用阻塞会话（大图维护可能数分钟）。
+          // 进度经 API server 查询/SSE 流式输出；runMaintenance 内部互斥锁保证不并发。
+          const { startMaintainTask } = await import("../graph/maintenance-task.ts");
+          const snapshot = startMaintainTask(driver, cfg, llm ?? undefined, embed ?? undefined, batchEmbed ?? undefined);
           return {
-            content: [{ type: "text", text: `Maintenance done: ${result.dedup.merged} merged, ${result.community.count} communities, ${result.durationMs}ms${persisted ? `, M persisted (${(persisted.bytes / 1024).toFixed(1)}KB)` : ""}` }],
-            structuredContent: asStructured({ ...result, associationMatrixPersisted: persisted }),
+            content: [{
+              type: "text",
+              text: `Maintenance task started (taskId=${snapshot.taskId}, phases=${snapshot.phaseTotal}). ` +
+                `Poll GET /api/maintain/status?taskId=${snapshot.taskId} or stream GET /api/maintain/stream?taskId=${snapshot.taskId} for progress (progress%, current phase ${snapshot.currentPhase}/${snapshot.phaseTotal}).`,
+            }],
+            structuredContent: asStructured(snapshot),
           };
         } catch (err: unknown) {
           return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }] };

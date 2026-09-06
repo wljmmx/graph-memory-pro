@@ -85,6 +85,13 @@ export function getRoutes(): RouteHandler[] {
     { method: "GET", path: "/api/communities", handler: handleGetCommunities },
     { method: "GET", path: "/api/communities/:id/summary", handler: handleGetCommunitySummary },
     { method: "POST", path: "/api/maintain", handler: handleMaintain },
+    // v2.8.x: gm_maintain 异步化——POST /api/maintain/start 立即返回 taskId 后台跑 14 phase 流水线；
+    // GET /api/maintain/status|list 查询进度快照；POST /api/maintain/cancel 取消（当前 phase 后停止）；
+    // GET /api/maintain/stream（SSE 流式进度，见 http-server.ts 特殊处理）
+    { method: "POST", path: "/api/maintain/start", handler: handleMaintainStart },
+    { method: "GET", path: "/api/maintain/status", handler: handleMaintainStatus },
+    { method: "GET", path: "/api/maintain/list", handler: handleMaintainList },
+    { method: "POST", path: "/api/maintain/cancel", handler: handleMaintainCancel },
     { method: "POST", path: "/api/staleness/refresh", handler: handleRefreshStaleness },
     { method: "POST", path: "/api/maintain/incremental", handler: handleIncrementalMaintain },
     { method: "POST", path: "/api/maintain/mark-dirty", handler: handleMarkDirty },
@@ -424,6 +431,54 @@ async function handleMaintain(): Promise<{ status: number; body: unknown }> {
   } catch (err: unknown) {
     return { status: 500, body: { error: (err as Error).message } };
   }
+}
+
+// ── v2.8.x: gm_maintain 异步任务（14 phase 流水线 + 流式进度） ────────────────────
+
+/** POST /api/maintain/start — 启动后台维护任务，立即返回 taskId */
+async function handleMaintainStart(): Promise<{ status: number; body: unknown }> {
+  if (!_driver || !_cfg) return { status: 503, body: { error: "Neo4j not connected" } };
+  try {
+    const { startMaintainTask } = await import("../graph/maintenance-task.ts");
+    const snapshot = startMaintainTask(
+      _driver, _cfg, _llm ?? undefined, _embed ?? undefined, _batchEmbed ?? undefined,
+    );
+    return {
+      status: 202,
+      body: { ...snapshot, message: "started; poll GET /api/maintain/status?taskId= or GET /api/maintain/stream?taskId= for streaming progress" },
+    };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
+  }
+}
+
+/** GET /api/maintain/status?taskId= — 查询任务进度快照 */
+async function handleMaintainStatus(params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
+  const taskId = String(params?.taskId ?? "");
+  if (!taskId) return { status: 400, body: { error: "taskId is required" } };
+  const { getMaintainTask } = await import("../graph/maintenance-task.ts");
+  const snapshot = getMaintainTask(taskId);
+  if (!snapshot) return { status: 404, body: { error: `maintain task not found: ${taskId}` } };
+  return { status: 200, body: snapshot };
+}
+
+/** GET /api/maintain/list — 列出全部任务快照（新的在前） */
+async function handleMaintainList(): Promise<{ status: number; body: unknown }> {
+  const { listMaintainTasks } = await import("../graph/maintenance-task.ts");
+  return { status: 200, body: { tasks: listMaintainTasks() } };
+}
+
+/** POST /api/maintain/cancel — 请求取消任务（当前 phase 跑完后停止） */
+async function handleMaintainCancel(params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
+  const taskId = String(params?.taskId ?? "");
+  if (!taskId) return { status: 400, body: { error: "taskId is required" } };
+  const { cancelMaintainTask } = await import("../graph/maintenance-task.ts");
+  const { found, cancelled } = cancelMaintainTask(taskId);
+  if (!found) return { status: 404, body: { error: `maintain task not found: ${taskId}` } };
+  return {
+    status: 200,
+    body: { taskId, cancelled, message: cancelled ? "cancel requested; finishes current phase then stops" : "task not cancellable (already terminal)" },
+  };
 }
 
 // ── v2.2.0 P4-2: 增量维护 HTTP 入口 ───────────────────────────

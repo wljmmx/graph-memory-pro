@@ -2391,94 +2391,36 @@ export default definePluginEntry({
     api.registerTool({
       name: "gm_maintain",
       label: "Graph Memory Maintain",
-      description: "手动触发 Graph Memory Pro 图谱维护（去重 + PageRank + 社区检测 + 过时检测 + 健康检查）并返回统计信息",
+      description: "Start a background graph maintenance (dedup + PageRank + community + staleness + health + importance + conflict + edge weights + reverse memory + embedding migration + sparse self-heal). Returns a taskId immediately (does not block the session); progress is polled via GET /api/maintain/status?taskId=... or streamed via GET /api/maintain/stream?taskId=... .",
       parameters: Type.Object({}),
       async execute() {
         if (!_driver || !_cfg) {
           return { content: [{ type: "text", text: "Graph Memory Pro 未连接" }], details: {} };
         }
         try {
+          // v2.8.x: 异步后台任务——立即返回 taskId，避免同步调用阻塞会话触发 stalled-session。
+          // 进度经 API server 查询/SSE 流式输出（14 个 phase 流水线，含 progress%/当前 phase）。
           const [nodeCount, edgeCount] = await Promise.all([
             getNodeCount(_driver),
             getEdgeCount(_driver),
           ]);
-          const result = await runMaintenance(_driver, _cfg, _llm ?? undefined, _embed ?? undefined, _batchEmbed ?? undefined);
-
-          // v2.1.2 G-5: 维护后追加健康报告
-          let healthReport: GraphHealthReport | null = null;
-          try {
-            const { healthCheck } = await import("./src/graph/maintenance.ts");
-            healthReport = await healthCheck(_driver);
-          } catch {
-            // 健康检查失败不影响主流程
-          }
-
-          // v2.1.2 第二批：缓存 + 反馈统计
-          const cacheStats = _recaller?.getQueryCache()?.getStats();
-          const judgeStats = _recaller?.getJudgeManager()
-            ? {
-                feedbackCount: _recaller.getJudgeManager()!.getFeedbackCount(),
-                coldStart: _recaller.getJudgeManager()!.isColdStart(),
-              }
-            : null;
-
-          // v2.1.2 第三批：L-1 关联矩阵 M 统计
-          const amStats = _recaller?.getAssociationMatrix()?.getStats();
-
-          // v2.3.6: 维护周期持久化关联矩阵 M（兑现 serialize 注释"仅在 gm_maintain 周期性保存"）
-          let amPersist: { path: string; bytes: number } | null = null;
-          try {
-            const { saveRecallerAssociationMatrix } = await import("./src/recaller/association-matrix-persist.ts");
-            const saved = await saveRecallerAssociationMatrix(_recaller);
-            if (saved) amPersist = { path: saved.path, bytes: saved.bytes };
-          } catch { /* M 持久化失败不影响维护结果 */ }
-
-          const text = [
-            "📊 Graph Memory Pro 统计",
+          const { startMaintainTask } = await import("./src/graph/maintenance-task.ts");
+          const snapshot = startMaintainTask(
+            _driver, _cfg, _llm ?? undefined, _embed ?? undefined, _batchEmbed ?? undefined,
+          );
+          const lines = [
+            "🚀 维护任务已启动 (async)",
+            `TaskId: ${snapshot.taskId}`,
             `节点总数: ${nodeCount}`,
             `关系总数: ${edgeCount}`,
-            "",
-            "✅ 维护完成",
-            `去重合并: ${result.dedup.merged} 个`,
-            `PageRank: ${result.pagerank.topK.length} 个节点已排序`,
-            `社区: ${result.community.count} 个社区`,
-            `社区摘要: ${result.communitySummaries} 个`,
-            result.importance ? `重要性评分: scanned=${result.importance.scanned}, avg=${result.importance.avgScore.toFixed(3)}` : "",
-            result.conflictResolution ? `冲突消解: scanned=${result.conflictResolution.scanned}, resolved=${result.conflictResolution.resolved} (合并=${result.conflictResolution.merged})` : "",
-            result.edgeWeights && result.edgeWeights.scanned > 0 ? `边权重: 强化=${result.edgeWeights.strengthened}, 衰减=${result.edgeWeights.decayed}` : "",
-            result.reverseMemory && (result.reverseMemory.watchlistAdded > 0 || result.reverseMemory.decayed > 0) ? `反向记忆: 衰减=${result.reverseMemory.decayed}, 恢复=${result.reverseMemory.watchlistRemoved}` : "",
-            `耗时: ${result.durationMs}ms`,
-            "",
-            healthReport ? "🏥 图谱健康" : "",
-            healthReport ? `活跃节点: ${healthReport.nodes.active}/${healthReport.nodes.total}` : "",
-            healthReport ? `孤立节点: ${healthReport.isolatedNodes}` : "",
-            healthReport ? `高过时节点: ${healthReport.highStaleNodes}` : "",
-            healthReport ? `社区数: ${healthReport.communities}` : "",
-            healthReport ? `平均 PageRank: ${healthReport.avgPageRank.toFixed(4)}` : "",
-            healthReport && healthReport.anomalies.length > 0
-              ? `⚠️ 异常: ${healthReport.anomalies.join("; ")}`
-              : (healthReport ? "✅ 无异常" : ""),
-            "",
-            cacheStats ? "💾 查询缓存" : "",
-            cacheStats ? `容量: ${cacheStats.size}/${cacheStats.capacity}` : "",
-            cacheStats ? `命中率: ${cacheStats.hitRate}` : "",
-            cacheStats ? `相似命中: ${cacheStats.similarityHits}` : "",
-            "",
-            judgeStats ? "📋 反馈系统" : "",
-            judgeStats ? `累计反馈: ${judgeStats.feedbackCount}` : "",
-            judgeStats ? `冷启动期: ${judgeStats.coldStart ? "是（仅启发式规则）" : "否（已启用 LLM）"}` : "",
-            "",
-            amStats ? "🧠 关联矩阵 M (L-1)" : "",
-            amStats ? `维度: ${amStats.dim}` : "",
-            amStats ? `时间步 t: ${amStats.t}` : "",
-            amStats ? `已应用更新: ${amStats.updatesApplied}` : "",
-            amStats ? `被拒更新: ${amStats.updatesRejected} (R-3 边际效用拒绝)` : "",
-            amStats ? `历史样本: ${amStats.historySize}` : "",
-            amPersist ? `💾 M 已持久化: ${(amPersist.bytes / 1024).toFixed(1)}KB @ ${amPersist.path}` : "",
-          ].filter(Boolean).join("\n");
-          return { content: [{ type: "text", text }], details: { nodeCount, edgeCount, ...result, health: healthReport, cache: cacheStats, judge: judgeStats, associationMatrix: amStats, associationMatrixPersist: amPersist } };
+            `Phase: 0/${snapshot.phaseTotal}`,
+            `Progress: GET /api/maintain/status?taskId=${snapshot.taskId}`,
+            `Stream: GET /api/maintain/stream?taskId=${snapshot.taskId}`,
+            "Poll until status=done; result summary (merged/communities/self-heal/...) appears in snapshot.result once finished.",
+          ];
+          return { content: [{ type: "text", text: lines.join("\n") }], details: { nodeCount, edgeCount, ...snapshot } };
         } catch (err) {
-          return { content: [{ type: "text", text: `维护失败: ${(err as Error).message}` }], details: {} };
+          return { content: [{ type: "text", text: `维护启动失败: ${(err as Error).message}` }], details: {} };
         }
       },
     });

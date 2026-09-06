@@ -120,6 +120,12 @@ export async function startApiServer(
       return;
     }
 
+    // v2.8.x: gm_maintain 流式进度端点（SSE，与 reembed 对称）
+    if (req.method === "GET" && pathname === "/api/maintain/stream") {
+      await handleMaintainStream(req, res, url.searchParams.get("taskId") ?? "");
+      return;
+    }
+
     // 路由匹配
     let matched: RouteMatcher | null = null;
     const matchedParams: Record<string, string> = {};
@@ -355,6 +361,93 @@ async function handleReembedStream(
     if (closed) return;
     try { res.write(": ping\n\n"); } catch { finish(); }
   }, REEMBED_STREAM_HEARTBEAT_MS);
+
+  // 类型收窄：定时器在 finish() 中被 clear，此处仅为让 TS 认可已被引用
+  void pollTimer;
+  void heartbeatTimer;
+}
+
+// ── v2.8.x: gm_maintain 流式进度（SSE，与 reembed 对称）───────────────────
+//
+// GET /api/maintain/stream?taskId=xxx
+// 事件流：
+//   event: snapshot   data: {MaintainTaskSnapshot}（初始 + 状态变化时）
+//   event: done       data: {MaintainTaskSnapshot}（终态：done/failed/cancelled，随后关闭连接）
+//   : ping            （每 15s 心跳注释，防止代理/负载均衡断开空闲连接）
+//
+// 维护流水线 14 个 phase 间更新快照，phase 切换即推送；无需更高频轮询。
+
+const MAINTAIN_STREAM_POLL_MS = 1000;
+const MAINTAIN_STREAM_HEARTBEAT_MS = 15_000;
+
+async function handleMaintainStream(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  taskId: string,
+): Promise<void> {
+  if (!taskId) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "taskId query param is required" }));
+    return;
+  }
+  const { getMaintainTask } = await import("../graph/maintenance-task.ts");
+
+  const first = getMaintainTask(taskId);
+  if (!first) {
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: `maintain task not found: ${taskId}` }));
+    return;
+  }
+
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no", // 禁用 nginx 缓冲，保证事件实时到达
+  });
+  res.write("retry: 3000\n\n");
+
+  const send = (event: string, data: unknown): void => {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  send("snapshot", first);
+
+  let lastJson = JSON.stringify(first);
+  let closed = false;
+  const finish = (): void => {
+    if (closed) return;
+    closed = true;
+    clearInterval(pollTimer);
+    clearInterval(heartbeatTimer);
+    try { res.end(); } catch { /* ignore */ }
+  };
+  req.on("close", finish);
+
+  const pollTimer = setInterval(() => {
+    if (closed) return;
+    const snap = getMaintainTask(taskId);
+    if (!snap) {
+      send("done", { taskId, status: "gone", error: "task no longer tracked" });
+      finish();
+      return;
+    }
+    const json = JSON.stringify(snap);
+    if (json !== lastJson) {
+      lastJson = json;
+      send("snapshot", snap);
+    }
+    if (snap.status === "done" || snap.status === "failed" || snap.status === "cancelled") {
+      send("done", snap);
+      finish();
+    }
+  }, MAINTAIN_STREAM_POLL_MS);
+
+  const heartbeatTimer = setInterval(() => {
+    if (closed) return;
+    try { res.write(": ping\n\n"); } catch { finish(); }
+  }, MAINTAIN_STREAM_HEARTBEAT_MS);
 
   // 类型收窄：定时器在 finish() 中被 clear，此处仅为让 TS 认可已被引用
   void pollTimer;

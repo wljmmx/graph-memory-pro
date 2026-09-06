@@ -30,6 +30,7 @@ import { resolveConflicts } from "./maintenance/conflict.ts";
 import { adjustEdgeWeights } from "./maintenance/edge-weights.ts";
 import { applyReverseMemory } from "./maintenance/reverse-memory.ts";
 import { backfillTimestamps, type TimestampBackfillResult } from "./maintenance/timestamp-backfill.ts";
+import type { SelfHealResult } from "./maintenance/self-heal.ts";
 
 // ── Barrel：重新导出子模块公共 API（保持向后兼容） ──────────────
 export { computeStalenessScores } from "./maintenance/staleness.ts";
@@ -41,6 +42,48 @@ export { applyReverseMemory, type ReverseMemoryConfig } from "./maintenance/reve
 export { backfillTimestamps, type TimestampBackfillResult } from "./maintenance/timestamp-backfill.ts";
 export { computeGraphHealthScore, persistGraphHealthMetric, type GraphHealthScore } from "./maintenance/health.ts";
 export { runSelfHeal, revertSelfHeal, cjkBigramSim, type SelfHealResult, type SelfHealConfig } from "./maintenance/self-heal.ts";
+
+/**
+ * v2.8.x: 维护进度钩子 —— 供异步任务（maintenance-task.ts）跟踪 14 个 phase 进度。
+ * onPhase 在每次 phase 开始前被同步调用；若抛出 MaintenanceCancelledError，
+ * 会中断后续 phase（每个 phase 独立的 try-catch 不会吞掉钩子异常）。
+ */
+export interface MaintainPhaseInfo {
+  /** 当前 phase 序号（0 起） */
+  index: number;
+  /** phase 总数 */
+  total: number;
+  /** phase 名称（与日志/快照一致） */
+  name: string;
+}
+
+export type MaintainPhaseHook = (phase: MaintainPhaseInfo) => void;
+
+/** 抛给 onPhase 钩子以请求取消维护（由 maintenance-task 捕获转 cancelled 状态） */
+export class MaintenanceCancelledError extends Error {
+  constructor(message = "maintenance cancelled by user") {
+    super(message);
+    this.name = "MaintenanceCancelledError";
+  }
+}
+
+/** 维护流水线 phase 总览（与 runMaintenance 内插入点一一对应，index 0 起） */
+export const MAINTENANCE_PHASES: ReadonlyArray<{ name: string }> = [
+  { name: "repair-edges" },           // 0  补 RELATES_TO 共现边
+  { name: "dedup" },                  // 1  去重合并
+  { name: "pagerank" },               // 2  PageRank
+  { name: "community" },              // 3  社区检测
+  { name: "community-summaries" },    // 4  社区摘要（LLM，可选）
+  { name: "timestamp-backfill" },     // 5  时序字段回填
+  { name: "staleness" },              // 6  过时检测
+  { name: "health-check" },           // 7  健康检查 + 0-100 评分
+  { name: "importance" },             // 8  重要性评分
+  { name: "conflict-resolution" },    // 9  冲突消解
+  { name: "edge-weights" },           // 10 边权重调整
+  { name: "reverse-memory" },         // 11 反向记忆
+  { name: "embedding-migration" },    // 12 嵌入版本迁移
+  { name: "self-heal" },              // 13 稀疏图自愈
+];
 
 export interface RepairEdgeResult {
   relatesToCreated: number;
@@ -93,6 +136,8 @@ export interface MaintenanceResult {
   embeddingMigration?: { distribution: Map<string, number>; cleared: number; migrated: number };
   /** v2.4.0: 时序字段回填结果（Phase 4b） */
   timestampBackfill?: TimestampBackfillResult;
+  /** v2.8.x: 稀疏图自愈结果（Phase 12，供维护任务快照汇总展示） */
+  selfHeal?: SelfHealResult;
   durationMs: number;
 }
 
@@ -124,7 +169,13 @@ function releaseLock(): void {
 
 export async function runMaintenance(
   driver: Driver, cfg: GmConfig, llm?: CompleteFn, embedFn?: EmbedFn, batchEmbedFn?: BatchEmbedFn,
+  onPhase?: MaintainPhaseHook,
 ): Promise<MaintenanceResult> {
+  // v2.8.x: 进度钩子（可选）——每个 phase 开始前调用；抛出异常则中断整个流水线
+  const phaseTotal = MAINTENANCE_PHASES.length;
+  const notifyPhase = (index: number): void => {
+    if (onPhase) onPhase({ index, total: phaseTotal, name: MAINTENANCE_PHASES[index]?.name ?? `phase-${index}` });
+  };
   // v2.6.1: 锁超时与配置的维护超时联动（默认 2min），避免配置调大后锁提前强制释放
   lockTimeoutMs = cfg.background?.maintenanceTimeoutMs ?? 120_000;
   if (!tryAcquireLock()) {
@@ -155,9 +206,11 @@ export async function runMaintenance(
   let reverseMemoryResult: { watchlistAdded: number; watchlistRemoved: number; decayed: number } | undefined;
   let migrationResultValue: { distribution: Map<string, number>; cleared: number; migrated: number } | undefined;
   let timestampBackfillResult: TimestampBackfillResult | undefined;
+  let selfHealResultValue: SelfHealResult | undefined;
 
   try {
     // ── Phase 0: Derive RELATES_TO from MENTIONS co-occurrence ──
+    notifyPhase(0);
     try {
       const edgeResult = await deriveRelatesFromMentions(driver);
       log.info("repair edges: created", { created: edgeResult.relatesToCreated });
@@ -167,6 +220,7 @@ export async function runMaintenance(
     _lockTimestamp = Date.now(); // refresh lock
 
     // ── Phase 1: Dedup ──
+    notifyPhase(1);
     try {
       dedupResult = await dedup(driver, cfg);
       log.info("dedup: merged", { merged: dedupResult.merged, pairs: dedupResult.pairs.length });
@@ -176,6 +230,7 @@ export async function runMaintenance(
     _lockTimestamp = Date.now(); // refresh lock
 
     // ── Phase 2: PageRank ──
+    notifyPhase(2);
     try {
       pagerankResult = await computeGlobalPageRank(driver, cfg);
       log.info("pagerank: topK", { topK: pagerankResult.topK.length });
@@ -185,6 +240,7 @@ export async function runMaintenance(
     _lockTimestamp = Date.now(); // refresh lock
 
     // ── Phase 3: Community Detection（v2.1.2 第四批：S-4 层次化社区）──
+    notifyPhase(3);
     try {
       if (cfg?.hierarchicalCommunity?.enabled !== false && (cfg?.hierarchicalCommunity?.depth ?? 3) >= 2) {
         // S-4: 层次化社区检测（内部调用 detectCommunities 作为 level 1）
@@ -216,6 +272,7 @@ export async function runMaintenance(
     _lockTimestamp = Date.now(); // refresh lock
 
     // ── Phase 4: Community Summaries (optional, needs LLM) ──
+    notifyPhase(4);
     if (llm && communityResult.communities.size > 0) {
       try {
         // v2.5.4: 透传 cfg，用于社区摘要的批量上限、间隔、熔断等节流参数
@@ -228,6 +285,7 @@ export async function runMaintenance(
 
     // ── Phase 4b: 时序字段回填（v2.4.0，默认开启） ──
     // 必须在 Phase 5 过时衰减 / Phase 7 重要性之前执行，保证 updatedAt 有效。
+    notifyPhase(5);
     if (cfg?.timestampBackfill?.enabled !== false) {
       try {
         timestampBackfillResult = await backfillTimestamps(driver);
@@ -239,6 +297,7 @@ export async function runMaintenance(
     _lockTimestamp = Date.now(); // refresh lock
 
     // ── Phase 5: S-14 Staleness 重算（v2.1.2，默认开启） ──
+    notifyPhase(6);
     if (cfg?.staleness?.enabled !== false) {
       try {
         await computeStalenessScores(driver, {
@@ -252,6 +311,7 @@ export async function runMaintenance(
     _lockTimestamp = Date.now(); // refresh lock
 
     // ── Phase 6: G-5 健康检查（v2.1.2，告警输出） ──
+    notifyPhase(7);
     if (cfg?.graphHealth?.enabled !== false) {
       try {
         const report = await healthCheck(driver);
@@ -278,6 +338,7 @@ export async function runMaintenance(
 
     // ── Phase 7: G-3 重要性评分（v2.1.2 第三批） ──
     // 依赖：S-1 updatedAt / S-3 source / validatedCount / Phase 2 PageRank
+    notifyPhase(8);
     if (cfg?.importance?.enabled !== false) {
       try {
         importanceResult = await computeImportanceScores(driver, cfg?.importance);
@@ -297,6 +358,7 @@ export async function runMaintenance(
 
     // ── Phase 8: G-2 冲突消解（v2.1.2 第四批） ──
     // 依赖：S-13 state + S-14 staleness（检测）+ 本任务（消解）
+    notifyPhase(9);
     if (cfg?.conflictResolution?.enabled !== false) {
       try {
         conflictResult = await resolveConflicts(driver, cfg?.conflictResolution);
@@ -317,6 +379,7 @@ export async function runMaintenance(
 
     // ── Phase 9: L-3 边权重调整（v2.1.2 第四批） ──
     // 依赖：I-2 裁判反馈（JUDGED 关系）+ 冷启动期（累计反馈 >= warmupFeedbacks）
+    notifyPhase(10);
     if (cfg?.edgeWeights?.enabled !== false) {
       try {
         edgeWeightsResult = await adjustEdgeWeights(driver, cfg?.edgeWeights, cfg?.warmup?.warmupFeedbacks ?? 40);
@@ -338,6 +401,7 @@ export async function runMaintenance(
 
     // ── Phase 10: L-4 反向记忆项（v2.1.2 第四批） ──
     // 依赖：I-2 裁判反馈（节点使用/未使用计数）+ 冷启动期
+    notifyPhase(11);
     if (cfg?.reverseMemory?.enabled !== false) {
       try {
         reverseMemoryResult = await applyReverseMemory(driver, cfg?.reverseMemory, cfg?.warmup?.warmupFeedbacks ?? 40);
@@ -360,6 +424,7 @@ export async function runMaintenance(
     // ── Phase 11: G-4 嵌入版本迁移（v2.1.2 第四批） ──
     // 检测节点 embeddingModel 分布，若存在不一致（旧模型遗留）则触发重嵌入
     // 仅在配置了 embedding.model 且启用了 evolvableEmbedding 时执行
+    notifyPhase(12);
     if (cfg?.evolvableEmbedding?.enabled !== false && cfg?.embedding?.model && embedFn) {
       try {
         const { detectAndMigrateEmbeddings } = await import("./reembed.ts");
@@ -391,6 +456,7 @@ export async function runMaintenance(
     // （v2.6.2 fix: 自愈必须在嵌入迁移之后执行——补边候选强依赖 a.embedding，
     //   原顺序下无 embedding 的节点全被跳过，第一轮维护形同空转）
     // 保守策略：稀疏时补边/合并/社区重连；若自愈后评分未改善且建过边则回滚
+    notifyPhase(13);
     if (cfg?.sparseHeal?.enabled !== false) {
       try {
         const { runSelfHeal, revertSelfHeal } = await import("./maintenance/self-heal.ts");
@@ -405,6 +471,7 @@ export async function runMaintenance(
           cjkWeight: cfg.sparseHeal?.cjkWeight,
         });
         if (healResult.scored && healResult.sparse && healResult.edgesAdded > 0) {
+          selfHealResultValue = healResult;
           log.info("self-heal", {
             edgesAdded: healResult.edgesAdded,
             mergesApplied: healResult.mergesApplied,
@@ -438,6 +505,8 @@ export async function runMaintenance(
     edgeWeights: edgeWeightsResult,
     reverseMemory: reverseMemoryResult,
     embeddingMigration: migrationResultValue,
+    timestampBackfill: timestampBackfillResult,
+    selfHeal: selfHealResultValue,
     durationMs: Date.now() - start,
   };
 }
