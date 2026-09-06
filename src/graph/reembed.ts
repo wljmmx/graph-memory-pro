@@ -14,6 +14,12 @@ export interface ReEmbedResult {
    * 为 true 时表示还有节点未处理，下次调用会从已嵌入节点之后继续。
    */
   aborted?: boolean;
+  /**
+   * v2.8.x: 最后一次失败的异常信息（诊断用）。
+   * 此前 catch 静默吞错，出现 failed>0 时无法定位根因（如 Neo4j 查询报错、
+   * embedding 字段坏类型、Ollama 连接失败等）。
+   */
+  lastError?: string;
 }
 
 export async function reEmbedNodes(
@@ -35,6 +41,9 @@ export async function reEmbedNodes(
   let failed = 0;
   let skipped = 0;
   let consecutiveFailures = 0;
+  let lastError: string | undefined;
+  let lastBatchLen = 0;
+  let advanced = false;
   const MAX_CONSECUTIVE_FAILURES = 5;
 
   while (true) {
@@ -48,6 +57,7 @@ export async function reEmbedNodes(
         skipped,
         durationMs: Date.now() - start,
         aborted: true,
+        lastError,
       };
     }
     try {
@@ -55,7 +65,7 @@ export async function reEmbedNodes(
       try {
         const result = await session.run(
           "MATCH (n:Task|Skill|Event)" +
-          " WHERE n.status = 'active' AND (n.embedding IS NULL OR size(n.embedding) = 0)" +
+          " WHERE n.status = 'active' AND (n.embedding IS NULL OR n.embedding = [])" +
           " RETURN n.id AS id, labels(n)[0] AS label, n.name, n.description, n.content" +
           " ORDER BY n.id SKIP $skip LIMIT $limit",
           { skip: totalScanned, limit: batchSize },
@@ -66,6 +76,8 @@ export async function reEmbedNodes(
 
         // Reset failure counter on successful query
         consecutiveFailures = 0;
+        lastBatchLen = nodes.length;
+        advanced = false;
 
         // v2.4.0: 批量嵌入——一次请求携带多个节点文本，显著减少 HTTP 请求数，
         // 降低本地 Ollama 请求队列压力（503 maximum pending 触发概率）。
@@ -91,6 +103,7 @@ export async function reEmbedNodes(
             });
           }
           totalScanned += nodes.length;
+          advanced = true;
           const embedded = await embedNodeBatch(driver, batchEmbedFn, items, cfg);
           reEmbedded += embedded;
           skipped += nodes.length - embedded;
@@ -129,18 +142,32 @@ export async function reEmbedNodes(
         }
 
         totalScanned += nodes.length;
+        advanced = true;
       } finally {
         await session.close();
       }
-    } catch {
+    } catch (err) {
+      // v2.8.x: 记录错误 + 精确回滚，替代原「查询失败时 totalScanned += batchSize」的假扫描。
+      // 原逻辑下查询失败仍假装扫描 50 节点，abort 时 totalScanned 虚高（如 4 次失败=200），
+      // 且 SKIP 跳过未处理的批次造成静默数据丢失。
       failed++;
+      lastError = (err as Error)?.message ?? String(err);
       consecutiveFailures++;
+      // 仅当本批 totalScanned 已递增（embedNodeBatch 抛异常）时回滚到批头，
+      // 保证重试同一批（已写入 embedding 的节点会被查询条件过滤，重试幂等安全）。
+      // 查询本身失败时 advanced=false，totalScanned 未变，无需回滚。
+      if (advanced && lastBatchLen > 0) {
+        totalScanned -= lastBatchLen;
+      }
+      advanced = false;
+      lastBatchLen = 0;
       if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-        console.warn(`[graph-memory-pro] reEmbed: ${MAX_CONSECUTIVE_FAILURES} consecutive failures, aborting`);
+        console.warn(`[graph-memory-pro] reEmbed: ${MAX_CONSECUTIVE_FAILURES} consecutive failures, aborting: ${lastError}`);
         break;
       }
-      // 递增 totalScanned 避免死循环
-      totalScanned += batchSize;
+      // 瞬态失败（连接抖动 / Ollama 503）退避后重试同一批次
+      await new Promise((r) => setTimeout(r, 1000));
+      continue;
     }
 
     await new Promise((r) => setTimeout(r, 200));
@@ -152,6 +179,7 @@ export async function reEmbedNodes(
     failed,
     skipped,
     durationMs: Date.now() - start,
+    lastError,
   };
 }
 
@@ -215,7 +243,7 @@ export async function detectAndMigrateEmbeddings(
     // 查询节点上 embeddingModel 的分布
     const distResult = await session.run(
       `MATCH (n:Task|Skill|Event {status: 'active'})
-       WHERE n.embedding IS NOT NULL AND size(n.embedding) > 0
+       WHERE n.embedding IS NOT NULL AND n.embedding <> []
        RETURN coalesce(n.embeddingModel, 'unknown') AS model, count(n) AS cnt
        ORDER BY cnt DESC`,
     );
@@ -237,7 +265,7 @@ export async function detectAndMigrateEmbeddings(
     const missingResult = await session.run(
       `MATCH (n:Task|Skill|Event {status: 'active'})
        WHERE n.embeddingModel IS NOT NULL
-         AND (n.embedding IS NULL OR size(n.embedding) = 0)
+         AND (n.embedding IS NULL OR n.embedding = [])
        RETURN count(n) AS cnt`,
     );
     missingEmbedding = missingResult.records[0]?.get("cnt")?.toNumber?.() ?? 0;
@@ -254,7 +282,7 @@ export async function detectAndMigrateEmbeddings(
     try {
       const clearResult = await clearSession.run(
         `MATCH (n:Task|Skill|Event {status: 'active'})
-         WHERE n.embedding IS NOT NULL AND size(n.embedding) > 0
+         WHERE n.embedding IS NOT NULL AND n.embedding <> []
            AND coalesce(n.embeddingModel, 'unknown') <> $configuredModel
          SET n.embedding = null, n.embeddingHash = null
          RETURN count(n) AS cleared`,

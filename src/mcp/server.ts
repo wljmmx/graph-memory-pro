@@ -424,8 +424,11 @@ export async function startMcpServer(
           const abortedNote = result.aborted
             ? ` (timeout ${reembedTimeoutMs}ms — ${result.totalScanned} scanned so far, run again to continue)`
             : "";
+          const errNote = result.lastError
+            ? ` (last error: ${result.lastError.slice(0, 200)})`
+            : "";
           return {
-            content: [{ type: "text", text: `Re-embedded ${result.reEmbedded}/${result.totalScanned} nodes, ${result.failed} failed, ${result.durationMs}ms${abortedNote}` }],
+            content: [{ type: "text", text: `Re-embedded ${result.reEmbedded}/${result.totalScanned} nodes, ${result.failed} failed, ${result.durationMs}ms${abortedNote}${errNote}` }],
             structuredContent: asStructured(result),
           };
         } catch (err: unknown) {

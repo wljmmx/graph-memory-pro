@@ -187,7 +187,7 @@ export async function embedNodesMissing(
     const result = await session.run(
       `MATCH (n:Task|Skill|Event)
        WHERE n.id IN $ids
-         AND (n.embedding IS NULL OR size(n.embedding) = 0)
+         AND (n.embedding IS NULL OR n.embedding = [])
        RETURN n.id AS id, n.name AS name, n.description AS description, n.content AS content`,
       { ids: items.map((i) => i.nodeId) },
     );

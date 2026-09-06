@@ -271,3 +271,59 @@ describe("reEmbedNodes（AbortSignal 超时取消）", () => {
     expect(scanCalls).toHaveLength(1);
   });
 });
+
+describe("reEmbedNodes（失败诊断与精确扫描）", () => {
+  it("查询连续失败 → lastError 记录错误，totalScanned 不再假递增（此前 4 次失败=200 虚高）", async () => {
+    const driver = mockDriver();
+    // 让 session.run 抛异常（查询失败路径）
+    const session = driver.session();
+    const originalRun = session.run.bind(session);
+    session.run = async () => { throw new Error("Neo4j: Connection terminated"); };
+
+    const result = await reEmbedNodes(
+      driver as unknown as Driver,
+      undefined,
+      50,
+      EMBEDDING_MODEL,
+      undefined,
+      makeBatchEmbedFn(),
+    );
+
+    expect(result.failed).toBeGreaterThan(0);
+    expect(result.lastError).toContain("Connection terminated");
+    // 查询失败不递增 totalScanned（修复假扫描：旧逻辑 4 次失败会显示 totalScanned=200）
+    expect(result.totalScanned).toBe(0);
+    expect(result.reEmbedded).toBe(0);
+    // 恢复原 run 方法避免影响其他测试
+    session.run = originalRun;
+  });
+
+  it("embedNodeBatch 抛异常 → 回滚到批头重试同一批，不假递增", async () => {
+    const driver = mockDriver();
+    // 队列：批1 查询返回 1 个节点；embedNodeBatch 抛异常后重试同一 SKIP，
+    // 第二次查询命中同一节点（mock 队列后续返回空则提前结束）
+    driver.queueResults([
+      [{ id: "t1", name: "task-1", description: "d", content: "c" }],
+      [], // 重试后第二次查询：节点已嵌入（被条件过滤）→ 空 → 结束
+    ]);
+    const batchEmbed = vi.fn(async () => { throw new Error("Ollama: 503 server busy"); });
+
+    const result = await reEmbedNodes(
+      driver as unknown as Driver,
+      undefined,
+      50,
+      EMBEDDING_MODEL,
+      undefined,
+      batchEmbed,
+    );
+
+    expect(result.lastError).toContain("503");
+    expect(result.totalScanned).toBe(0);
+    expect(result.reEmbedded).toBe(0);
+    // 重试逻辑：第一次查询失败后应再次查询同一 SKIP（共 2 次扫描查询）
+    const scanCalls = driver.getAllRunCalls().filter((c) => c.query.includes("ORDER BY n.id"));
+    expect(scanCalls.length).toBe(2);
+    // 两次查询的 SKIP 相同（回滚到批头）
+    expect(scanCalls[0].params.skip).toBe(scanCalls[1].params.skip);
+  });
+});
