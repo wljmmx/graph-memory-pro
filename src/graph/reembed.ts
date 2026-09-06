@@ -150,6 +150,9 @@ export interface MigrationResult {
   cleared: number;
   /** 迁移是否触发 */
   migrationTriggered: boolean;
+  /** v2.8.x: 有 embeddingModel 但缺 embedding 的节点数（建图写入缺步遗留，
+   *  如 extract/gm_record 只写 embeddingModel 未算向量的 Task/Skill 节点） */
+  missingEmbedding: number;
 }
 
 /**
@@ -178,6 +181,7 @@ export async function detectAndMigrateEmbeddings(
       needsMigration: 0,
       cleared: 0,
       migrationTriggered: false,
+      missingEmbedding: 0,
     };
   }
 
@@ -186,6 +190,8 @@ export async function detectAndMigrateEmbeddings(
   let needsMigration = 0;
   let cleared = 0;
   let migrationTriggered = false;
+  // v2.8.x: 有 embeddingModel 但缺向量 的节点数（建图写入缺步遗留，此前未被检测到）
+  let missingEmbedding = 0;
 
   try {
     // 查询节点上 embeddingModel 的分布
@@ -206,12 +212,25 @@ export async function detectAndMigrateEmbeddings(
         needsMigration += cnt;
       }
     }
+
+    // v2.8.x 根因修复检测: 只统计「有 embeddingModel 但无向量」的节点。
+    // 此前的分布查询只看有向量的节点，Task/Skill 这类从未被写入向量的节点
+    // 对迁移逻辑完全不可见，导致 gm_maintain 每轮都跳过它们（缺失率恒 100%）。
+    const missingResult = await session.run(
+      `MATCH (n:Task|Skill|Event {status: 'active'})
+       WHERE n.embeddingModel IS NOT NULL
+         AND (n.embedding IS NULL OR size(n.embedding) = 0)
+       RETURN count(n) AS cnt`,
+    );
+    missingEmbedding = missingResult.records[0]?.get("cnt")?.toNumber?.() ?? 0;
   } finally {
     await session.close();
   }
 
-  // 触发迁移：清空 embeddingModel 不匹配的节点的 embedding
-  if (needsMigration > 0) {
+  // 触发迁移/补录：
+  //   1) 模型不一致 → 清空不匹配节点的 embedding 后全量重嵌入（原逻辑）
+  //   2) 存在「有 embeddingModel 但无向量」节点 → 直接补录（reEmbedNodes 只处理缺向量节点）
+  if (needsMigration > 0 || missingEmbedding > 0) {
     migrationTriggered = true;
     const clearSession = driver.session();
     try {
@@ -226,13 +245,14 @@ export async function detectAndMigrateEmbeddings(
       cleared = clearResult.records[0]?.get("cleared")?.toNumber?.() ?? 0;
 
       console.log(
-        `[graph-memory-pro] G-4 migration: model ${configuredModel}, cleared ${cleared} nodes (was: ${Array.from(modelDistribution.entries()).map(([m, c]) => `${m}=${c}`).join(", ")})`,
+        `[graph-memory-pro] G-4 migration: model ${configuredModel}, cleared ${cleared} nodes (was: ${Array.from(modelDistribution.entries()).map(([m, c]) => `${m}=${c}`).join(", ")})` +
+          (missingEmbedding > 0 ? `, backfilling ${missingEmbedding} nodes with embeddingModel but no embedding` : ""),
       );
     } finally {
       await clearSession.close();
     }
 
-    // 触发全量重嵌入（清空的节点会被 reEmbedNodes 重新嵌入）
+    // 触发全量重嵌入（清空的节点 + 缺向量的遗留节点都会被 reEmbedNodes 重新嵌入）
     if (embedFn || batchEmbedFn) {
       const reEmbed = await reEmbedNodes(driver, embedFn, 50, configuredModel, undefined, batchEmbedFn);
       return {
@@ -241,6 +261,7 @@ export async function detectAndMigrateEmbeddings(
         needsMigration,
         cleared,
         migrationTriggered,
+        missingEmbedding,
         reEmbed,
       };
     }
@@ -252,5 +273,6 @@ export async function detectAndMigrateEmbeddings(
     needsMigration,
     cleared,
     migrationTriggered,
+    missingEmbedding,
   };
 }

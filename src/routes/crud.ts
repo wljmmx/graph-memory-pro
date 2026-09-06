@@ -17,6 +17,7 @@ import {
   graphWalk, nodesByCommunityIds, communityRepresentatives,
   getNodeFeedbackStats,
 } from "../store/store.ts";
+import { embedNode } from "../store/embed-helper.ts";
 import { runMaintenance } from "../graph/maintenance.ts";
 import {
   runIncrementalMaintenance,
@@ -175,6 +176,8 @@ async function handleRebuildFromMessages(params: Record<string, unknown>): Promi
       console,
       sessionKey,
       { concurrency, pageSize, writeBatchSize, progressPath, mode, markProcessed },
+      _embed ?? undefined,
+      _batchEmbed ?? undefined,
     );
     const llmOutputTokens = Math.max(0, (await usageCompletionTokens()) - llmBefore);
     return {
@@ -256,6 +259,8 @@ async function handleRebuildAll(params: Record<string, unknown>): Promise<{ stat
         _cfg,
         console,
         { mode, sessionConcurrency, concurrency, limitSessions, pageSize, writeBatchSize, progressPath, includeMemorySessions, excludeSessionKeySubstrings, markProcessed },
+        _embed ?? undefined,
+        _batchEmbed ?? undefined,
       );
       const llmOutputTokens = Math.max(0, (await usageCompletionTokens()) - llmBefore);
       job.result = { ...result, llmOutputTokens, llmHasOutput: llmOutputTokens > 0 };
@@ -1264,6 +1269,20 @@ async function handleCreateNode(params: Record<string, unknown>): Promise<{ stat
       updatedAt: now,
       embeddingModel: _cfg?.embedding?.model,
     });
+    // v2.8.x 根因修复: 节点落库后补算 embedding（此前只写 embeddingModel 字段，
+    // 导致新建节点缺向量，recall 向量检索无法命中）
+    if (_embed && _cfg?.embedding?.model) {
+      try {
+        await embedNode(_driver, _embed, id, {
+          name: String(name),
+          description: String(description ?? ""),
+          content: String(content ?? ""),
+          embeddingModel: _cfg.embedding.model,
+        }, _cfg);
+      } catch {
+        // 嵌入失败不影响节点创建（下次 gm_reembed 会补）
+      }
+    }
     return { status: 201, body: { id, message: "node created" } };
   } catch (err: unknown) {
     return { status: 500, body: { error: (err as Error).message } };
@@ -1288,6 +1307,23 @@ async function handleUpdateNode(params: Record<string, unknown>): Promise<{ stat
       updatedAt: now,
       embeddingModel: _cfg?.embedding?.model,
     });
+    // v2.8.x 根因修复: 内容变更时 upsertNode 会归档并清空旧 embedding，
+    // 更新后补算向量，避免节点一直缺向量（此前仅写 embeddingModel 字段）
+    if (_embed && _cfg?.embedding?.model) {
+      const nn = await findById(_driver, id as string);
+      if (nn) {
+        try {
+          await embedNode(_driver, _embed, nn.id, {
+            name: nn.name,
+            description: nn.description ?? "",
+            content: nn.content ?? "",
+            embeddingModel: _cfg.embedding.model,
+          }, _cfg);
+        } catch {
+          // 嵌入失败不影响节点更新（下次 gm_reembed 会补）
+        }
+      }
+    }
     return { status: 200, body: { id, message: "node updated" } };
   } catch (err: unknown) {
     return { status: 500, body: { error: (err as Error).message } };

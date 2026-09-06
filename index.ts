@@ -684,7 +684,7 @@ function startBackgroundExtractor(
         } catch { /* 跳过损坏行 */ }
       }
       if (pairs.length === 0) return;
-      const processed = await extractInBackground(_extractor, _driver, _llm, _cfg, logger, pairs);
+      const processed = await extractInBackground(_extractor, _driver, _llm, _cfg, logger, pairs, _embed ?? undefined, _batchEmbed ?? undefined);
       let marked = 0;
       if (processed > 0) {
         const { markMessagesProcessed, markMessagesByContent } = await import('./src/store/messages.ts');
@@ -913,7 +913,7 @@ async function processInterimQueue(logger: LoggerLike): Promise<void> {
     }
     if (texts.length === 0) return;
 
-    const extracted = await extractInterimTexts(_extractor, _driver, _llm, _cfg, texts);
+    const extracted = await extractInterimTexts(_extractor, _driver, _llm, _cfg, texts, _embed ?? undefined, _batchEmbed ?? undefined);
     // v2.5.4: 只移除本批已处理的条目（extractInterimTexts 有单次上限），剩余写回队列，
     // 避免批量丢失未处理数据。
     await mkdir(dirname(queuePath), { recursive: true }).catch(() => {});
@@ -2035,7 +2035,7 @@ export default definePluginEntry({
             // v2.4.2: 返回本批实际处理的对数（内部 maxPairs=3 限流），据此：
             //   1. 标记已处理消息（有 id 按 id，否则按 sessionKey+内容反查，避免下一轮/重建重复处理）
             //   2. 只清掉已处理的行，剩余行保留待下一轮（避免一次性清空导致 >3 对数据丢失）
-            const processed = await extractInBackground(_extractor, _driver, _llm, _cfg, logger, pairs);
+            const processed = await extractInBackground(_extractor, _driver, _llm, _cfg, logger, pairs, _embed ?? undefined, _batchEmbed ?? undefined);
 
             let marked = 0;
             if (processed > 0) {
@@ -2348,6 +2348,20 @@ export default definePluginEntry({
             updatedAt: now,
             embeddingModel: _cfg?.embedding?.model,
           });
+          // v2.8.x 根因修复: 手动记录节点后补算 embedding（此前只写 embeddingModel 字段，
+          // 导致该类节点全缺向量，recall 向量检索无法命中）
+          if (_embed && _cfg?.embedding?.model) {
+            try {
+              await embedNode(_driver, _embed, id, {
+                name: p.name,
+                description: p.description,
+                content: p.content,
+                embeddingModel: _cfg.embedding.model,
+              }, _cfg);
+            } catch {
+              // 嵌入失败不影响节点记录（下次 gm_reembed 会补）
+            }
+          }
           return { content: [{ type: "text", text: `已记录知识节点: ${id}` }], details: { id } };
         } catch (err) {
           return { content: [{ type: "text", text: `记录失败: ${(err as Error).message}` }], details: {} };

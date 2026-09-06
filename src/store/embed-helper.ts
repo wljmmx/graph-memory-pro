@@ -11,6 +11,7 @@ import type { EmbedFn, BatchEmbedFn } from "../engine/embed.ts";
 import type { GmConfig } from "../types.ts";
 import { buildEmbedTexts } from "../recaller/chunk.ts";
 import { saveVector, saveChunkVectors, computeEmbeddingHash } from "./store.ts";
+import { getSession } from "./db.ts";
 
 export interface EmbedNodeParams {
   name: string;
@@ -154,4 +155,77 @@ export async function embedNodeBatch(
     count++;
   }
   return count;
+}
+
+/**
+ * v2.8.x: 建图写入路径的 embedding 补齐。
+ *
+ * 根因修复：extract/gm_record/rebuild 等写入路径此前只写 embeddingModel 字段，
+ * 从未调用 embed 计算并落盘向量，导致 Task/Skill 节点 100% 缺 embedding。
+ * 本函数只补「缺失」的节点（新节点，或内容变化被 upsertNode 归档清空的节点），
+ * 已嵌入的不重复调用 embed（文本不变 → hash 不变 → 向量不变），避免无效重算。
+ *
+ * @param items 待检查的节点（nodeId + 嵌入参数）
+ * @param embedFn 单文本嵌入函数（batchEmbedFn 缺失时的回退）
+ * @param batchEmbedFn 批量嵌入函数（优先使用，减少 Ollama 请求队列压力）
+ * @returns 实际补写向量的节点数
+ */
+export async function embedNodesMissing(
+  driver: Driver,
+  items: BatchEmbedNodeItem[],
+  embedFn?: EmbedFn,
+  batchEmbedFn?: BatchEmbedFn,
+  cfg?: GmConfig,
+): Promise<number> {
+  if (items.length === 0) return 0;
+  if (!embedFn && !batchEmbedFn) return 0;
+
+  // 只处理确实缺向量的节点（新写入或内容变化被清空）
+  const session = getSession(driver);
+  const missing: Array<{ id: string; name: string; description: string; content: string }> = [];
+  try {
+    const result = await session.run(
+      `MATCH (n:Task|Skill|Event)
+       WHERE n.id IN $ids
+         AND (n.embedding IS NULL OR size(n.embedding) = 0)
+       RETURN n.id AS id, n.name AS name, n.description AS description, n.content AS content`,
+      { ids: items.map((i) => i.nodeId) },
+    );
+    for (const rec of result.records) {
+      missing.push({
+        id: rec.get("id") as string,
+        name: rec.get("name") ?? "",
+        description: rec.get("description") ?? "",
+        content: rec.get("content") ?? "",
+      });
+    }
+  } finally {
+    await session.close();
+  }
+  if (missing.length === 0) return 0;
+
+  const byId = new Map(items.map((i) => [i.nodeId, i.params]));
+  const toEmbed: BatchEmbedNodeItem[] = missing.map((m) => ({
+    nodeId: m.id,
+    params: byId.get(m.id) ?? { name: m.name, description: m.description, content: m.content },
+  }));
+
+  if (batchEmbedFn) {
+    try {
+      return await embedNodeBatch(driver, batchEmbedFn, toEmbed, cfg);
+    } catch {
+      // 批量失败时回退单条，保证部分成功
+    }
+  }
+
+  let done = 0;
+  for (const item of toEmbed) {
+    try {
+      const n = await embedNode(driver, embedFn!, item.nodeId, item.params, cfg);
+      if (n > 0) done++;
+    } catch {
+      // 单条失败不影响其他节点
+    }
+  }
+  return done;
 }

@@ -28,6 +28,7 @@ import {
   getNodeCount, getEdgeCount, getEdgesForNodes,
   upsertFeedback,
 } from "../store/store.ts";
+import { embedNode } from "../store/embed-helper.ts";
 import {
   runMaintenance, healthCheck,
 } from "../graph/maintenance.ts";
@@ -320,6 +321,18 @@ export async function startMcpServer(
             embeddingModel: cfg.embedding?.model,
             source: source ?? "experience",
           }, cfg);
+          // v2.8.x 根因修复: 手动记录节点后补算 embedding（此前只写 embeddingModel 字段，
+          // 导致该类节点全缺向量，recall 向量检索无法命中）
+          if (embed && cfg.embedding?.model) {
+            try {
+              await embedNode(driver, embed, id, {
+                name, description, content,
+                embeddingModel: cfg.embedding.model,
+              }, cfg);
+            } catch {
+              // 嵌入失败不影响节点记录（下次 gm_reembed 会补）
+            }
+          }
           return {
             content: [{ type: "text", text: `Recorded: ${id} (source=${source ?? "experience"})` }],
             structuredContent: asStructured({ id, source: source ?? "experience" }),

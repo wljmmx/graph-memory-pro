@@ -10,8 +10,10 @@
 import type { Driver } from "neo4j-driver";
 import type { GmConfig, GmNode, GmEdge, ExtractResult, NodeType } from "../types.ts";
 import type { CompleteFn } from "../engine/llm.ts";
+import type { EmbedFn, BatchEmbedFn } from "../engine/embed.ts";
 import type { Extractor } from "../extractor/extract.ts";
 import { upsertNode, batchUpsertNodes, upsertEdge, batchUpsertEdges } from "../store/store.ts";
+import { embedNodesMissing } from "../store/embed-helper.ts";
 import { getCircuitBreaker } from "../engine/circuit-breaker.ts";
 import { getSessionMessages, getSessionMessagesPageTolerant, listAllSessionKeys, markMessagesProcessed } from "../store/messages.ts";
 import { heuristicExtract } from "../extractor/extract.ts";
@@ -33,6 +35,8 @@ export async function extractInBackground(
   cfg: GmConfig | null,
   logger: { debug?(...args: unknown[]): void; info?(...args: unknown[]): void },
   pendingMessages: Array<{ user: string; assistant: string }>,
+  embedFn?: EmbedFn,
+  batchEmbedFn?: BatchEmbedFn,
 ): Promise<number> {
   if (!extractor || !driver || !llm || pendingMessages.length === 0) return 0;
 
@@ -53,7 +57,7 @@ export async function extractInBackground(
       llmBreaker.recordSuccess();
       if (result.nodes.length > 0) {
         extracted++;
-        await writeExtractResult(driver, cfg, result);
+        await writeExtractResult(driver, cfg, result, embedFn, batchEmbedFn);
       }
     } catch (err) {
       llmBreaker.recordFailure();
@@ -76,11 +80,15 @@ export async function extractInBackground(
  * @param driver Neo4j driver
  * @param cfg 插件配置（读取 embedding.model）
  * @param result 提取结果（nodes + edges）
+ * @param embedFn 单文本嵌入函数（可选，配置了 embedding 时用于补齐向量）
+ * @param batchEmbedFn 批量嵌入函数（可选，优先使用）
  */
 export async function writeExtractResult(
   driver: Driver,
   cfg: GmConfig | null,
   result: ExtractResult,
+  embedFn?: EmbedFn,
+  batchEmbedFn?: BatchEmbedFn,
 ): Promise<void> {
   const now = Date.now();
 
@@ -115,6 +123,26 @@ export async function writeExtractResult(
     // v2.3.2 S2 稳定性修复: 批量失败时回退到逐条 upsert，保证部分成功（防数据丢失）
     if (process.env.GM_DEBUG) console.debug(`  [graph-memory-pro] batchUpsertNodes failed, fallback to single upsert: ${e}`);
     await Promise.allSettled(nodesToWrite.map(n => upsertNode(driver, n, cfg ?? undefined)));
+  }
+
+  // v2.8.x 根因修复: 节点落库后补算 embedding 向量（此前仅写 embeddingModel 字段，
+  // 从未调用 embed 计算落盘 → Task/Skill 节点 100% 缺向量）。只补缺失节点，
+  // 已嵌入的不重复计算。
+  if (embedFn || batchEmbedFn) {
+    try {
+      await embedNodesMissing(
+        driver,
+        nodesToWrite.map((n) => ({
+          nodeId: n.id,
+          params: { name: n.name, description: n.description, content: n.content, embeddingModel: cfg?.embedding?.model },
+        })),
+        embedFn,
+        batchEmbedFn,
+        cfg ?? undefined,
+      );
+    } catch (e) {
+      if (process.env.GM_DEBUG) console.debug(`  [graph-memory-pro] embed missing nodes failed: ${e}`);
+    }
   }
 
   // v2.3.1 P0-3: 批量 upsert 边
@@ -169,6 +197,8 @@ export async function extractInterimTexts(
   llm: CompleteFn | null,
   cfg: GmConfig | null,
   texts: string[],
+  embedFn?: EmbedFn,
+  batchEmbedFn?: BatchEmbedFn,
 ): Promise<number> {
   if (!extractor || !driver || !llm || texts.length === 0) return 0;
 
@@ -185,7 +215,7 @@ export async function extractInterimTexts(
       llmBreaker.recordSuccess();
       if (result.nodes.length > 0) {
         extracted++;
-        await writeExtractResult(driver, cfg, result);
+        await writeExtractResult(driver, cfg, result, embedFn, batchEmbedFn);
       }
     } catch (err) {
       llmBreaker.recordFailure();
@@ -218,6 +248,8 @@ export async function rebuildGraphFromStoredMessages(
   sessionKey: string,
   limit = 50,
   lastProcessedTurn = 0,
+  embedFn?: EmbedFn,
+  batchEmbedFn?: BatchEmbedFn,
 ): Promise<number> {
   if (!extractor || !driver || !llm) return 0;
   const messages = await getSessionMessages(driver, sessionKey, limit);
@@ -248,7 +280,7 @@ export async function rebuildGraphFromStoredMessages(
   }
 
   if (pairs.length === 0) return 0;
-  await extractInBackground(extractor, driver, llm, cfg, logger, pairs);
+  await extractInBackground(extractor, driver, llm, cfg, logger, pairs, embedFn, batchEmbedFn);
   return pairs.length;
 }
 
@@ -369,6 +401,8 @@ export async function rebuildSessionMessages(
   logger: { debug?(...args: unknown[]): void; info?(...args: unknown[]): void },
   sessionKey: string,
   opts: RebuildOptions = {},
+  embedFn?: EmbedFn,
+  batchEmbedFn?: BatchEmbedFn,
 ): Promise<{ processedPairs: number; totalPairs: number; lastProcessedTurn: number }> {
   const mode = opts.mode ?? "llm";
   if (!driver) return { processedPairs: 0, totalPairs: 0, lastProcessedTurn: 0 };
@@ -421,6 +455,24 @@ export async function rebuildSessionMessages(
       catch (e) {
         logger?.debug?.(`[graph-memory-pro] rebuild batchUpsertNodes failed, fallback single: ${e}`);
         await Promise.allSettled(pendingNodes.map((n) => upsertNode(driver, n, cfg ?? undefined)));
+      }
+      // v2.8.x 根因修复: 重建写入后补算缺失 embedding（此前只写 embeddingModel 字段，
+      // 从未调用 embed 计算落盘 → 重建出的 Task/Skill 节点全缺向量）。只补缺失节点。
+      if (embedFn || batchEmbedFn) {
+        try {
+          await embedNodesMissing(
+            driver,
+            pendingNodes.map((n) => ({
+              nodeId: n.id,
+              params: { name: n.name, description: n.description, content: n.content, embeddingModel: cfg?.embedding?.model },
+            })),
+            embedFn,
+            batchEmbedFn,
+            cfg ?? undefined,
+          );
+        } catch (e) {
+          logger?.debug?.(`[graph-memory-pro] rebuild embed missing nodes failed: ${e}`);
+        }
       }
     }
     if (pendingEdges.length) {
@@ -666,6 +718,8 @@ export async function rebuildAllSessions(
   cfg: GmConfig | null,
   logger: { debug?(...args: unknown[]): void; info?(...args: unknown[]): void },
   opts: Omit<RebuildAllOptions, "progressPath"> & { progressPath?: string } = {},
+  embedFn?: EmbedFn,
+  batchEmbedFn?: BatchEmbedFn,
 ): Promise<{
   totalSessions: number;
   processedSessions: number;
@@ -773,7 +827,7 @@ export async function rebuildAllSessions(
           ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
           // 断点续传：该 session 已处理的轮次
           ...(typeof perSession === "number" && perSession > 0 ? { lastProcessedTurn: perSession } : {}),
-        });
+        }, embedFn, batchEmbedFn);
         await record(key, r);
       } catch (err) {
         // v2.4.1: 失败计数，供 API 层反馈；不标记进度，续跑会重试
