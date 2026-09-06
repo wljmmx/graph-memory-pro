@@ -391,10 +391,14 @@ export async function startMcpServer(
         inputSchema: {
           batchSize: z.number().int().positive().max(200).optional().describe("Batch size (default 50, max 200)"),
           clear: z.boolean().optional().describe("If true, wipe all nodes/edges in the active database first (destructive)"),
+          // v2.8.x: 单轮处理上限。embed 模型较慢时（本地单条 ~1-2s）全量重嵌入需 15-25min，
+          // 同步 MCP 调用会阻塞会话。maxNodes 默认 2000：每轮处理该数量后返回部分结果，
+          // 再次调用 gm_reembed 自动从已处理位置续跑（幂等）。
+          maxNodes: z.number().int().positive().max(20000).optional().describe("Nodes to process per call (default 2000; call again to continue)"),
         },
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
       },
-      async ({ batchSize, clear }: { batchSize?: number; clear?: boolean }) => {
+      async ({ batchSize, clear, maxNodes }: { batchSize?: number; clear?: boolean; maxNodes?: number }) => {
         if (!embed) {
           return { content: [{ type: "text", text: "Embed function not configured" }] };
         }
@@ -417,18 +421,24 @@ export async function startMcpServer(
           );
           let result: ReEmbedResult;
           try {
-            result = await reEmbedNodes(driver, embed, batchSize ?? 50, cfg.embedding?.model, undefined, batchEmbed, controller.signal);
+            result = await reEmbedNodes(
+              driver, embed, batchSize ?? 50, cfg.embedding?.model, undefined, batchEmbed, controller.signal,
+              maxNodes ?? 2000,
+            );
           } finally {
             clearTimeout(timer);
           }
           const abortedNote = result.aborted
             ? ` (timeout ${reembedTimeoutMs}ms — ${result.totalScanned} scanned so far, run again to continue)`
             : "";
+          const continueNote = result.moreRemaining
+            ? ` (${result.totalScanned} nodes processed this round — ${result.reEmbedded} embedded; call gm_reembed again to continue the remaining)` 
+            : "";
           const errNote = result.lastError
             ? ` (last error: ${result.lastError.slice(0, 200)})`
             : "";
           return {
-            content: [{ type: "text", text: `Re-embedded ${result.reEmbedded}/${result.totalScanned} nodes, ${result.failed} failed, ${result.durationMs}ms${abortedNote}${errNote}` }],
+            content: [{ type: "text", text: `Re-embedded ${result.reEmbedded}/${result.totalScanned} nodes, ${result.failed} failed, ${result.durationMs}ms${abortedNote}${continueNote}${errNote}` }],
             structuredContent: asStructured(result),
           };
         } catch (err: unknown) {

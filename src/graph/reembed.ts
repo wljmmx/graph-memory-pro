@@ -15,6 +15,11 @@ export interface ReEmbedResult {
    */
   aborted?: boolean;
   /**
+   * v2.8.x: 是否因本轮配额（maxNodes）用尽而提前返回。
+   * 为 true 时表示还有节点未处理，再次调用 gm_reembed 会从已处理位置继续（幂等续跑）。
+   */
+  moreRemaining?: boolean;
+  /**
    * v2.8.x: 最后一次失败的异常信息（诊断用）。
    * 此前 catch 静默吞错，出现 failed>0 时无法定位根因（如 Neo4j 查询报错、
    * embedding 字段坏类型、Ollama 连接失败等）。
@@ -30,6 +35,7 @@ export async function reEmbedNodes(
   cfg?: GmConfig,
   batchEmbedFn?: BatchEmbedFn,
   signal?: AbortSignal,
+  maxNodes?: number,
 ): Promise<ReEmbedResult> {
   if (!embedFn && !batchEmbedFn) {
     return { totalScanned: 0, reEmbedded: 0, failed: 0, skipped: 1, durationMs: 0 };
@@ -44,6 +50,7 @@ export async function reEmbedNodes(
   let lastError: string | undefined;
   let lastBatchLen = 0;
   let advanced = false;
+  let moreRemaining = false;
   const MAX_CONSECUTIVE_FAILURES = 5;
 
   while (true) {
@@ -57,8 +64,15 @@ export async function reEmbedNodes(
         skipped,
         durationMs: Date.now() - start,
         aborted: true,
+        moreRemaining: true,
         lastError,
       };
+    }
+    // v2.8.x: 本轮配额用尽 → 提前返回，标记续跑（避免 gm_reembed 单次同步阻塞
+    // 过久拖垮会话——模型单条 embed ~1.9s，全量 3.7 万节点需 15-25min）
+    if (maxNodes !== undefined && totalScanned >= maxNodes) {
+      moreRemaining = true;
+      break;
     }
     try {
       const session = driver.session();
@@ -190,6 +204,7 @@ export async function reEmbedNodes(
     failed,
     skipped,
     durationMs: Date.now() - start,
+    moreRemaining,
     lastError,
   };
 }

@@ -386,6 +386,55 @@ describe("reEmbedNodes（失败诊断与精确扫描）", () => {
     expect(result.reEmbedded).toBe(0);
     expect(result.lastError).toContain("404");
   });
+
+  it("maxNodes 配额用尽 → 提前返回 moreRemaining:true，不再扫描后续批次", async () => {
+    const driver = mockDriver();
+    // 队列：批1 返回 60 个节点（超过 maxNodes=50），批2 不应被扫描
+    driver.queueResult(
+      Array.from({ length: 60 }, (_, i) => ({ id: `n${i}`, name: `name-${i}`, description: "d", content: "c" })),
+    );
+    const batchEmbed = makeBatchEmbedFn();
+
+    const result = await reEmbedNodes(
+      driver as unknown as Driver,
+      undefined,
+      50,
+      EMBEDDING_MODEL,
+      undefined,
+      batchEmbed,
+      undefined,
+      50, // maxNodes
+    );
+
+    expect(result.moreRemaining).toBe(true);
+    expect(result.totalScanned).toBe(60);
+    expect(result.reEmbedded).toBe(60);
+    // 只发起一轮扫描查询（配额用尽后 break，不发起第二轮）
+    const scanCalls = driver.getAllRunCalls().filter((c) => c.query.includes("ORDER BY n.id"));
+    expect(scanCalls).toHaveLength(1);
+  });
+
+  it("maxNodes 大于总数 → 正常跑完，moreRemaining 为 false", async () => {
+    const driver = mockDriver();
+    driver.queueResult([
+      { id: "t1", name: "task-1", description: "d", content: "c" },
+    ]);
+    const batchEmbed = makeBatchEmbedFn();
+
+    const result = await reEmbedNodes(
+      driver as unknown as Driver,
+      undefined,
+      50,
+      EMBEDDING_MODEL,
+      undefined,
+      batchEmbed,
+      undefined,
+      100, // maxNodes 足够大
+    );
+
+    expect(result.moreRemaining).toBeFalsy();
+    expect(result.reEmbedded).toBe(1);
+  });
 });
 
 describe("createBatchEmbedFn（v2.8.x 子批次并发限流）", () => {
