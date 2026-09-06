@@ -155,6 +155,19 @@ function getExtractorIntervalMs(): number {
   return EXTRACTOR_INTERVAL_DEFAULT;
 }
 
+/**
+ * v2.8.x: 读取后台提取单 tick 消费上限（对话对）。
+ * 优先使用 cfg.background.extractorMaxPairs，回退默认 8；
+ * 安全范围 [1, 50]——本地 LLM 慢/熔断时可调低，堆积积压时调高。
+ */
+function getExtractorMaxPairs(): number {
+  const configured = _cfg?.background?.extractorMaxPairs;
+  if (typeof configured === "number" && configured >= 1 && configured <= 50) {
+    return Math.round(configured);
+  }
+  return 8;
+}
+
 let _driver: Driver | null = null;
 let _cfg: GmConfig | null = null;
 let _llm: CompleteFn | null = null;
@@ -684,7 +697,9 @@ function startBackgroundExtractor(
         } catch { /* 跳过损坏行 */ }
       }
       if (pairs.length === 0) return;
-      const processed = await extractInBackground(_extractor, _driver, _llm, _cfg, logger, pairs, _embed ?? undefined, _batchEmbed ?? undefined);
+      // v2.8.x: 单 tick 消费上限可配（extractorMaxPairs 默认 8）；熔断/慢 LLM 时可调低
+      const extractorMaxPairs = getExtractorMaxPairs();
+      const processed = await extractInBackground(_extractor, _driver, _llm, _cfg, logger, pairs, _embed ?? undefined, _batchEmbed ?? undefined, extractorMaxPairs);
       let marked = 0;
       if (processed > 0) {
         const { markMessagesProcessed, markMessagesByContent } = await import('./src/store/messages.ts');
@@ -2033,10 +2048,12 @@ export default definePluginEntry({
             }
 
             if (pairs.length === 0) return;
-            // v2.4.2: 返回本批实际处理的对数（内部 maxPairs=3 限流），据此：
+            // v2.4.2: 返回本批实际处理的对数（内部 maxPairs 限流），据此：
             //   1. 标记已处理消息（有 id 按 id，否则按 sessionKey+内容反查，避免下一轮/重建重复处理）
-            //   2. 只清掉已处理的行，剩余行保留待下一轮（避免一次性清空导致 >3 对数据丢失）
-            const processed = await extractInBackground(_extractor, _driver, _llm, _cfg, logger, pairs, _embed ?? undefined, _batchEmbed ?? undefined);
+            //   2. 只清掉已处理的行，剩余行保留待下一轮（避免一次性清空导致超限数据丢失）
+            // v2.8.x: 单 tick 消费上限可配（extractorMaxPairs 默认 8）
+            const extractorMaxPairs = getExtractorMaxPairs();
+            const processed = await extractInBackground(_extractor, _driver, _llm, _cfg, logger, pairs, _embed ?? undefined, _batchEmbed ?? undefined, extractorMaxPairs);
 
             let marked = 0;
             if (processed > 0) {

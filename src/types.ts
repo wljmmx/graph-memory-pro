@@ -83,6 +83,13 @@ export interface GmConfig {
     /** v2.5.4: 中间轮 assistant 文本提取的轮数节流阈值（默认 15 轮），满 N 轮才批量入队一次 */
     interimTurnsThreshold?: number;
     /**
+     * v2.8.x: 后台提取单 tick 消费上限（对话对，默认 8，范围 1-50）。
+     * 此前硬编码 2 对/tick，20min 间隔下每天最多消化 144 对，对话高频场景
+     * extract-queue.jsonl 积压（曾见 2000+ pending）。调高可加速消化；
+     * 本地 LLM 慢/熔断时可调低避免抢占主会话资源。
+     */
+    extractorMaxPairs?: number;
+    /**
      * v2.6.1: 维护类操作超时（毫秒，默认 120000）。
      * 覆盖 MCP gm_maintain / gm_reembed / gm_tune 的 withTimeout 及 runMaintenance 内部锁超时。
      * 大型图谱维护或慢速 LLM 场景可调大。

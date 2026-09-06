@@ -262,6 +262,13 @@
             "maximum": 100,
             "description": "v2.5.4: 中间轮 assistant 文本提取的轮数节流阈值（默认 15 轮），满 N 轮才批量入队，纳入 autoTurn 调优"
           },
+          "extractorMaxPairs": {
+            "type": "integer",
+            "default": 8,
+            "minimum": 1,
+            "maximum": 50,
+            "description": "v2.8.x: 后台提取单 tick 消费上限（对话对，默认 8）。此前硬编码 2 对/tick，20min 间隔下每天最多消化 144 对，对话高频场景 extract-queue.jsonl 会积压（曾见 2000+ pending）。调高加速消化；本地 LLM 慢/熔断时调低避免抢占主会话资源"
+          },
           "maintenanceTimeoutMs": {
             "type": "integer",
             "default": 120000,

@@ -37,6 +37,7 @@ export async function extractInBackground(
   pendingMessages: Array<{ user: string; assistant: string }>,
   embedFn?: EmbedFn,
   batchEmbedFn?: BatchEmbedFn,
+  maxPairs = 2,
 ): Promise<number> {
   if (!extractor || !driver || !llm || pendingMessages.length === 0) return 0;
 
@@ -48,8 +49,10 @@ export async function extractInBackground(
   }
 
   let extracted = 0;
-  const maxPairs = 2;
-  const pairs = pendingMessages.slice(0, maxPairs);
+  // v2.8.x: 单 tick 消费上限可配（background.extractorMaxPairs，默认 8，此前硬编码 2）。
+  // 2 对/20min 吞吐过低，对话高频场景队列积压（曾见 2000+ pending 无法消化）。
+  const batchLimit = Math.max(1, Math.min(50, maxPairs));
+  const pairs = pendingMessages.slice(0, batchLimit);
 
   for (const pair of pairs) {
     try {
