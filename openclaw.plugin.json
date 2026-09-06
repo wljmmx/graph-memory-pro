@@ -274,6 +274,20 @@
             "minimum": 60000,
             "description": "v2.8.x: gm_reembed 全量重嵌入超时 ms（默认 1800000=30min）。独立于 maintenanceTimeoutMs——全量重嵌入 3 万节点本地模型约需 20-30min，120s 只能处理约 200 节点。超时后优雅停止并保留已嵌入节点，可再次调用续跑"
           },
+          "reembedBatchSize": {
+            "type": "integer",
+            "default": 400,
+            "minimum": 100,
+            "maximum": 2000,
+            "description": "v2.8.x: gm_reembed 异步任务每批节点数（默认 400，建议 300-500）。后台任务按此粒度循环处理，配合 /api/reembed/stream SSE 实时输出进度百分比、批次 currentBatch/totalBatches、数量 processedNodes/totalNodes"
+          },
+          "reembedBatchIntervalMs": {
+            "type": "integer",
+            "default": 200,
+            "minimum": 0,
+            "maximum": 10000,
+            "description": "v2.8.x: gm_reembed 异步任务批次间间隔 ms（默认 200）。避免批次间连打 Neo4j/Ollama；本地模型或对话高峰期可调大"
+          },
           "tuneTimeoutMs": {
             "type": "integer",
             "default": 600000,

@@ -32,7 +32,6 @@ import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
 import { runMaintenance, type GraphHealthReport } from "./src/graph/maintenance.ts";
 import { resolveBenchmarkDataDir } from "./src/benchmark/dataDir.ts";
-import { reEmbedNodes } from "./src/graph/reembed.ts";
 import { setExternalLogger, createLogger } from "./src/logger.ts";
 import { setTimingEnabled } from "./src/timing.ts";
 import { extractInBackground, extractInterimTexts, writeExtractResult } from "./src/services/extract-service.ts";  // v2.3.4 ARCH-1: 从 index.ts 拆出 // v2.5.4: 中间 assistant 文本提取
@@ -566,6 +565,7 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
       _llm ?? undefined,
       _embed ?? undefined,
       _recaller ?? undefined,
+      _batchEmbed ?? undefined,
     );
     log.info("API server started (module-level, full init)");
 
@@ -990,6 +990,7 @@ async function restartApiServer(): Promise<void> {
       _llm ?? undefined,
       _embed ?? undefined,
       _recaller ?? undefined,
+      _batchEmbed ?? undefined,
     );
     log.info(`[heartbeat] API server re-established (port=${_apiServerHandle.port})`);
   } catch (err) {
@@ -2469,7 +2470,7 @@ export default definePluginEntry({
     api.registerTool({
       name: "gm_reembed",
       label: "Graph Memory Re-Embed",
-      description: "Batch re-embed all active nodes that are missing an embedding vector (only processes status=active with empty/null embedding)",
+      description: "Start a background re-embed of all active nodes missing an embedding vector (only processes status=active with empty/null embedding). Returns a taskId immediately (does not block the session); progress is polled via GET /api/reembed/status?taskId=... or streamed via GET /api/reembed/stream?taskId=... .",
       parameters: Type.Object({}),
       async execute() {
         if (!_driver || !_cfg) {
@@ -2479,20 +2480,24 @@ export default definePluginEntry({
           return { content: [{ type: "text", text: "Embedding engine not configured" }], details: {} };
         }
         try {
-          // 传入 embeddingModel，避免清空所有节点的 embeddingModel 字段（G-4 修复）
-          // v2.4.0: 传入 batchEmbedFn，正式流程全量重嵌入启用批量（缓解 Ollama 503）
-          const result = await reEmbedNodes(_driver, _embed, 50, _cfg.embedding?.model, undefined, _batchEmbed ?? undefined);
+          // v2.8.x: 异步后台任务——立即返回 taskId，避免同步调用阻塞会话触发 stalled-session。
+          // 进度经 API server 查询/SSE 流式输出（每批 400 节点，含 progress%/批次/数量）。
+          const { startReembedTask } = await import("./src/graph/reembed-task.ts");
+          const snapshot = startReembedTask(
+            _driver, _cfg, _embed ?? undefined, _batchEmbed ?? undefined,
+            { batchSize: _cfg.background?.reembedBatchSize ?? 400 },
+          );
           const lines = [
-            "Re-Embed done",
-            `Scanned: ${result.totalScanned} nodes`,
-            `Embedded: ${result.reEmbedded} nodes`,
-            `Failed: ${result.failed}`,
-            `Skipped: ${result.skipped}`,
-            `Duration: ${result.durationMs}ms`,
+            "Re-Embed task started (async)",
+            `TaskId: ${snapshot.taskId}`,
+            `BatchSize: ${snapshot.batchSize}`,
+            `Progress: GET /api/reembed/status?taskId=${snapshot.taskId}`,
+            `Stream: GET /api/reembed/stream?taskId=${snapshot.taskId}`,
+            "Poll until status=done; totals (totalNodes/totalBatches) appear once counting finishes (~seconds).",
           ];
-          return { content: [{ type: "text", text: lines.join("\n") }], details: result };
+          return { content: [{ type: "text", text: lines.join("\n") }], details: snapshot };
         } catch (err) {
-          return { content: [{ type: "text", text: "Re-Embed failed: " + String(err) }], details: {} };
+          return { content: [{ type: "text", text: "Re-Embed start failed: " + String(err) }], details: {} };
         }
       },
     });

@@ -77,12 +77,16 @@ export async function reEmbedNodes(
     try {
       const session = driver.session();
       try {
+        // v2.8.x: 去掉 SKIP 偏移——WHERE 过滤集随嵌入进度自行收缩（已嵌入节点被过滤），
+        // 用累计 totalScanned 作偏移会双计数：处理 k 批后过滤集已缩小 k×batchSize，
+        // SKIP k×batchSize 会再跳过 k×batchSize 个待处理节点（每轮跳过一半，静默丢数据）。
+        // 每次从过滤集头部取 LIMIT 个即可（ORDER BY n.id 保证幂等、可续跑）。
         const result = await session.run(
           "MATCH (n:Task|Skill|Event)" +
           " WHERE n.status = 'active' AND (n.embedding IS NULL OR n.embedding = [])" +
           " RETURN n.id AS id, labels(n)[0] AS label, n.name, n.description, n.content" +
-          " ORDER BY n.id SKIP toInteger($skip) LIMIT toInteger($limit)",
-          { skip: totalScanned, limit: batchSize },
+          " ORDER BY n.id LIMIT toInteger($limit)",
+          { limit: batchSize },
         );
 
         const nodes = result.records;

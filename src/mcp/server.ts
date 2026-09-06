@@ -387,14 +387,13 @@ export async function startMcpServer(
       "gm_reembed",
       {
         title: "Re-embed Nodes",
-        description: "Batch re-embed nodes with missing/empty embeddings. Pass clear=true to first wipe all nodes/edges in the active database (for 'clear then re-import' rebuild flows).",
+        description: "Batch re-embed nodes with missing/empty embeddings. By default starts an async background task (batches of 300-500 nodes) and returns a taskId immediately — poll GET {apiBase}/api/reembed/status?taskId=... or stream GET {apiBase}/api/reembed/stream?taskId=... for progress. Pass clear=true to first wipe all nodes/edges (destructive); pass maxNodes to instead run a single bounded synchronous pass.",
         inputSchema: {
-          batchSize: z.number().int().positive().max(200).optional().describe("Batch size (default 50, max 200)"),
+          batchSize: z.number().int().positive().max(2000).optional().describe("Async task: nodes per batch (default 400, suggested 300-500)"),
           clear: z.boolean().optional().describe("If true, wipe all nodes/edges in the active database first (destructive)"),
-          // v2.8.x: 单轮处理上限。embed 模型较慢且 Ollama 同模型请求串行排队，
-          // 全量重嵌入需 15-25min；并发批量请求会占满队列拖慢对话召回 embed。
-          // maxNodes 默认 1000：每轮处理后返回部分结果，再次调用自动续跑（幂等）。
-          maxNodes: z.number().int().positive().max(20000).optional().describe("Nodes to process per call (default 1000; call again to continue)"),
+          // v2.8.x: 兼容旧的同步分块模式：传入 maxNodes 时退化为单轮同步处理该数量节点。
+          // 不传时默认异步后台任务（立即返回 taskId，不阻塞会话）。
+          maxNodes: z.number().int().positive().max(20000).optional().describe("Legacy sync mode: nodes to process in this single call (default 1000; call again to continue). Omit to run full re-embed as an async background task."),
         },
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
       },
@@ -411,9 +410,23 @@ export async function startMcpServer(
               structuredContent: asStructured({ cleared, note: "database cleared; re-run import then reembed" }),
             };
           }
-          // v2.8.x: 独立超时 reembedTimeoutMs（默认 30min）+ AbortSignal 优雅停止。
-          // 不用 withTimeout 强杀：超时后 reEmbedNodes 检测 signal.aborted 停止发起
-          // 新批次并正常返回已处理部分（避免孤儿循环与下次调用并发写同一批）。
+          // v2.8.x: 默认异步后台任务——立即返回 taskId，进度经 API server 查询/流式输出。
+          // 不再走同步 withTimeout：全量重嵌入 15min+ 同步调用必然触发 stalled-session。
+          if (maxNodes === undefined) {
+            const { startReembedTask } = await import("../graph/reembed-task.ts");
+            const snapshot = startReembedTask(driver, cfg, embed, batchEmbed ?? undefined, {
+              batchSize: batchSize ?? 400,
+            });
+            return {
+              content: [{
+                type: "text",
+                text: `Re-embed task started (taskId=${snapshot.taskId}, batchSize=${snapshot.batchSize}, total nodes counted in background). ` +
+                  `Poll GET /api/reembed/status?taskId=${snapshot.taskId} or stream GET /api/reembed/stream?taskId=${snapshot.taskId} for progress (progress%, batch ${snapshot.currentBatch}/${snapshot.totalBatches}, processed ${snapshot.processedNodes}/${snapshot.totalNodes}).`,
+              }],
+              structuredContent: asStructured(snapshot),
+            };
+          }
+          // 兼容旧同步分块模式（maxNodes 显式传入时）
           const controller = new AbortController();
           const timer = setTimeout(
             () => controller.abort(new Error(`gm_reembed timed out after ${reembedTimeoutMs}ms`)),

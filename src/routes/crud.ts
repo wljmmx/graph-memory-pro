@@ -91,6 +91,13 @@ export function getRoutes(): RouteHandler[] {
     { method: "GET", path: "/api/maintain/dirty-nodes", handler: handleGetDirtyNodes },
     { method: "DELETE", path: "/api/maintain/dirty-nodes", handler: handleClearDirty },
     { method: "POST", path: "/api/reembed", handler: handleReembed },
+    // v2.8.x: gm_reembed 异步化——POST /api/reembed/start 立即返回 taskId 后台分批处理；
+    // GET /api/reembed/status|list 查询进度快照；POST /api/reembed/cancel 取消；
+    // GET /api/reembed/stream（SSE 流式进度，见 http-server.ts 特殊处理）
+    { method: "POST", path: "/api/reembed/start", handler: handleReembedStart },
+    { method: "GET", path: "/api/reembed/status", handler: handleReembedStatus },
+    { method: "GET", path: "/api/reembed/list", handler: handleReembedList },
+    { method: "POST", path: "/api/reembed/cancel", handler: handleReembedCancel },
     { method: "POST", path: "/api/feedback", handler: handleFeedback },
     { method: "POST", path: "/api/feedback/bootstrap", handler: handleFeedbackBootstrap },
     { method: "POST", path: "/api/benchmark", handler: handleBenchmark },
@@ -1383,6 +1390,19 @@ async function handleReembed(params: Record<string, unknown>): Promise<{ status:
   if (!_driver || !_cfg) return { status: 503, body: { error: "Neo4j not connected" } };
   if (!_embed) return { status: 503, body: { error: "Embedding engine not configured" } };
   try {
+    // v2.8.x: async=true 走异步任务（推荐——立即返回 taskId，GET /api/reembed/status 查进度），
+    // 默认保持同步兼容（dashboard 旧调用不受影响）。
+    if (params?.async === true || params?.async === "true") {
+      const { startReembedTask } = await import("../graph/reembed-task.ts");
+      const snapshot = startReembedTask(
+        _driver, _cfg, _embed ?? undefined, _batchEmbed ?? undefined,
+        { batchSize: safeParseInt(params?.batchSize as string | undefined, 400, 2000) },
+      );
+      return {
+        status: 202,
+        body: { ...snapshot, message: "reembed started in background; poll GET /api/reembed/status?taskId=... or GET /api/reembed/stream?taskId=... for streaming progress" },
+      };
+    }
     const { reEmbedNodes } = await import("../graph/reembed.ts");
     const batchSize = (params?.batchSize ?? 50) as number;
     // v2.4.0: 可选 clear=true 时先清空当前数据库全部节点/边，配合重新导入获得正确时序
@@ -1397,6 +1417,59 @@ async function handleReembed(params: Record<string, unknown>): Promise<{ status:
   } catch (err: unknown) {
     return { status: 500, body: { error: (err as Error).message } };
   }
+}
+
+// ── v2.8.x: gm_reembed 异步任务（分批次 + 流式进度） ────────────────────
+
+/** POST /api/reembed/start — 启动后台重嵌入任务，立即返回 taskId */
+async function handleReembedStart(params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
+  if (!_driver || !_cfg) return { status: 503, body: { error: "Neo4j not connected" } };
+  if (!_embed) return { status: 503, body: { error: "Embedding engine not configured" } };
+  try {
+    const { startReembedTask } = await import("../graph/reembed-task.ts");
+    const snapshot = startReembedTask(
+      _driver, _cfg, _embed ?? undefined, _batchEmbed ?? undefined,
+      {
+        batchSize: safeParseInt(params?.batchSize as string | undefined, 400, 2000),
+        batchIntervalMs: safeParseInt(params?.batchIntervalMs as string | undefined, 200, 10_000),
+      },
+    );
+    return {
+      status: 202,
+      body: { ...snapshot, message: "started; poll GET /api/reembed/status?taskId= or GET /api/reembed/stream?taskId= for streaming progress" },
+    };
+  } catch (err: unknown) {
+    return { status: 500, body: { error: (err as Error).message } };
+  }
+}
+
+/** GET /api/reembed/status?taskId= — 查询任务进度快照 */
+async function handleReembedStatus(params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
+  const taskId = String(params?.taskId ?? "");
+  if (!taskId) return { status: 400, body: { error: "taskId is required" } };
+  const { getReembedTask } = await import("../graph/reembed-task.ts");
+  const snapshot = getReembedTask(taskId);
+  if (!snapshot) return { status: 404, body: { error: `reembed task not found: ${taskId}` } };
+  return { status: 200, body: snapshot };
+}
+
+/** GET /api/reembed/list — 列出全部任务快照（新的在前） */
+async function handleReembedList(): Promise<{ status: number; body: unknown }> {
+  const { listReembedTasks } = await import("../graph/reembed-task.ts");
+  return { status: 200, body: { tasks: listReembedTasks() } };
+}
+
+/** POST /api/reembed/cancel — 请求取消任务（批次间生效） */
+async function handleReembedCancel(params: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
+  const taskId = String(params?.taskId ?? "");
+  if (!taskId) return { status: 400, body: { error: "taskId is required" } };
+  const { cancelReembedTask } = await import("../graph/reembed-task.ts");
+  const { found, cancelled } = cancelReembedTask(taskId);
+  if (!found) return { status: 404, body: { error: `reembed task not found: ${taskId}` } };
+  return {
+    status: 200,
+    body: { taskId, cancelled, message: cancelled ? "cancel requested; finishes current batch then stops" : "task not cancellable (already terminal)" },
+  };
 }
 
 // ── 反馈提交 ────────────────────────────────────────────────

@@ -96,6 +96,17 @@ export interface GmConfig {
      */
     reembedTimeoutMs?: number;
     /**
+     * v2.8.x: gm_reembed 异步任务每批节点数（默认 400，建议 300-500）。
+     * 后台任务按此粒度循环处理，配合 /api/reembed/stream SSE 实时输出
+     * 进度百分比、批次 currentBatch/totalBatches、数量 processedNodes/totalNodes。
+     */
+    reembedBatchSize?: number;
+    /**
+     * v2.8.x: gm_reembed 异步任务批次间间隔 ms（默认 200）。
+     * 避免批次间连打 Neo4j/Ollama；本地模型或对话高峰期可调大。
+     */
+    reembedBatchIntervalMs?: number;
+    /**
      * v2.8.x: gm_tune 单轮调优超时（毫秒，默认 600_000 = 10min）。
      * 独立于 maintenanceTimeoutMs：单轮含 EVALUATE（benchmark）+ DIAGNOSE + PROPOSE（LLM），
      * 比 gm_maintain 更重，不应共用 120s。

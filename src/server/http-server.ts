@@ -11,7 +11,7 @@ import http from "node:http";
 import type { Driver } from "neo4j-driver";
 import type { GmConfig } from "../types.ts";
 import type { CompleteFn } from "../engine/llm.ts";
-import type { EmbedFn } from "../engine/embed.ts";
+import type { EmbedFn, BatchEmbedFn } from "../engine/embed.ts";
 import type { Recaller } from "../recaller/recall.ts";
 import { initRoutes, getRoutes } from "../routes/crud.ts";
 import { VERSION } from "../version.ts";
@@ -49,6 +49,7 @@ export async function startApiServer(
   llm?: CompleteFn,
   embed?: EmbedFn,
   recaller?: Recaller,
+  batchEmbed?: BatchEmbedFn,
 ): Promise<ApiServerHandle> {
   const port = config.port ?? 7850;
   const host = config.host ?? "127.0.0.1";
@@ -57,7 +58,7 @@ export async function startApiServer(
   logger.info?.(`[graph-memory-pro] API server starting on http://${host}:${port} ...`);
 
   // 初始化路由模块状态
-  initRoutes(driver, cfg, llm, embed, recaller);
+  initRoutes(driver, cfg, llm, embed, recaller, batchEmbed);
 
   const routes = getRoutes();
   logger.info?.(`[graph-memory-pro] API server loaded ${routes.length} routes`);
@@ -109,6 +110,13 @@ export async function startApiServer(
     if (req.method === "GET" && pathname === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ status: "ok", service: "graph-memory-pro-api", version: VERSION }));
+      return;
+    }
+
+    // v2.8.x: gm_reembed 流式进度端点（SSE）——特殊处理，路由 handler 模型只能返回
+    // {status, body} JSON，无法表达流；此处直接接管 res 写 SSE 事件。
+    if (req.method === "GET" && pathname === "/api/reembed/stream") {
+      await handleReembedStream(req, res, url.searchParams.get("taskId") ?? "");
       return;
     }
 
@@ -265,4 +273,90 @@ function readBody(req: http.IncomingMessage): Promise<string> {
     req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
     req.on("error", reject);
   });
+}
+
+// ── v2.8.x: gm_reembed 流式进度（SSE）───────────────────────────────
+//
+// GET /api/reembed/stream?taskId=xxx
+// 事件流（每行格式见 https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events）：
+//   event: snapshot   data: {ReembedTaskSnapshot}（初始 + 状态变化时）
+//   event: done       data: {ReembedTaskSnapshot}（终态：done/failed/cancelled，随后关闭连接）
+//   : ping            （每 15s 心跳注释，防止代理/负载均衡断开空闲连接）
+// 客户端断线即清理轮询定时器，不影响后台任务继续执行。
+
+const REEMBED_STREAM_POLL_MS = 1000;
+const REEMBED_STREAM_HEARTBEAT_MS = 15_000;
+
+async function handleReembedStream(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  taskId: string,
+): Promise<void> {
+  if (!taskId) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "taskId query param is required" }));
+    return;
+  }
+  const { getReembedTask } = await import("../graph/reembed-task.ts");
+
+  const first = getReembedTask(taskId);
+  if (!first) {
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: `reembed task not found: ${taskId}` }));
+    return;
+  }
+
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no", // 禁用 nginx 缓冲，保证事件实时到达
+  });
+  res.write("retry: 3000\n\n");
+
+  const send = (event: string, data: unknown): void => {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  send("snapshot", first);
+
+  let lastJson = JSON.stringify(first);
+  let closed = false;
+  const finish = (): void => {
+    if (closed) return;
+    closed = true;
+    clearInterval(pollTimer);
+    clearInterval(heartbeatTimer);
+    try { res.end(); } catch { /* ignore */ }
+  };
+  req.on("close", finish);
+
+  const pollTimer = setInterval(() => {
+    if (closed) return;
+    const snap = getReembedTask(taskId);
+    if (!snap) {
+      send("done", { taskId, status: "gone", error: "task no longer tracked" });
+      finish();
+      return;
+    }
+    const json = JSON.stringify(snap);
+    if (json !== lastJson) {
+      lastJson = json;
+      send("snapshot", snap);
+    }
+    if (snap.status === "done" || snap.status === "failed" || snap.status === "cancelled") {
+      send("done", snap);
+      finish();
+    }
+  }, REEMBED_STREAM_POLL_MS);
+
+  const heartbeatTimer = setInterval(() => {
+    if (closed) return;
+    try { res.write(": ping\n\n"); } catch { finish(); }
+  }, REEMBED_STREAM_HEARTBEAT_MS);
+
+  // 类型收窄：定时器在 finish() 中被 clear，此处仅为让 TS 认可已被引用
+  void pollTimer;
+  void heartbeatTimer;
 }

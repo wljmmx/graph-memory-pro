@@ -274,7 +274,7 @@ describe("reEmbedNodes（AbortSignal 超时取消）", () => {
 });
 
 describe("reEmbedNodes（失败诊断与精确扫描）", () => {
-  it("分页参数用 toInteger 包装，避免驱动把 JS number 序列化为 float 被 Neo4j 拒绝（SKIP 0.0 bug）", async () => {
+  it("扫描查询不再用 SKIP 偏移（过滤集随嵌入进度收缩，累计 offset 会双计数跳过待处理节点），LIMIT 用 toInteger 包装避免驱动序列化为 float 被 Neo4j 拒绝", async () => {
     const driver = mockDriver();
     driver.queueResult([]); // 空批次 → 立即结束
     await reEmbedNodes(
@@ -287,7 +287,7 @@ describe("reEmbedNodes（失败诊断与精确扫描）", () => {
     );
     const scan = driver.getAllRunCalls().find((c) => c.query.includes("ORDER BY n.id"));
     expect(scan).toBeDefined();
-    expect(scan!.query).toContain("SKIP toInteger($skip)");
+    expect(scan!.query).not.toContain("SKIP");
     expect(scan!.query).toContain("LIMIT toInteger($limit)");
   });
 
