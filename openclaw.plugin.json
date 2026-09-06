@@ -222,9 +222,9 @@
           },
           "maxConcurrency": {
             "type": "integer",
-            "default": 3,
+            "default": 8,
             "minimum": 1,
-            "description": "v2.4.0: embed 最大并发请求数（默认 3 for 本地 Ollama，过高会触发 503 server busy）"
+            "description": "v2.8.x: embed 最大并发请求数（默认 8，原默认 3 偏保守；本地 Ollama GPU 部署开 8 左右，云端可调高，过高触发 503 时调低）"
           },
           "options": {
             "type": "object",

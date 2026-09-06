@@ -24,8 +24,9 @@ const RETRY_JITTER_MAX_MS = 500;
 // v2.4.0: 并发控制信号量（限制 embed 并发请求数，防本地 Ollama 503 server busy）
 // Ollama 默认 OLLAMA_NUM_PARALLEL=1，单流处理，并发过高会报
 // "maximum pending requests exceeded"，触发 embedding 熔断。
-// 默认并发 3（本地跑不宜超过 3），云端 API 可配置 maxConcurrency 调高。
-const DEFAULT_EMBED_MAX_CONCURRENCY = 3;
+// 默认并发 8（v2.8.x: 原默认 3 偏保守；本地 Ollama GPU 部署可开 8 左右，
+// 云端 API 可配置 maxConcurrency 继续调高/调低）。
+const DEFAULT_EMBED_MAX_CONCURRENCY = 8;
 
 interface Semaphore {
   acquire(): Promise<() => void>;
@@ -369,7 +370,9 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
  * 返回与输入等长的 (number[] | null)[]；单个文本失败返回 null（不阻塞整批）。
  */
 export type BatchEmbedFn = (texts: string[]) => Promise<(number[] | null)[]>;
-const BATCH_SIZE = 16;
+// v2.8.x: 单请求最大文本数 16 → 32。Ollama /api/embed 的 input 数组由服务端批处理，
+// 更大批次减少请求往返；配合 maxConcurrency=8 并发子批次，GPU 利用率更高。
+const BATCH_SIZE = 32;
 
 export function createBatchEmbedFn(config: EmbeddingConfig): BatchEmbedFn {
   const c = buildEmbedClient(config);
@@ -396,34 +399,41 @@ export function createBatchEmbedFn(config: EmbeddingConfig): BatchEmbedFn {
       toEmbed.push(i);
     }
 
-    // 按子批次发送（每批 ≤ BATCH_SIZE 个），持锁期间复用同一并发槽位
+    // v2.8.x: 子批次并发发送（此前串行 for 循环，未利用 maxConcurrency）。
+    // 信号量 acquire 自然限流：并发数 ≤ maxConcurrency（本地 Ollama 默认 8），
+    // 每请求携带 ≤ BATCH_SIZE 文本，GPU 批处理利用率更高。
+    const subBatches: number[][] = [];
     for (let start = 0; start < toEmbed.length; start += BATCH_SIZE) {
-      const idxs = toEmbed.slice(start, start + BATCH_SIZE);
-      const inputs = idxs.map((i) => texts[i]);
-      const release = await c.semaphore.acquire();
-      try {
-        const vecs = await performEmbedRequest(
-          c.baseURL, c.apiKey, c.model, c.keepAlive, c.options, inputs, c.expectedDim,
-        );
-        for (let k = 0; k < idxs.length; k++) {
-          const v = vecs[k];
-          if (v && v.length) {
-            out[idxs[k]] = v;
-            if (c.cache) c.cache.set(hash64(texts[idxs[k]]), v);
-          }
-        }
-      } catch (err) {
-        // 子批次整体失败：该批置 null（调用方跳过），避免整批功亏一篑
-        // 单文本失败造成的少量缺失由调用方（建图/召回）用 FTS 兜底
-        // v2.8.x: 记录错误到日志——此前完全静默，Ollama 模型 404 / baseURL 不可达时
-        // 会表现为"全部嵌入失败"且无任何线索（如 gm_reembed failed=37319）
-        console.warn(
-          `[graph-memory-pro:embed] batch sub-batch failed (model=${c.model}, ${idxs.length} texts): ${(err as Error)?.message ?? String(err)}`,
-        );
-      } finally {
-        release();
-      }
+      subBatches.push(toEmbed.slice(start, start + BATCH_SIZE));
     }
+    await Promise.all(
+      subBatches.map(async (idxs) => {
+        const inputs = idxs.map((i) => texts[i]);
+        const release = await c.semaphore.acquire();
+        try {
+          const vecs = await performEmbedRequest(
+            c.baseURL, c.apiKey, c.model, c.keepAlive, c.options, inputs, c.expectedDim,
+          );
+          for (let k = 0; k < idxs.length; k++) {
+            const v = vecs[k];
+            if (v && v.length) {
+              out[idxs[k]] = v;
+              if (c.cache) c.cache.set(hash64(texts[idxs[k]]), v);
+            }
+          }
+        } catch (err) {
+          // 子批次整体失败：该批置 null（调用方跳过），避免整批功亏一篑
+          // 单文本失败造成的少量缺失由调用方（建图/召回）用 FTS 兜底
+          // v2.8.x: 记录错误到日志——此前完全静默，Ollama 模型 404 / baseURL 不可达时
+          // 会表现为"全部嵌入失败"且无任何线索（如 gm_reembed failed=37319）
+          console.warn(
+            `[graph-memory-pro:embed] batch sub-batch failed (model=${c.model}, ${idxs.length} texts): ${(err as Error)?.message ?? String(err)}`,
+          );
+        } finally {
+          release();
+        }
+      }),
+    );
     return out;
   };
 }

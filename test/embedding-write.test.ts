@@ -10,11 +10,12 @@
  *   3. detectAndMigrateEmbeddings —— 检出「有 embeddingModel 但无向量」节点并触发补录
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import type { Driver } from "neo4j-driver";
 import { embedNodesMissing } from "../src/store/embed-helper.ts";
 import { writeExtractResult } from "../src/services/extract-service.ts";
 import { detectAndMigrateEmbeddings, reEmbedNodes } from "../src/graph/reembed.ts";
+import { createBatchEmbedFn } from "../src/engine/embed.ts";
 import { mockDriver, MockInteger } from "./helpers/neo4j-mock.ts";
 
 const EMBEDDING_MODEL = "test-embed";
@@ -384,5 +385,53 @@ describe("reEmbedNodes（失败诊断与精确扫描）", () => {
     expect(result.failed).toBe(2);
     expect(result.reEmbedded).toBe(0);
     expect(result.lastError).toContain("404");
+  });
+});
+
+describe("createBatchEmbedFn（v2.8.x 子批次并发限流）", () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("并发子批次数 ≤ maxConcurrency，全部文本均返回向量", async () => {
+    let active = 0;
+    let peak = 0;
+    let resolveAll!: () => void;
+    const gate = new Promise<void>((r) => { resolveAll = r; });
+
+    globalThis.fetch = vi.fn(async (_url: unknown, init: any) => {
+      const body = JSON.parse(init.body);
+      const n = body.input.length;
+      active++;
+      peak = Math.max(peak, active);
+      await gate; // 阻塞所有在途请求，观察并发峰值
+      active--;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ embeddings: Array.from({ length: n }, () => [0.1, 0.2, 0.3]) }),
+      } as unknown as Response;
+    });
+
+    const batchEmbed = createBatchEmbedFn({
+      baseURL: "http://localhost:11434",
+      model: "test-embed",
+      maxConcurrency: 2, // 并发上限 2
+    });
+
+    // 100 个文本 → 4 个子批次（32+32+32+4），maxConcurrency=2 下并发峰值应 ≤ 2
+    const texts = Array.from({ length: 100 }, (_, i) => `text-${i}`);
+    const promise = batchEmbed(texts);
+
+    // 给并发启动留时间，随后放行
+    await new Promise((r) => setTimeout(r, 30));
+    resolveAll();
+    const out = await promise;
+
+    expect(peak).toBeLessThanOrEqual(2);
+    expect(peak).toBeGreaterThanOrEqual(2); // 确实并行（非串行）
+    expect(out).toHaveLength(100);
+    expect(out.every((v) => v !== null && v.length === 3)).toBe(true);
   });
 });

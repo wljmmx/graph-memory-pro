@@ -47,7 +47,7 @@ export interface EmbeddingConfig {
   cacheSize?: number;
   /** v2.3.2 阶段二: LRU 缓存 TTL（默认 10min） */
   cacheTtlMs?: number;
-  /** v2.4.0: 最大并发请求数（默认 3 for 本地 Ollama，过高会触发 503 server busy） */
+  /** v2.8.x: 最大并发请求数（默认 8，本地 Ollama GPU 部署开 8 左右，云端可调高；过高触发 503 server busy 时调低） */
   maxConcurrency?: number;
 }
 
