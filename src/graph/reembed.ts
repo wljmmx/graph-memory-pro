@@ -67,7 +67,7 @@ export async function reEmbedNodes(
           "MATCH (n:Task|Skill|Event)" +
           " WHERE n.status = 'active' AND (n.embedding IS NULL OR n.embedding = [])" +
           " RETURN n.id AS id, labels(n)[0] AS label, n.name, n.description, n.content" +
-          " ORDER BY n.id SKIP $skip LIMIT $limit",
+          " ORDER BY n.id SKIP toInteger($skip) LIMIT toInteger($limit)",
           { skip: totalScanned, limit: batchSize },
         );
 

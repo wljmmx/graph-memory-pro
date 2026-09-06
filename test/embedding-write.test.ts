@@ -273,6 +273,23 @@ describe("reEmbedNodes（AbortSignal 超时取消）", () => {
 });
 
 describe("reEmbedNodes（失败诊断与精确扫描）", () => {
+  it("分页参数用 toInteger 包装，避免驱动把 JS number 序列化为 float 被 Neo4j 拒绝（SKIP 0.0 bug）", async () => {
+    const driver = mockDriver();
+    driver.queueResult([]); // 空批次 → 立即结束
+    await reEmbedNodes(
+      driver as unknown as Driver,
+      undefined,
+      50,
+      EMBEDDING_MODEL,
+      undefined,
+      makeBatchEmbedFn(),
+    );
+    const scan = driver.getAllRunCalls().find((c) => c.query.includes("ORDER BY n.id"));
+    expect(scan).toBeDefined();
+    expect(scan!.query).toContain("SKIP toInteger($skip)");
+    expect(scan!.query).toContain("LIMIT toInteger($limit)");
+  });
+
   it("查询连续失败 → lastError 记录错误，totalScanned 不再假递增（此前 4 次失败=200 虚高）", async () => {
     const driver = mockDriver();
     // 让 session.run 抛异常（查询失败路径）
