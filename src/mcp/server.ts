@@ -391,10 +391,10 @@ export async function startMcpServer(
         inputSchema: {
           batchSize: z.number().int().positive().max(200).optional().describe("Batch size (default 50, max 200)"),
           clear: z.boolean().optional().describe("If true, wipe all nodes/edges in the active database first (destructive)"),
-          // v2.8.x: 单轮处理上限。embed 模型较慢时（本地单条 ~1-2s）全量重嵌入需 15-25min，
-          // 同步 MCP 调用会阻塞会话。maxNodes 默认 2000：每轮处理该数量后返回部分结果，
-          // 再次调用 gm_reembed 自动从已处理位置续跑（幂等）。
-          maxNodes: z.number().int().positive().max(20000).optional().describe("Nodes to process per call (default 2000; call again to continue)"),
+          // v2.8.x: 单轮处理上限。embed 模型较慢且 Ollama 同模型请求串行排队，
+          // 全量重嵌入需 15-25min；并发批量请求会占满队列拖慢对话召回 embed。
+          // maxNodes 默认 1000：每轮处理后返回部分结果，再次调用自动续跑（幂等）。
+          maxNodes: z.number().int().positive().max(20000).optional().describe("Nodes to process per call (default 1000; call again to continue)"),
         },
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
       },
@@ -423,7 +423,7 @@ export async function startMcpServer(
           try {
             result = await reEmbedNodes(
               driver, embed, batchSize ?? 50, cfg.embedding?.model, undefined, batchEmbed, controller.signal,
-              maxNodes ?? 2000,
+              maxNodes ?? 1000,
             );
           } finally {
             clearTimeout(timer);

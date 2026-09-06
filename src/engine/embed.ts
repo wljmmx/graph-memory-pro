@@ -24,9 +24,10 @@ const RETRY_JITTER_MAX_MS = 500;
 // v2.4.0: 并发控制信号量（限制 embed 并发请求数，防本地 Ollama 503 server busy）
 // Ollama 默认 OLLAMA_NUM_PARALLEL=1，单流处理，并发过高会报
 // "maximum pending requests exceeded"，触发 embedding 熔断。
-// 默认并发 4（v2.8.x: 本地 Ollama 常同时跑 LLM + embedding，8 会占满 GPU 并行
-// 拖慢对话响应；4 为兼顾两者的折中，可配置 maxConcurrency 按需调整）。
-const DEFAULT_EMBED_MAX_CONCURRENCY = 4;
+// 默认并发 2（v2.8.x: Ollama 同模型请求串行排队，embed 并发过高会占满队列，
+// 拖慢对话召回的单条 query embed——实测 4 并发时召回 embed 排队 ~12s。
+// 2 为「与对话共存」的安全值，可配置 maxConcurrency 按需调整）。
+const DEFAULT_EMBED_MAX_CONCURRENCY = 2;
 
 interface Semaphore {
   acquire(): Promise<() => void>;

@@ -222,9 +222,9 @@
           },
           "maxConcurrency": {
             "type": "integer",
-            "default": 4,
+            "default": 2,
             "minimum": 1,
-            "description": "v2.8.x: embed 最大并发请求数（默认 4：本地 Ollama 常同时跑 LLM + embedding，勿占满并行；云端可调高，过高触发 503 时调低）"
+            "description": "v2.8.x: embed 最大并发请求数（默认 2：Ollama 同模型请求串行，并发过高会占满队列拖慢对话召回 embed；云端可调高，过高触发 503 时调低）"
           },
           "options": {
             "type": "object",
