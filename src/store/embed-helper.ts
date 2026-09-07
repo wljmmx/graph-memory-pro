@@ -81,12 +81,25 @@ export interface BatchEmbedNodeItem {
 }
 
 /**
+ * v2.8.x: 批量嵌入的失败详情（供调用方输出告警，不再静默丢弃子批次/单节点错误）。
+ */
+export interface EmbedBatchFailure {
+  nodeId: string;
+  /** 节点文本中失败的片段数（分块模式可能部分失败） */
+  failedChunks: number;
+  totalChunks: number;
+  /** 失败原因（batchEmbedFn 返回 null 的文本/异常信息） */
+  reason?: string;
+}
+
+/**
  * 批量嵌入多个节点并写库（v2.4.0）。
  *
  * 复用 batchEmbedFn 一次请求携带多个文本（Ollama /api/embed input 数组），
  * 显著减少 HTTP 请求数，降低本地 Ollama 请求队列压力（503 maximum pending 触发概率）。
  * 兼容分块模式：每个节点的多段文本展平后统一批量 embed，再按节点回填。
  *
+ * @param onBatchFailure 可选回调：批量嵌入后发现完全失败/部分失败的节点详情（v2.8.x）
  * @returns 成功写入向量的节点数
  */
 export async function embedNodeBatch(
@@ -94,6 +107,7 @@ export async function embedNodeBatch(
   batchEmbedFn: BatchEmbedFn,
   items: BatchEmbedNodeItem[],
   cfg?: GmConfig,
+  onBatchFailure?: (failures: EmbedBatchFailure[]) => void,
 ): Promise<number> {
   if (items.length === 0) return 0;
 
@@ -125,6 +139,9 @@ export async function embedNodeBatch(
       textToGroup.push(gi);
     }
   }
+  // v2.8.x: batchEmbedFn 抛错（Ollama 不可达/模型 404）不再静默吞掉——
+  // 交由调用方（reEmbedNodes/embedNodesMissing）决定记录，这里直接向上抛
+  // （此前无 catch，抛错会被上层统一处理，但需确认上层已记录日志）
   const allVectors = await batchEmbedFn(allTexts);
 
   // 按节点回填（保留成功项，失败的文本在此丢弃）
@@ -132,6 +149,26 @@ export async function embedNodeBatch(
   for (let i = 0; i < allTexts.length; i++) {
     const v = allVectors[i];
     if (v && v.length) groupVecs[textToGroup[i]].push({ text: allTexts[i], vec: v });
+  }
+
+  // v2.8.x: 收集完全失败/部分失败的节点详情（供告警日志，不静默丢弃）
+  const failures: EmbedBatchFailure[] = [];
+  for (let gi = 0; gi < groups.length; gi++) {
+    const g = groups[gi];
+    const succeeded = groupVecs[gi];
+    if (succeeded.length < g.texts.length) {
+      failures.push({
+        nodeId: g.nodeId,
+        failedChunks: g.texts.length - succeeded.length,
+        totalChunks: g.texts.length,
+        reason: succeeded.length === 0
+          ? "batchEmbedFn returned null for all chunks (check embedding model / Ollama status)"
+          : `partial: ${succeeded.length}/${g.texts.length} chunks embedded`,
+      });
+    }
+  }
+  if (failures.length > 0 && onBatchFailure) {
+    onBatchFailure(failures);
   }
 
   let count = 0;
@@ -212,9 +249,17 @@ export async function embedNodesMissing(
 
   if (batchEmbedFn) {
     try {
-      return await embedNodeBatch(driver, batchEmbedFn, toEmbed, cfg);
-    } catch {
-      // 批量失败时回退单条，保证部分成功
+      return await embedNodeBatch(
+        driver, batchEmbedFn, toEmbed, cfg,
+        // v2.8.x: 批量部分失败 → 记录具体节点（此前静默，建图缺向量无感知）
+        (failures) => {
+          const sample = failures.slice(0, 3).map((f) => `id=${f.nodeId} chunks=${f.failedChunks}/${f.totalChunks}`).join("; ");
+          console.warn(`[graph-memory-pro] embedNodesMissing: ${failures.length}/${toEmbed.length} nodes failed batch embed (${sample})`);
+        },
+      );
+    } catch (err) {
+      // v2.8.x: 批量失败（Ollama 不可达/模型 404）不再静默——记录后回退单条，保证部分成功
+      console.warn(`[graph-memory-pro] embedNodesMissing: batch embed failed, falling back to single: ${(err as Error)?.message ?? String(err)}`);
     }
   }
 
@@ -223,8 +268,10 @@ export async function embedNodesMissing(
     try {
       const n = await embedNode(driver, embedFn!, item.nodeId, item.params, cfg);
       if (n > 0) done++;
-    } catch {
-      // 单条失败不影响其他节点
+      else console.warn(`[graph-memory-pro] embedNodesMissing: empty text for node ${item.nodeId}, skipped`);
+    } catch (err) {
+      // v2.8.x: 单条失败记录 nodeId + 原因（此前静默，根因不可见）
+      console.warn(`[graph-memory-pro] embedNodesMissing: node ${item.nodeId} embed failed: ${(err as Error)?.message ?? String(err)}`);
     }
   }
   return done;

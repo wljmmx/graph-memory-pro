@@ -102,12 +102,14 @@ export async function reEmbedNodes(
         // 优先走 batchEmbedFn；未注入时回退到单文本 embedNode（向后兼容）。
         if (batchEmbedFn) {
           const items: BatchEmbedNodeItem[] = [];
+          let emptyTextCount = 0;
           for (const rec of nodes) {
             const nodeId = rec.get("id") as string;
             const name = rec.get("name") || "";
             const desc = rec.get("description") || "";
             const content = rec.get("content") || "";
             if (!name.trim() && !desc.trim() && !content.trim()) {
+              emptyTextCount++;
               continue;
             }
             items.push({
@@ -122,9 +124,22 @@ export async function reEmbedNodes(
           }
           totalScanned += nodes.length;
           advanced = true;
-          const embedded = await embedNodeBatch(driver, batchEmbedFn, items, cfg);
+          // v2.8.x: 挂载失败回调——批量嵌入失败不再只记 lastError 一句话，
+          // 具体到节点 + 失败片段数 + 原因（Ollama 模型 404 / 维度不匹配等）
+          const embedded = await embedNodeBatch(
+            driver, batchEmbedFn, items, cfg,
+            (failures) => {
+              const sample = failures.slice(0, 5).map((f) => `id=${f.nodeId} chunks=${f.failedChunks}/${f.totalChunks} reason=${f.reason}`).join("; ");
+              console.warn(
+                `[graph-memory-pro] reEmbed: ${failures.length}/${items.length} nodes failed batch embed` +
+                  (emptyTextCount > 0 ? ` (${emptyTextCount} empty-text nodes skipped)` : "") +
+                  `, sample: ${sample}` +
+                  `. Check embedding model "${embeddingModel ?? ""}" is pulled in Ollama, baseURL reachable, and dimensions match index (embed.ts expects ${cfg?.embedding?.dimensions ?? "configured dim"})`,
+              );
+            },
+          );
           reEmbedded += embedded;
-          skipped += nodes.length - embedded;
+          skipped += nodes.length - embedded - emptyTextCount;
           // v2.8.x: 整批 0 成功且确实发起了嵌入 → 记录提示（子批次错误被 batchEmbedFn 吞掉，
           // 需要日志/诊断才能定位，如 Ollama 模型 404、baseURL 不可达）
           if (embedded === 0 && items.length > 0 && !lastError) {
@@ -161,11 +176,17 @@ export async function reEmbedNodes(
               skipped++;
             }
           } catch (err) {
-            // v2.8.x: 记录第一条失败详情（此前静默 failed++，37319 全失败时无法定位根因）
+            // v2.8.x: 记录失败详情（此前静默 failed++，37319 全失败时无法定位根因）。
+            // 前 5 条失败逐条 warn（含 nodeId + 错误），后续失败累计计数不刷屏。
             failed++;
-            if (!lastError) {
-              lastError = (err as Error)?.message ?? String(err);
-              console.warn(`[graph-memory-pro] reEmbed: first single-node failure: ${lastError}`);
+            const msg = (err as Error)?.message ?? String(err);
+            if (!lastError) lastError = msg;
+            if (failed <= 5) {
+              console.warn(
+                `[graph-memory-pro] reEmbed: single-node embed failed (id=${(rec.get("id") as string) ?? "?"}): ${msg}`,
+              );
+            } else if (failed === 6) {
+              console.warn(`[graph-memory-pro] reEmbed: ... further failures suppressed (total so far: ${failed})`);
             }
           }
         }

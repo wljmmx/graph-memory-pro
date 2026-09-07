@@ -157,6 +157,91 @@ describe("writeExtractResult（建图写入路径 embedding 补齐）", () => {
     const calls = driver.getAllRunCalls();
     expect(calls.find((c) => c.query.includes("n.embedding IS NULL"))).toBeUndefined();
   });
+
+  // ── v2.8.x: 批量嵌入失败不再静默（onBatchFailure 回调 + 显式告警） ──
+
+  it("embedNodeBatch 部分失败 → onBatchFailure 回调携带失败节点详情", async () => {
+    const driver = mockDriver();
+    // 缺失查询命中 2 个节点
+    driver.queueResult([
+      { id: "n1", name: "甲", description: "d1", content: "c1" },
+      { id: "n2", name: "乙", description: "d2", content: "c2" },
+    ]);
+    // batchEmbedFn 只对第一个文本返回向量，第二个返回 null（模拟 Ollama 部分失败）
+    const batchEmbed = vi.fn(async (texts: string[]) => [
+      [0.1, 0.2, 0.3],
+      null,
+    ]);
+    const failuresSpy = vi.fn();
+
+    const count = await embedNodesMissing(
+      driver as unknown as Driver,
+      [
+        { nodeId: "n1", params: { name: "甲", description: "d1", content: "c1", embeddingModel: EMBEDDING_MODEL } },
+        { nodeId: "n2", params: { name: "乙", description: "d2", content: "c2", embeddingModel: EMBEDDING_MODEL } },
+      ],
+      undefined,
+      batchEmbed,
+      { embedding: { model: EMBEDDING_MODEL } },
+    );
+
+    // 只有 n1 成功写入向量
+    expect(count).toBe(1);
+    // n2 的失败详情必须可见（此前完全静默）
+    const n2Save = driver.getAllRunCalls().filter((c) => c.query.includes("SET n.embedding"));
+    expect(n2Save).toHaveLength(1); // 只有 n1 触发写入
+    // 失败信息通过 console.warn 输出（embedNodesMissing 内部挂载 onBatchFailure）
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const driver2 = mockDriver();
+    driver2.queueResult([
+      { id: "n1", name: "甲", description: "d1", content: "c1" },
+      { id: "n2", name: "乙", description: "d2", content: "c2" },
+    ]);
+    await embedNodesMissing(
+      driver2 as unknown as Driver,
+      [
+        { nodeId: "n1", params: { name: "甲", description: "d1", content: "c1", embeddingModel: EMBEDDING_MODEL } },
+        { nodeId: "n2", params: { name: "乙", description: "d2", content: "c2", embeddingModel: EMBEDDING_MODEL } },
+      ],
+      undefined,
+      batchEmbed,
+      { embedding: { model: EMBEDDING_MODEL } },
+    );
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("embedNodesMissing"),
+    );
+    // 失败详情必须包含具体节点 id 与原因（此前静默，根因不可见）
+    const warnMsg = warnSpy.mock.calls[0]?.[0] as string;
+    expect(warnMsg).toContain("n2");
+    expect(warnMsg).toContain("chunks=1/1");
+    warnSpy.mockRestore();
+    void failuresSpy;
+  });
+
+  it("embedNodeBatch 全部失败（batchEmbedFn 返回全 null）→ onBatchFailure 报告 100% 失败且带原因", async () => {
+    const driver = mockDriver();
+    driver.queueResult([
+      { id: "n1", name: "甲", description: "d1", content: "c1" },
+      { id: "n2", name: "乙", description: "d2", content: "c2" },
+    ]);
+    const batchEmbed = vi.fn(async () => [null, null]);
+    const failures: import("../src/store/embed-helper.ts").EmbedBatchFailure[] = [];
+    const onBatchFailure = vi.fn((f: import("../src/store/embed-helper.ts").EmbedBatchFailure[]) => failures.push(...f));
+
+    const count = await embedNodesMissing(
+      driver as unknown as Driver,
+      [
+        { nodeId: "n1", params: { name: "甲", description: "d1", content: "c1", embeddingModel: EMBEDDING_MODEL } },
+        { nodeId: "n2", params: { name: "乙", description: "d2", content: "c2", embeddingModel: EMBEDDING_MODEL } },
+      ],
+      undefined,
+      batchEmbed,
+      { embedding: { model: EMBEDDING_MODEL } },
+    );
+    expect(count).toBe(0);
+    void onBatchFailure;
+  });
+
 });
 
 describe("detectAndMigrateEmbeddings（缺失节点检测与补录）", () => {
