@@ -571,6 +571,27 @@ describe("serialize / deserialize", () => {
     expect(hist[1].rejected).toBe(true);
     expect(hist[1].updatesRejected).toBeGreaterThanOrEqual(1);
   });
+
+  it("v2.8.x: skipReason 采样（embed 失败等跳过原因）随 serialize/deserialize 持久化", () => {
+    const am = new AssociationMatrix(4, { enabled: true });
+    am.recordLearningSample(5, true, "embed-failed");
+    am.recordLearningSample(6, true, "no-signal");
+    am.recordLearningSample(7, false);
+
+    const data = JSON.parse(am.serialize());
+    expect(data.learningHistory).toHaveLength(3);
+    expect(data.learningHistory[0]).toMatchObject({ feedbackCount: 5, rejected: true, skipReason: "embed-failed" });
+    expect(data.learningHistory[1]).toMatchObject({ feedbackCount: 6, rejected: true, skipReason: "no-signal" });
+    // 无 skipReason 的采样不携带该字段
+    expect(data.learningHistory[2].skipReason).toBeUndefined();
+
+    const am2 = new AssociationMatrix(4, { enabled: true });
+    am2.deserialize(am.serialize());
+    const hist = am2.getLearningHistory();
+    expect(hist).toHaveLength(3);
+    expect(hist[0].skipReason).toBe("embed-failed");
+    expect(hist[2].skipReason).toBeUndefined();
+  });
 });
 
 // ─── 8. createAssociationMatrix 工厂 ────────────────────

@@ -252,8 +252,9 @@ export class Recaller {
           this.judgeManager!.incrementFeedback();
 
           // v2.1.2 第三批 L-1 + R-3：用反馈信号更新关联矩阵 M
-          // 仅在 M 启用且 embed 可用时触发（M 训练需要 query embedding）
-          if (this.associationMatrix?.isEnabled() && this.embed) {
+          // v2.8.x: 入口不再要求 embed 就绪——embed 缺失/失败统一由 updateAssociationMatrix
+          // 内部记录采样（skipReason=embed-not-configured / embed-failed），曲线不因静默短路恒空。
+          if (this.associationMatrix?.isEnabled()) {
             try {
               await this.updateAssociationMatrix(query, fb.usedNodeIds, fb.unusedNodeIds);
             } catch (err) {
@@ -278,6 +279,10 @@ export class Recaller {
   /**
    * v2.1.2 第三批：L-1 + R-3 更新关联矩阵 M
    *
+   * v2.8.x: 消除"学习曲线恒空"的静默短路——每条反馈都记录学习采样，
+   * 若 M 更新被跳过/失败，采样带 skipReason（embed-failed / empty-vec / no-signal），
+   * 曲线诚实反映学习活动（0 演进 + 大量 skipReason=embed-failed 即为 embed 链路故障）。
+   *
    * @param query 用户查询
    * @param usedNodeIds 被使用的节点 id（正反馈）
    * @param unusedNodeIds 未被使用的节点 id（负反馈）
@@ -287,17 +292,39 @@ export class Recaller {
     usedNodeIds: string[],
     unusedNodeIds: string[],
   ): Promise<void> {
-    if (!this.associationMatrix || !this.embed) return;
+    if (!this.associationMatrix) return;
+
+    const fbCount = this.judgeManager?.getFeedbackCount?.() ?? 0;
+    // 奖励信号 ∈ [-1, 1]：(used - unused) / total
+    const total = usedNodeIds.length + unusedNodeIds.length;
+    if (total === 0) {
+      // 反馈到达但没有可用信号（如 judge 全空/召回为空）——记录，避免曲线恒空
+      this.associationMatrix.recordLearningSample(fbCount, true, "no-signal");
+      return;
+    }
+    const reward = (usedNodeIds.length - unusedNodeIds.length) / total;
+
+    if (!this.embed) {
+      // embed 未注入（embedding 未配置/初始化失败）——M 无法训练
+      if (process.env.GM_DEBUG) log.debug("M update skipped: embed not configured");
+      this.associationMatrix.recordLearningSample(fbCount, true, "embed-not-configured");
+      return;
+    }
 
     // 计算 query embedding（与召回时一致的嵌入）
-    const queryVec = await this.embed(query);
-    if (!queryVec.length) return;
-
-    // 计算奖励信号 ∈ [-1, 1]
-    // 简化：reward = (used - unused) / total，正负方向 + 大小由反馈比例决定
-    const total = usedNodeIds.length + unusedNodeIds.length;
-    if (total === 0) return;
-    const reward = (usedNodeIds.length - unusedNodeIds.length) / total;
+    let queryVec: number[];
+    try {
+      queryVec = await this.embed(query);
+    } catch (err) {
+      // v2.8.x: embed 失败（Ollama 超时/排队/熔断）——记录根因，不再静默吞掉
+      log.warn("M update skipped: query embed failed", { error: String(err) });
+      this.associationMatrix.recordLearningSample(fbCount, true, "embed-failed");
+      return;
+    }
+    if (!queryVec.length) {
+      this.associationMatrix.recordLearningSample(fbCount, true, "empty-vec");
+      return;
+    }
 
     // R-3 边际效用更新（内部含邻域评估 + 拒绝逻辑）
     const result = this.associationMatrix.updateWithMarginalUtility(queryVec, reward);
@@ -311,7 +338,6 @@ export class Recaller {
     // v2.6.2: 无论更新被提交还是被 R-3 门控拒绝都记录（rejected 标记），
     // 修复"多轮对话后曲线恒空"：中文回复下 Tier 1 判定常全未命中 → reward≤0 →
     // 更新全被拒绝 → 旧逻辑 applied=false 零采样。现在曲线完整反映学习活动。
-    const fbCount = this.judgeManager?.getFeedbackCount?.() ?? 0;
     this.associationMatrix.recordLearningSample(fbCount, !result.applied);
 
     if (process.env.GM_DEBUG) {
@@ -339,7 +365,7 @@ export class Recaller {
     getNodeIds: string[],
     sessionId?: string,
   ): Promise<void> {
-    if (!this.associationMatrix?.isEnabled() || !this.embed) return;
+    if (!this.associationMatrix?.isEnabled()) return;
     if (getNodeIds.length === 0) return;
 
     // get() 命中 = 确定性正反馈；召回但未展开 = 负反馈

@@ -439,6 +439,68 @@ describe("Recaller.processFeedback 集成测试", () => {
     const lastCall = (upsertFeedback as ReturnType<typeof vi.fn>).mock.calls[2];
     expect(lastCall[1].matchedBy).toBe("heuristic");
   });
+
+  // ── v2.8.x: 学习曲线短路分支（反馈到达但 M 更新被跳过 → 仍记录采样） ──
+
+  function makeRecallerWithM(embedFn: ((q: string) => Promise<number[]>) | null) {
+    const driver = mockDriver();
+    const recaller = new Recaller(driver as any, mkConfig());
+    const jm = new JudgeManager({ asyncMode: false, judgeWarmupFeedbacks: 1 });
+    recaller.setJudgeManager(jm);
+    const { AssociationMatrix } = require("../src/recaller/association-matrix.ts") as typeof import("../src/recaller/association-matrix.ts");
+    const am = new AssociationMatrix(4, { enabled: true, warmupFeedbacks: 1 });
+    recaller.setAssociationMatrix(am);
+    if (embedFn) recaller.setEmbedFn(embedFn);
+    return { recaller, jm, am, driver };
+  }
+
+  it("v2.8.x: embed 抛错 → M 更新跳过，但学习曲线仍记录 skipReason=embed-failed", async () => {
+    const { recaller, am } = makeRecallerWithM(async () => { throw new Error("Ollama timeout"); });
+    await recaller.processFeedback("q", [mkNode("n1", "abc")], "abc", "s");
+    // asyncMode=false → 同步完成，无需 flush
+    const hist = am.getLearningHistory();
+    expect(hist).toHaveLength(1);
+    expect(hist[0].rejected).toBe(true);
+    expect(hist[0].skipReason).toBe("embed-failed");
+    expect(am.getStats().updatesApplied).toBe(0);
+  });
+
+  it("v2.8.x: embed 返回空向量 → skipReason=empty-vec", async () => {
+    const { recaller, am } = makeRecallerWithM(async () => []);
+    await recaller.processFeedback("q", [mkNode("n1", "abc")], "abc", "s");
+    const hist = am.getLearningHistory();
+    expect(hist).toHaveLength(1);
+    expect(hist[0].skipReason).toBe("empty-vec");
+  });
+
+  it("v2.8.x: 无 used/unused 信号（judge 全未命中仍算 unused）→ 正常 N 次采样；无信号场景不静默", async () => {
+    // 反馈到达但 recalledNodes 为空 → judge 返回空 used/unused → total=0 → no-signal
+    const { recaller, am } = makeRecallerWithM(async (q) => [0.1, 0.2, 0.3, 0.4]);
+    await recaller.processFeedback("q", [], "reply", "s"); // recalledNodes 为空
+    const hist = am.getLearningHistory();
+    expect(hist).toHaveLength(1);
+    expect(hist[0].skipReason).toBe("no-signal");
+    expect(am.getStats().updatesApplied).toBe(0);
+  });
+
+  it("v2.8.x: embed 未注入 → skipReason=embed-not-configured", async () => {
+    const { recaller, am } = makeRecallerWithM(null);
+    await recaller.processFeedback("q", [mkNode("n1", "abc")], "abc", "s");
+    const hist = am.getLearningHistory();
+    expect(hist).toHaveLength(1);
+    expect(hist[0].skipReason).toBe("embed-not-configured");
+  });
+
+  it("v2.8.x: embed 正常且 R-3 通过 → 采样无 skipReason，updatesApplied=1，曲线记录真实学习", async () => {
+    const { recaller, am } = makeRecallerWithM(async (q) => [1, 0, 0, 0]);
+    await recaller.processFeedback("q", [mkNode("n1", "abc")], "abc", "s");
+    // recaller.embed(query)=[1,0,0,0]，warmup=1 → 非冷启动 → 提交更新
+    const hist = am.getLearningHistory();
+    expect(hist).toHaveLength(1);
+    expect(hist[0].skipReason).toBeUndefined();
+    expect(hist[0].rejected).toBe(false);
+    expect(am.getStats().updatesApplied).toBe(1);
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════

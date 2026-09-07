@@ -48,6 +48,8 @@ export const DEFAULT_AM_CONFIG: AssociationMatrixConfig = {
  * 用于 dashboard /api/association-matrix/history 时序展示。
  * v2.6.2: 无论更新被提交还是被 R-3 门控拒绝都记录采样（rejected 字段区分），
  * 使曲线完整反映学习活动（被拒绝的学习不再不可见）。
+ * v2.8.x: 新增 skipReason —— 反馈到达但 M 更新被跳过的原因（embed 失败/空向量/
+ * 无 used/unused 信号/维度不匹配等），曲线不再因静默短路而恒空，可定位根因。
  */
 export interface LearningSample {
   /** epoch ms */
@@ -59,6 +61,8 @@ export interface LearningSample {
   feedbackCount: number;
   /** v2.6.2: 本次采样是否被 R-3 边际效用门控拒绝（false = 已提交） */
   rejected?: boolean;
+  /** v2.8.x: 反馈到达但 M 更新被跳过/失败的原因（如 embed-failed / empty-vec / no-signal / dim-mismatch） */
+  skipReason?: string;
 }
 
 /** 关联矩阵 M 可视化数据 */
@@ -476,13 +480,16 @@ export class AssociationMatrix {
    * 调用时机：每次 M 更新评估后由 Recaller 传入当前反馈计数。
    * v2.6.2: applied 与 rejected 都记录（rejected=true 表示被 R-3 门控拒绝），
    * 曲线反映完整学习活动而非仅成功提交的更新。
+   * v2.8.x: skipReason —— 反馈已到达但 M 更新未执行（embed 失败/空向量/无信号等），
+   * 同样记录采样（rejected=true + skipReason），曲线不再恒空、根因可见。
    * 采样保存在内存环形缓冲（上限 learningHistoryMaxSize），
    * 并随 serialize() 一起持久化，实现跨重启的历史可追溯。
    *
    * @param feedbackCount 当前累计反馈数（来自 JudgeManager）
    * @param rejected 本次更新是否被 R-3 边际效用门控拒绝（默认 false）
+   * @param skipReason M 更新被跳过/失败的原因（可选）
    */
-  recordLearningSample(feedbackCount: number, rejected = false): void {
+  recordLearningSample(feedbackCount: number, rejected = false, skipReason?: string): void {
     this.learningHistory.push({
       timestamp: Date.now(),
       t: this.t,
@@ -490,6 +497,7 @@ export class AssociationMatrix {
       updatesRejected: this.rejectedCount,
       feedbackCount,
       rejected,
+      ...(skipReason ? { skipReason } : {}),
     });
     if (this.learningHistory.length > this.learningHistoryMaxSize) {
       this.learningHistory.shift();
