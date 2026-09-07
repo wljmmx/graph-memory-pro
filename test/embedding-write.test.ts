@@ -374,6 +374,12 @@ describe("reEmbedNodes（失败诊断与精确扫描）", () => {
     expect(scan).toBeDefined();
     expect(scan!.query).not.toContain("SKIP");
     expect(scan!.query).toContain("LIMIT toInteger($limit)");
+    // v2.8.x 回归：n.name/n.description/n.content 必须 AS 别名——真实 neo4j-driver 的
+    // record key 是限定名 "n.name"，不别名时 rec.get("name") 抛
+    // "This record has no field with key 'name'"（gm_reembed 每批退避、0 进展的根因）
+    expect(scan!.query).toContain("n.name AS name");
+    expect(scan!.query).toContain("n.description AS description");
+    expect(scan!.query).toContain("n.content AS content");
   });
 
   it("查询连续失败 → lastError 记录错误，totalScanned 不再假递增（此前 4 次失败=200 虚高）", async () => {

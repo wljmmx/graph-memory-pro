@@ -92,11 +92,14 @@ export async function reEmbedNodes(
         // 用累计 totalScanned 作偏移会双计数：处理 k 批后过滤集已缩小 k×batchSize，
         // SKIP k×batchSize 会再跳过 k×batchSize 个待处理节点（每轮跳过一半，静默丢数据）。
         // 每次从过滤集头部取 LIMIT 个即可（ORDER BY n.id 保证幂等、可续跑）。
+        // 注意：n.name/n.description/n.content 必须 AS 别名——真实 Neo4j 驱动的
+        // record key 是限定名 "n.name"，不别名时 rec.get("name") 会抛
+        // "This record has no field with key 'name'"，导致每批退避重试、永远无法嵌入。
         onStatus?.({ phase: "scanning", detail: `LIMIT ${batchSize}` });
         const result = await session.run(
           "MATCH (n:Task|Skill|Event)" +
           " WHERE n.status = 'active' AND (n.embedding IS NULL OR n.embedding = [])" +
-          " RETURN n.id AS id, labels(n)[0] AS label, n.name, n.description, n.content" +
+          " RETURN n.id AS id, labels(n)[0] AS label, n.name AS name, n.description AS description, n.content AS content" +
           " ORDER BY n.id LIMIT toInteger($limit)",
           { limit: batchSize },
         );
