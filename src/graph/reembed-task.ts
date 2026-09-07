@@ -46,6 +46,13 @@ export interface ReembedTaskSnapshot {
   averageBatchMs: number;
   /** 预计剩余时间 ms（0 = 无法估算） */
   etaMs: number;
+  /**
+   * v2.8.x: 当前批内阶段（scanning / scan-done / embedding / embed-done / backoff）。
+   * 快照不再只在批次返回后更新——批内主动上报，避免"0 进展"无法区分处理中与卡死。
+   */
+  phase?: string;
+  /** v2.8.x: 最近一条批内状态消息（含退避次数与错误、批内耗时等） */
+  lastMessage?: string;
   startedAt: number;
   updatedAt: number;
   finishedAt?: number;
@@ -103,6 +110,8 @@ function toSnapshot(task: ReembedTask): ReembedTaskSnapshot {
     progressPercent,
     averageBatchMs: task.averageBatchMs,
     etaMs,
+    ...(task.phase !== undefined ? { phase: task.phase } : {}),
+    ...(task.lastMessage !== undefined ? { lastMessage: task.lastMessage } : {}),
     startedAt: task.startedAt,
     updatedAt: task.updatedAt,
     ...(task.finishedAt !== undefined ? { finishedAt: task.finishedAt } : {}),
@@ -167,7 +176,12 @@ export function startReembedTask(
         ? Math.ceil(task.totalNodes / task.batchSize)
         : 0;
       task.status = "running";
+      task.phase = "counting";
       task.updatedAt = Date.now();
+      const model = cfg.embedding?.model;
+      console.log(
+        `[graph-memory-pro] reembed-task ${task.taskId}: started, totalNodes=${task.totalNodes}, totalBatches=${task.totalBatches}, batchSize=${task.batchSize}, model=${model ?? "unset"}`,
+      );
 
       if (task.totalNodes === 0) {
         task.status = "done";
@@ -178,15 +192,48 @@ export function startReembedTask(
 
       const batchTimes: number[] = [];
       let consecutiveZeroBatches = 0;
-      const model = cfg.embedding?.model;
+      // v2.8.x: 批内心跳——批次长时间在途（慢 Ollama / 退避重试）时仍刷新
+      // updatedAt + lastMessage，快照不再"静止 0 进展"，可区分处理中与卡死。
+      let heartbeat: ReturnType<typeof setInterval> | null = null;
 
       while (!task.cancelRequested) {
         const batchStart = Date.now();
-        // 每轮只处理一个批次（maxNodes=batchSize），返回后更新快照；下一轮从头继续，
-        // WHERE 过滤集自行收缩（已嵌入节点被过滤），幂等可续跑。
-        const res = await reEmbedNodes(
-          driver, embedFn, task.batchSize, model, cfg, batchEmbedFn, undefined, task.batchSize,
+        const batchNo = task.currentBatch + 1;
+        task.phase = "batch-start";
+        task.lastMessage = `starting batch ${batchNo}/${task.totalBatches}`;
+        task.updatedAt = Date.now();
+        heartbeat = setInterval(() => {
+          if (task.status !== "running") return;
+          const elapsedS = Math.round((Date.now() - batchStart) / 1000);
+          task.lastMessage = `batch ${batchNo}/${task.totalBatches} in progress (${elapsedS}s elapsed, phase=${task.phase ?? "?"})`;
+          task.updatedAt = Date.now();
+        }, 10_000);
+
+        let res;
+        try {
+          // 每轮只处理一个批次（maxNodes=batchSize），返回后更新快照；下一轮从头继续，
+          // WHERE 过滤集自行收缩（已嵌入节点被过滤），幂等可续跑。
+          // onStatus: 批内阶段/错误实时上报 → 快照可见，退出后由心跳接续。
+          res = await reEmbedNodes(
+            driver, embedFn, task.batchSize, model, cfg, batchEmbedFn, undefined, task.batchSize,
+            (info) => {
+              task.phase = info.phase;
+              task.lastMessage = info.detail
+                ? `batch ${batchNo}/${task.totalBatches}: ${info.phase} ${info.detail}`
+                : `batch ${batchNo}/${task.totalBatches}: ${info.phase}`;
+              task.updatedAt = Date.now();
+            },
+          );
+        } finally {
+          if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
+        }
+
+        const batchElapsedMs = Date.now() - batchStart;
+        console.log(
+          `[graph-memory-pro] reembed-task ${task.taskId}: batch ${batchNo}/${task.totalBatches} done in ${batchElapsedMs}ms (scanned=${res.totalScanned}, embedded=${res.reEmbedded}, failed=${res.failed}, skipped=${res.skipped}${res.lastError ? `, lastError=${res.lastError}` : ""})`,
         );
+        task.lastMessage = `batch ${batchNo}/${task.totalBatches} done (${res.reEmbedded} embedded, ${batchElapsedMs}ms)`;
+        task.phase = "batch-done";
 
         // 完成判定（先于计数：空批次/末批不算一个处理批次，避免 currentBatch 超过 totalBatches）
         if (res.totalScanned === 0) {
@@ -246,11 +293,16 @@ export function startReembedTask(
       }
       task.finishedAt = Date.now();
       task.updatedAt = Date.now();
+      console.log(
+        `[graph-memory-pro] reembed-task ${task.taskId}: finished with status=${task.status} (processed=${task.processedNodes}/${task.totalNodes}, embedded=${task.reEmbedded}, failed=${task.failed}, skipped=${task.skipped})` +
+          (task.lastError ? ` lastError=${task.lastError}` : ""),
+      );
     } catch (err: unknown) {
       task.status = "failed";
       task.lastError = (err as Error)?.message ?? String(err);
       task.finishedAt = Date.now();
       task.updatedAt = Date.now();
+      console.error(`[graph-memory-pro] reembed-task ${task.taskId}: failed with exception: ${task.lastError}`);
     }
   })();
 

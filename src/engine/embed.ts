@@ -194,6 +194,9 @@ function buildKeepAlive(config: EmbeddingConfig): string | number {
 }
 
 // 单次请求：发送 inputs 数组，返回对齐的向量数组（带重试 + 维度校验）
+// v2.8.x: timeoutMs 可配——批量路径输入多（每请求 ≤ BATCH_SIZE 段文本），
+// 本地 CPU Ollama 在极端负载下 30s 可能超时，误触发重试风暴（表现为
+// gm_reembed 首批次"跑几分钟 0 进展"），故批量路径上调到 120s。
 async function performEmbedRequest(
   baseURL: string,
   apiKey: string,
@@ -202,6 +205,7 @@ async function performEmbedRequest(
   options: Record<string, number | boolean | string> | undefined,
   inputs: string[],
   expectedDim: number | undefined,
+  timeoutMs = 30_000,
 ): Promise<number[][]> {
   const delays = [...RETRY_DELAYS];
   const lastErr: Error[] = [];
@@ -219,7 +223,7 @@ async function performEmbedRequest(
           keep_alive: keepAlive,
           ...(options ? { options } : {}),
         }),
-        signal: AbortSignal.timeout(30_000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
 
       if (!response.ok) {
@@ -414,6 +418,8 @@ export function createBatchEmbedFn(config: EmbeddingConfig): BatchEmbedFn {
         try {
           const vecs = await performEmbedRequest(
             c.baseURL, c.apiKey, c.model, c.keepAlive, c.options, inputs, c.expectedDim,
+            // v2.8.x: 批量请求放宽到 120s（输入多为 32 段文本，弱 CPU 下 30s 易误超时）
+            120_000,
           );
           for (let k = 0; k < idxs.length; k++) {
             const v = vecs[k];

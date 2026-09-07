@@ -3,6 +3,16 @@ import type { EmbedFn, BatchEmbedFn } from "../engine/embed.ts";
 import type { GmConfig } from "../types.ts";
 import { embedNode, embedNodeBatch, type BatchEmbedNodeItem } from "../store/embed-helper.ts";
 
+/**
+ * v2.8.x: 批内进度回调（gm_reembed 异步任务批内可观测性）。
+ *
+ * reEmbedNodes 在批次内部的关键节点（扫描/嵌入/退避/完成）主动上报，
+ * 供 startReembedTask 更新任务快照（phase/lastMessage/updatedAt）——
+ * 否则异步任务在整个批次返回前快照保持静止，"跑了几分钟还是 0 进展"
+ * 无法区分"正在嵌入"与"卡死"。
+ */
+export type ReembedStatusCallback = (info: { phase: string; detail?: string }) => void;
+
 export interface ReEmbedResult {
   totalScanned: number;
   reEmbedded: number;
@@ -36,6 +46,7 @@ export async function reEmbedNodes(
   batchEmbedFn?: BatchEmbedFn,
   signal?: AbortSignal,
   maxNodes?: number,
+  onStatus?: ReembedStatusCallback,
 ): Promise<ReEmbedResult> {
   if (!embedFn && !batchEmbedFn) {
     return { totalScanned: 0, reEmbedded: 0, failed: 0, skipped: 1, durationMs: 0 };
@@ -81,6 +92,7 @@ export async function reEmbedNodes(
         // 用累计 totalScanned 作偏移会双计数：处理 k 批后过滤集已缩小 k×batchSize，
         // SKIP k×batchSize 会再跳过 k×batchSize 个待处理节点（每轮跳过一半，静默丢数据）。
         // 每次从过滤集头部取 LIMIT 个即可（ORDER BY n.id 保证幂等、可续跑）。
+        onStatus?.({ phase: "scanning", detail: `LIMIT ${batchSize}` });
         const result = await session.run(
           "MATCH (n:Task|Skill|Event)" +
           " WHERE n.status = 'active' AND (n.embedding IS NULL OR n.embedding = [])" +
@@ -90,6 +102,7 @@ export async function reEmbedNodes(
         );
 
         const nodes = result.records;
+        onStatus?.({ phase: "scan-done", detail: `${nodes.length} nodes` });
         if (nodes.length === 0) break;
 
         // Reset failure counter on successful query
@@ -124,6 +137,7 @@ export async function reEmbedNodes(
           }
           totalScanned += nodes.length;
           advanced = true;
+          onStatus?.({ phase: "embedding", detail: `${items.length} items (${emptyTextCount} empty-text skipped)` });
           // v2.8.x: 挂载失败回调——批量嵌入失败不再只记 lastError 一句话，
           // 具体到节点 + 失败片段数 + 原因（Ollama 模型 404 / 维度不匹配等）
           const embedded = await embedNodeBatch(
@@ -138,6 +152,7 @@ export async function reEmbedNodes(
               );
             },
           );
+          onStatus?.({ phase: "embed-done", detail: `embedded ${embedded}/${items.length}` });
           reEmbedded += embedded;
           skipped += nodes.length - embedded - emptyTextCount;
           // v2.8.x: 整批 0 成功且确实发起了嵌入 → 记录提示（子批次错误被 batchEmbedFn 吞掉，
@@ -150,6 +165,7 @@ export async function reEmbedNodes(
           continue;
         }
 
+        onStatus?.({ phase: "embedding", detail: `${nodes.length} items (single-node mode)` });
         for (const rec of nodes) {
           try {
             const nodeId = rec.get("id") as string;
@@ -203,6 +219,10 @@ export async function reEmbedNodes(
       failed++;
       lastError = (err as Error)?.message ?? String(err);
       consecutiveFailures++;
+      onStatus?.({
+        phase: "backoff",
+        detail: `attempt ${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}: ${lastError}`,
+      });
       // 仅当本批 totalScanned 已递增（embedNodeBatch 抛异常）时回滚到批头，
       // 保证重试同一批（已写入 embedding 的节点会被查询条件过滤，重试幂等安全）。
       // 查询本身失败时 advanced=false，totalScanned 未变，无需回滚。
