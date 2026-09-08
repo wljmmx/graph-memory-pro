@@ -543,11 +543,10 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
 
         // 注入 AssociationMatrix
         if (cfg.associationMatrix?.enabled === true) {
-          const { createAssociationMatrix } = await import("./src/recaller/association-matrix.ts");
-          const { tryLoadAssociationMatrix } = await import("./src/recaller/association-matrix-persist.ts");
+          const { createAssociationMatrixPersisted } = await import("./src/recaller/association-matrix-persist.ts");
           const amDim = resolveEmbedDimension(cfg);
-          const am = createAssociationMatrix(amDim, cfg);
-          const { loaded, path } = await tryLoadAssociationMatrix(am);
+          const { am, loaded, path } = await createAssociationMatrixPersisted(amDim, cfg);
+          if (!am) return;
           _recaller.setAssociationMatrix(am);
           log.info(`self-init: AssociationMatrix initialized (dim=${amDim}, persistedRestored=${loaded}, path=${path})`);
         }
@@ -1491,11 +1490,10 @@ async function doGatewayInit(api: any, logger: LoggerLike): Promise<void> {
   // v2.1.2 第三批 L-1：注入 AssociationMatrix（关联矩阵 M）
   // v2.3.6: 创建后从持久化文件恢复 M（若存在），避免进程重启丢失在线学习成果
   if (_cfg.associationMatrix?.enabled === true) {
-    const { createAssociationMatrix } = await import("./src/recaller/association-matrix.ts");
-    const { tryLoadAssociationMatrix } = await import("./src/recaller/association-matrix-persist.ts");
+    const { createAssociationMatrixPersisted } = await import("./src/recaller/association-matrix-persist.ts");
     const amDim = resolveEmbedDimension(_cfg);
-    const am = createAssociationMatrix(amDim, _cfg);
-    const { loaded, path } = await tryLoadAssociationMatrix(am);
+    const { am, loaded, path } = await createAssociationMatrixPersisted(amDim, _cfg);
+    if (!am) return;
     _recaller.setAssociationMatrix(am);
     logger?.info?.(`[graph-memory-pro] association-matrix enabled (dim=${amDim}, warmup=${_cfg.associationMatrix?.warmupFeedbacks ?? _cfg.warmup?.warmupFeedbacks ?? 40}, persistedRestored=${loaded}, path=${path})`);
   }

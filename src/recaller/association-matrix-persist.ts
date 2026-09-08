@@ -178,21 +178,33 @@ export async function tryLoadAssociationMatrix(
   return { loaded, path: getAssociationMatrixPath(opts) };
 }
 
+/** createAssociationMatrixPersisted 的类型安全返回 */
+export interface AssociationMatrixPersistedResult {
+  am: AssociationMatrix | null;
+  loaded: boolean;
+  path: string;
+}
+
 /**
  * 构造并加载：从配置创建 AssociationMatrix，若已启用且有持久化文件则恢复。
  *
- * 供内部启动流程与外部插件统一使用，避免重复的 create+load 样板代码。
+ * 供内部启动流程（self-init 与 gateway）统一使用，消除两处 create+tryLoad 重复样板。
+ *
+ * @returns 类型安全的 { am, loaded, path }；cfg.associationMatrix.enabled 非真时 am 为 null。
  */
 export async function createAssociationMatrixPersisted(
   dim: number,
   cfg?: GmConfig,
   opts: AssociationMatrixPersistOptions = {},
-): Promise<AssociationMatrix | null> {
-  if (!cfg?.associationMatrix?.enabled) return null;
+): Promise<AssociationMatrixPersistedResult> {
+  const path = getAssociationMatrixPath(opts);
+  if (!cfg?.associationMatrix?.enabled) {
+    return { am: null, loaded: false, path };
+  }
   const { createAssociationMatrix } = await import("./association-matrix.ts");
   const am = createAssociationMatrix(dim, cfg);
-  const { path, loaded } = await tryLoadAssociationMatrix(am, opts);
-  return Object.assign(am, { __persistPath: path, __persistLoaded: loaded });
+  const { loaded } = await tryLoadAssociationMatrix(am, opts);
+  return { am, loaded, path };
 }
 
 /**

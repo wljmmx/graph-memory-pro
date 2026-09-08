@@ -185,24 +185,25 @@ describe("createAssociationMatrixPersisted", () => {
     associationMatrix: { enabled: true, warmupFeedbacks: 2 },
   } as Parameters<typeof createAssociationMatrixPersisted>[1];
 
-  it("配置未启用时返回 null", async () => {
+  it("配置未启用时返回 { am: null }", async () => {
     const r = await createAssociationMatrixPersisted(4, {} as Parameters<typeof createAssociationMatrixPersisted>[1], { baseDir: tmp });
-    expect(r).toBeNull();
+    expect(r.am).toBeNull();
   });
 
   it("启用且无文件时返回新建矩阵（未恢复）", async () => {
-    const am = await createAssociationMatrixPersisted(4, cfg, { baseDir: tmp });
-    expect(am).not.toBeNull();
-    expect(am!.isEnabled()).toBe(true);
-    expect((am as any).__persistLoaded).toBe(false);
+    const r = await createAssociationMatrixPersisted(4, cfg, { baseDir: tmp });
+    expect(r.am).not.toBeNull();
+    expect(r.am!.isEnabled()).toBe(true);
+    expect(r.loaded).toBe(false);
   });
 
   it("启用且有文件时返回已恢复矩阵", async () => {
     const src = makeEnabledMatrix();
     await saveAssociationMatrix(src, { baseDir: tmp });
-    const am = await createAssociationMatrixPersisted(4, cfg, { baseDir: tmp });
-    expect(am).not.toBeNull();
-    expect((am as any).__persistLoaded).toBe(true);
+    const r = await createAssociationMatrixPersisted(4, cfg, { baseDir: tmp });
+    expect(r.am).not.toBeNull();
+    expect(r.am!.isEnabled()).toBe(true);
+    expect(r.loaded).toBe(true);
   });
 });
 
