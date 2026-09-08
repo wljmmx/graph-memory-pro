@@ -74,6 +74,11 @@ interface AgentEndEvent {
 interface AgentEndCtx {
   sessionKey?: string;
   sessionId?: string;
+  // v2.8.x: 与 corpusSupplement.search/get 的 write 端 key 对齐。
+  //   write 端用 params.agentSessionKey 写入 SessionRecallCache（index.ts search/get），
+  //   agent_end 若只取 sessionKey/sessionId 会漏掉 agentSessionKey，导致
+  //   consume(sessionKey) 返回 null → 完整 judge 与学习曲线采样永不触发。
+  agentSessionKey?: string;
 }
 
 // ─── 全局状态 ──────────────────────────────────────────
@@ -1864,7 +1869,13 @@ export default definePluginEntry({
       if (_cfg?.autoFeedback?.enabled === false) return;
       if (!_driver || !_recaller) return;
 
-      const sessionKey: string | undefined = ctx?.sessionKey ?? ctx?.sessionId;
+      // v2.8.x: key 提取与 after_tool_call/llm_output 全降级链对齐。
+      //   write 端（corpusSupplement.search/get）用 params.agentSessionKey 写入缓存，
+      //   agent_end 必须同样能取到它，否则 consume(sessionKey) 命中不了 →
+      //   完整 judge + 学习曲线采样永不触发。降级顺序 agentSessionKey 优先于 _lastSessionKey。
+      const ctx2 = (ctx ?? {}) as { sessionKey?: string; sessionId?: string; agentSessionKey?: string };
+      const sessionKey: string | undefined =
+        ctx2?.sessionKey ?? ctx2?.sessionId ?? ctx2?.agentSessionKey ?? _lastSessionKey;
       if (!sessionKey) return;
 
       // 消费该 session 的召回缓存（取完即清，避免重复采集）
