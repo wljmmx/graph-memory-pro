@@ -1046,7 +1046,9 @@ async function restartMcpServer(): Promise<void> {
 async function recoverDriver(): Promise<void> {
   if (!_cfg) return;
   try {
-    const d = initDriver(_cfg.neo4j); // initDriver 内部先 close 旧 driver 再创建
+    // v2.4.4: 心跳恢复是真正需要重建的路径——旧 driver 已坏，必须强制 close→create。
+    //   initDriver 默认幂等复用（同 uri 不重建），force:true 绕过。
+    const d = initDriver(_cfg.neo4j, { force: true });
     const ok = await verifyWithRetry(d);
     if (ok) {
       _driver = d;

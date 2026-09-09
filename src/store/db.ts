@@ -15,6 +15,13 @@ let _driver: Driver | null = null;
 let _config: Neo4jConfig | null = null;
 // v2.3.5: 记录实际生效的 maxPoolSize，供 getPoolMetrics 返回真实值（而非硬编码 50）
 let _effectiveMaxPoolSize = DEFAULT_MAX_CONNECTION_POOL_SIZE;
+
+// v2.4.4: 延迟关闭排空窗口——driver.close() 会立刻拒绝在途请求（"Pool is closed"），
+//   而 register() 在 Gateway 内可能被多次调用（doctor 刷新 / 插件重载 / graph-adapter 动态 import），
+//   每次 close→create 循环都会让持有旧 driver 的并发查询撞上已关闭的池。
+//   对策：close 先切断新会话分配（_driver=null），旧池延迟排空在途会话后再关闭。
+const DRAIN_CHECK_INTERVAL_MS = 250;
+const DRAIN_MAX_WAIT_MS = 5_000;
 // v2.4.0: 当前会话目标数据库。默认取配置 cfg.database（缺省 neo4j），
 //      benchmark 通过 withDatabase() 临时切换到隔离的 benchmarks 数据库，避免污染生产。
 let _activeDatabase = "neo4j";
@@ -97,7 +104,14 @@ export function getDriver(): Driver | null {
   return _driver;
 }
 
-export function initDriver(cfg: Neo4jConfig): Driver {
+export function initDriver(cfg: Neo4jConfig, opts?: { force?: boolean }): Driver {
+  // v2.4.4: 幂等复用——driver 已存在且 uri 未变时直接复用，不重建。
+  //   根因：Gateway 内 register()/self-init 可在毫秒级内多次触发，
+  //   每次都 close→create 一轮，在途查询齐射打到已关闭的旧池（"Pool is closed" 风暴）。
+  //   真正需要重建的路径（心跳 recoverDriver）传 { force: true } 绕过。
+  if (!opts?.force && _driver && _config && _config.uri === cfg.uri) {
+    return _driver;
+  }
   closeDriver();
   _config = cfg;
   _activeDatabase = cfg.database ?? "neo4j";
@@ -111,11 +125,31 @@ export function closeDriver(): void {
     _driver = null;
     _config = null;
     _effectiveMaxPoolSize = DEFAULT_MAX_CONNECTION_POOL_SIZE;
-    // 异步关闭旧 driver，不阻塞当前调用
-    oldDriver.close().catch(() => {
-      // ignore close errors
-    });
+    // v2.4.4: 异步关闭旧 driver，不阻塞当前调用；
+    //   v2.4.4: 关闭前排空在途会话（最多 DRAIN_MAX_WAIT_MS），
+    //   避免 neo4j driver.close() 立刻拒绝在途请求导致 "Pool is closed"。
+    scheduleDriverClose(oldDriver);
   }
+}
+
+/**
+ * v2.4.4: 排空在途应用层会话后关闭旧 driver。
+ *
+ * _activeSessions 统计经 getSession() 包装的在途会话数（Recaller/Extractor/store 主路径），
+ * 归零或超时后执行 close；关闭本身仍 fire-and-forget，不阻塞调用方。
+ */
+function scheduleDriverClose(d: Driver): void {
+  const startedAt = Date.now();
+  const tryClose = (): void => {
+    if (_activeSessions <= 0 || Date.now() - startedAt >= DRAIN_MAX_WAIT_MS) {
+      d.close().catch(() => {
+        // ignore close errors
+      });
+      return;
+    }
+    setTimeout(tryClose, DRAIN_CHECK_INTERVAL_MS);
+  };
+  setTimeout(tryClose, 0);
 }
 
 export function getConfig(): Neo4jConfig | null {
