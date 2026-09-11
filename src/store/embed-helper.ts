@@ -10,6 +10,9 @@ import type { Driver } from "neo4j-driver";
 import type { EmbedFn, BatchEmbedFn } from "../engine/embed.ts";
 import type { GmConfig } from "../types.ts";
 import { buildEmbedTexts } from "../recaller/chunk.ts";
+import { createLogger } from "../logger.ts";
+
+const log = createLogger("store:embed");
 import { saveVector, saveChunkVectors, computeEmbeddingHash } from "./store.ts";
 import { getSession } from "./db.ts";
 
@@ -254,12 +257,12 @@ export async function embedNodesMissing(
         // v2.8.x: 批量部分失败 → 记录具体节点（此前静默，建图缺向量无感知）
         (failures) => {
           const sample = failures.slice(0, 3).map((f) => `id=${f.nodeId} chunks=${f.failedChunks}/${f.totalChunks}`).join("; ");
-          console.warn(`[graph-memory-pro] embedNodesMissing: ${failures.length}/${toEmbed.length} nodes failed batch embed (${sample})`);
+          log.warn(`embedNodesMissing: ${failures.length}/${toEmbed.length} nodes failed batch embed`, { sample });
         },
       );
     } catch (err) {
       // v2.8.x: 批量失败（Ollama 不可达/模型 404）不再静默——记录后回退单条，保证部分成功
-      console.warn(`[graph-memory-pro] embedNodesMissing: batch embed failed, falling back to single: ${(err as Error)?.message ?? String(err)}`);
+      log.warn("embedNodesMissing: batch embed failed, falling back to single", { error: (err as Error)?.message ?? String(err) });
     }
   }
 
@@ -268,10 +271,10 @@ export async function embedNodesMissing(
     try {
       const n = await embedNode(driver, embedFn!, item.nodeId, item.params, cfg);
       if (n > 0) done++;
-      else console.warn(`[graph-memory-pro] embedNodesMissing: empty text for node ${item.nodeId}, skipped`);
+      else log.warn("embedNodesMissing: empty text for node, skipped", { nodeId: item.nodeId });
     } catch (err) {
       // v2.8.x: 单条失败记录 nodeId + 原因（此前静默，根因不可见）
-      console.warn(`[graph-memory-pro] embedNodesMissing: node ${item.nodeId} embed failed: ${(err as Error)?.message ?? String(err)}`);
+      log.warn("embedNodesMissing: node embed failed", { nodeId: item.nodeId, error: (err as Error)?.message ?? String(err) });
     }
   }
   return done;

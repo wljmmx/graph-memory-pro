@@ -28,6 +28,9 @@ import { getSession } from "../store/db.ts";
 import {
   dedup, type DedupResult,
 } from "./dedup.ts";
+import { createLogger } from "../logger.ts";
+
+const log = createLogger("incremental-maintenance");
 
 export interface IncrementalMaintenanceResult {
   /** 处理的脏节点数 */
@@ -120,7 +123,7 @@ let _lockTimestamp = 0;
 function tryAcquireLock(): boolean {
   if (_incrementalRunning) {
     if (Date.now() - _lockTimestamp > LOCK_TIMEOUT_MS) {
-      console.warn("[graph-memory-pro] incremental maintenance lock stale, force-releasing");
+      log.warn("incremental maintenance lock stale, force-releasing");
       _incrementalRunning = false;
     } else {
       return false;
@@ -387,7 +390,7 @@ export async function runIncrementalMaintenance(
   const phasesRun: string[] = [];
 
   if (!tryAcquireLock()) {
-    console.log("[graph-memory-pro] incremental maintenance already running, skip");
+    log.info("incremental maintenance already running, skip");
     return {
       processedNodes: 0,
       dedup: { pairs: [], merged: 0 },
@@ -409,7 +412,7 @@ export async function runIncrementalMaintenance(
       };
     }
 
-    console.log(`[graph-memory-pro] incremental maintenance: ${dirtyNodeIds.length} dirty nodes`);
+    log.info(`incremental maintenance: ${dirtyNodeIds.length} dirty nodes`);
 
     // Phase 1 局部去重（仅对脏节点 + 同名候选）
     let dedupResult: DedupResult = { pairs: [], merged: 0 };
@@ -417,7 +420,7 @@ export async function runIncrementalMaintenance(
       dedupResult = await dedup(driver, cfg);
       phasesRun.push("dedup");
     } catch (err) {
-      console.warn(`[graph-memory-pro] incremental dedup failed: ${err}`);
+      log.warn("incremental dedup failed", { error: String(err) });
     }
 
     // Phase 5 局部 staleness
@@ -427,7 +430,7 @@ export async function runIncrementalMaintenance(
         stalenessResult = await incrementalStaleness(driver, dirtyNodeIds);
         phasesRun.push("staleness");
       } catch (err) {
-        console.warn(`[graph-memory-pro] incremental staleness failed: ${err}`);
+        log.warn("incremental staleness failed", { error: String(err) });
       }
     }
 
@@ -437,7 +440,7 @@ export async function runIncrementalMaintenance(
       importanceResult = await incrementalImportance(driver, cfg, dirtyNodeIds);
       if (importanceResult) phasesRun.push("importance");
     } catch (err) {
-      console.warn(`[graph-memory-pro] incremental importance failed: ${err}`);
+      log.warn("incremental importance failed", { error: String(err) });
     }
 
     // Phase 8 局部冲突消解
@@ -446,7 +449,7 @@ export async function runIncrementalMaintenance(
       conflictResult = await incrementalConflictResolution(driver, cfg, dirtyNodeIds);
       if (conflictResult) phasesRun.push("conflictResolution");
     } catch (err) {
-      console.warn(`[graph-memory-pro] incremental conflict resolution failed: ${err}`);
+      log.warn("incremental conflict resolution failed", { error: String(err) });
     }
 
     // Phase 9 局部边权重
@@ -455,7 +458,7 @@ export async function runIncrementalMaintenance(
       edgeWeightsResult = await incrementalEdgeWeights(driver, cfg, dirtyNodeIds);
       if (edgeWeightsResult) phasesRun.push("edgeWeights");
     } catch (err) {
-      console.warn(`[graph-memory-pro] incremental edge weights failed: ${err}`);
+      log.warn("incremental edge weights failed", { error: String(err) });
     }
 
     // 清除脏节点标记

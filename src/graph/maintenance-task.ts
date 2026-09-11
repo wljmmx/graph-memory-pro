@@ -137,10 +137,8 @@ function toSnapshot(task: MaintainTask): MaintainTaskSnapshot {
   };
 }
 
-export interface StartMaintainTaskOptions {
-  /** 每个 phase 之间无间隔（流水线连续执行）；保留字段以便未来节流 */
-  // phaseIntervalMs?: number;
-}
+/** 每个 phase 之间无间隔（流水线连续执行）；当前无可选项，保留类型以便未来扩展 */
+export type StartMaintainTaskOptions = Record<string, never>;
 
 /**
  * 启动一个后台图谱维护任务，立即返回 taskId（不等待流水线完成）。

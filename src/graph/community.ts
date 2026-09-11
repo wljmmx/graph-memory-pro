@@ -15,6 +15,9 @@ import { updateCommunities, upsertCommunitySummary, pruneCommunitySummaries } fr
 import { getSummarizedCommunityIds } from "../store/community.ts";
 import { ALL_REL_TYPES } from "../utils.ts";
 import { getCircuitBreaker } from "../engine/circuit-breaker.ts";
+import { createLogger } from "../logger.ts";
+
+const log = createLogger("community");
 
 async function getExistingRelTypes(session: Session): Promise<string[]> {
   const result = await session.run(`
@@ -581,7 +584,7 @@ export async function summarizeCommunities(
           const embedText = `${cleanedSummary}\n${members.map(m => m.name).join(", ")}`;
           embedding = await embedFn(embedText);
         } catch (err) {
-          console.warn(`[graph-memory-pro] community embedding failed for ${communityId}: ${err}`);
+          log.warn("community embedding failed", { communityId, error: String(err) });
         }
       }
 
@@ -593,13 +596,11 @@ export async function summarizeCommunities(
       // 不再继续 fallback 兜底，避免和 lossless-claw compaction 抢队列。
       if (isOverloadedError(err)) {
         overloadedHit = true;
-        console.warn(
-          `[graph-memory-pro] community summary hit LLM overload (${communityId}): ${err} — abort remaining communities, retry on next maintenance`,
-        );
+        log.warn("community summary hit LLM overload — abort remaining communities, retry on next maintenance", { communityId, error: String(err) });
         break;
       }
       // 非过载错误（超时/截断/网络等）→ 沿用原 fallback 兜底逻辑
-      console.warn(`[graph-memory-pro] community summary failed for ${communityId}: ${err} — fallback to member-based summary`);
+      log.warn("community summary failed — fallback to member-based summary", { communityId, error: String(err) });
       const fallback = buildFallbackSummary(communityId, members);
       let embedding: number[] | undefined;
       if (embedFn) {

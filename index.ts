@@ -30,7 +30,7 @@ import { initDriver, closeDriver, verifyWithRetry, verifyConnectivity, getDriver
 import { ensureSchema, getNodeCount, getEdgeCount, searchNodes, upsertNode, upsertEdge, findById, getNodesByTimeRange as getNodesByTimeRangeInternal } from "./src/store/store.ts";
 import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
-import { runMaintenance, type GraphHealthReport } from "./src/graph/maintenance.ts";
+import { runMaintenance } from "./src/graph/maintenance.ts";
 import { resolveBenchmarkDataDir } from "./src/benchmark/dataDir.ts";
 import { setExternalLogger, createLogger } from "./src/logger.ts";
 import { setTimingEnabled } from "./src/timing.ts";

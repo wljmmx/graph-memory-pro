@@ -17,6 +17,9 @@ import { embedNodesMissing } from "../store/embed-helper.ts";
 import { getCircuitBreaker } from "../engine/circuit-breaker.ts";
 import { getSessionMessages, getSessionMessagesPageTolerant, listAllSessionKeys, markMessagesProcessed } from "../store/messages.ts";
 import { heuristicExtract } from "../extractor/extract.ts";
+import { createLogger } from "../logger.ts";
+
+const log = createLogger("extract");
 
 /**
  * 后台三元组提取：从最近会话消息中提取实体/关系写入 Neo4j。
@@ -124,7 +127,7 @@ export async function writeExtractResult(
     await batchUpsertNodes(driver, nodesToWrite);
   } catch (e) {
     // v2.3.2 S2 稳定性修复: 批量失败时回退到逐条 upsert，保证部分成功（防数据丢失）
-    if (process.env.GM_DEBUG) console.debug(`  [graph-memory-pro] batchUpsertNodes failed, fallback to single upsert: ${e}`);
+    log.debug("batchUpsertNodes failed, fallback to single upsert", { error: String(e) });
     await Promise.allSettled(nodesToWrite.map(n => upsertNode(driver, n, cfg ?? undefined)));
   }
 
@@ -144,7 +147,7 @@ export async function writeExtractResult(
         cfg ?? undefined,
       );
     } catch (e) {
-      if (process.env.GM_DEBUG) console.debug(`  [graph-memory-pro] embed missing nodes failed: ${e}`);
+      log.debug("embed missing nodes failed", { error: String(e) });
     }
   }
 
@@ -171,7 +174,7 @@ export async function writeExtractResult(
     try {
       await batchUpsertEdges(driver, edgesToWrite);
     } catch (e) {
-      if (process.env.GM_DEBUG) console.debug(`  [graph-memory-pro] batchUpsertEdges failed, fallback to single upsert: ${e}`);
+      log.debug("batchUpsertEdges failed, fallback to single upsert", { error: String(e) });
       await Promise.allSettled(edgesToWrite.map(e => upsertEdge(driver, e)));
     }
   }
@@ -222,7 +225,7 @@ export async function extractInterimTexts(
       }
     } catch (err) {
       llmBreaker.recordFailure();
-      if (process.env.GM_DEBUG) console.debug(`  [graph-memory-pro] extract interim text failed: ${err}`);
+      log.debug("extract interim text failed", { error: String(err) });
     }
   }
   return extracted;

@@ -12,6 +12,9 @@
  */
 
 import type { EmbeddingConfig } from "../types.ts";
+import { createLogger } from "../logger.ts";
+
+const log = createLogger("embed");
 
 /** Embedding 函数签名 */
 export type EmbedFn = (text: string) => Promise<number[]>;
@@ -239,10 +242,7 @@ async function performEmbedRequest(
 
       if (!data.embeddings || data.embeddings.length === 0) {
         const respPreview = JSON.stringify(data).slice(0, 300);
-        console.warn(
-          `[graph-memory-pro:embed] Ollama /api/embed returned no embedding data`,
-          { model, responsePreview: respPreview, inputsLen: inputs.length },
-        );
+        log.warn("Ollama /api/embed returned no embedding data", { model, responsePreview: respPreview, inputsLen: inputs.length });
         throw new Error(
           `Ollama embedding API returned no embedding data (model=${model}, response=${respPreview})`,
         );
@@ -268,7 +268,7 @@ async function performEmbedRequest(
           if (!Number.isFinite(v[j])) { hasBad = true; break; }
         }
         if (hasBad) {
-          console.warn(`[graph-memory-pro:embed] 向量含 NaN/Infinity，已丢弃`, { model, inputIndex: i, inputLen: inputs.length });
+          log.warn("向量含 NaN/Infinity，已丢弃", { model, inputIndex: i, inputLen: inputs.length });
         } else {
           cleanVecs.push(v);
         }
@@ -434,9 +434,7 @@ export function createBatchEmbedFn(config: EmbeddingConfig): BatchEmbedFn {
           // v2.8.x: 记录错误到日志——此前完全静默，Ollama 模型 404 / baseURL 不可达时
           // 会表现为"全部嵌入失败"且无任何线索（如 gm_reembed failed=37319）。
           // 带 baseURL + 首个文本前缀，便于快速定位是连接/模型/输入问题。
-          console.warn(
-            `[graph-memory-pro:embed] batch sub-batch failed (model=${c.model}, baseURL=${c.baseURL}, ${idxs.length} texts): ${(err as Error)?.message ?? String(err)}`,
-          );
+          log.warn(`batch sub-batch failed (${idxs.length} texts)`, { model: c.model, baseURL: c.baseURL, error: (err as Error)?.message ?? String(err) });
         } finally {
           release();
         }

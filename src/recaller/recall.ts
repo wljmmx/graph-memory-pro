@@ -767,7 +767,10 @@ export class Recaller {
         embeddingModel: node.embeddingModel,
       }, this.cfg);
       logPhase("vec_embed", Date.now() - tSync, { context: "syncEmbed" });
-    } catch {}
+    } catch (e) {
+      // v2.4.x fix: syncEmbed 失败不再静默吞 — 此前 catch{} 导致向量缺失无人察觉（recall 静默降级）
+      log.warn("syncEmbed failed", { nodeId: node.id, error: String(e) });
+    }
   }
 }
 

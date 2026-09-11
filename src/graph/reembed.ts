@@ -2,6 +2,9 @@ import type { Driver } from "neo4j-driver";
 import type { EmbedFn, BatchEmbedFn } from "../engine/embed.ts";
 import type { GmConfig } from "../types.ts";
 import { embedNode, embedNodeBatch, type BatchEmbedNodeItem } from "../store/embed-helper.ts";
+import { createLogger } from "../logger.ts";
+
+const log = createLogger("reembed");
 
 /**
  * v2.8.x: 批内进度回调（gm_reembed 异步任务批内可观测性）。
@@ -147,11 +150,11 @@ export async function reEmbedNodes(
             driver, batchEmbedFn, items, cfg,
             (failures) => {
               const sample = failures.slice(0, 5).map((f) => `id=${f.nodeId} chunks=${f.failedChunks}/${f.totalChunks} reason=${f.reason}`).join("; ");
-              console.warn(
-                `[graph-memory-pro] reEmbed: ${failures.length}/${items.length} nodes failed batch embed` +
+              log.warn(
+                `reEmbed: ${failures.length}/${items.length} nodes failed batch embed` +
                   (emptyTextCount > 0 ? ` (${emptyTextCount} empty-text nodes skipped)` : "") +
-                  `, sample: ${sample}` +
                   `. Check embedding model "${embeddingModel ?? ""}" is pulled in Ollama, baseURL reachable, and dimensions match index (embed.ts expects ${cfg?.embedding?.dimensions ?? "configured dim"})`,
+                { sample },
               );
             },
           );
@@ -162,7 +165,7 @@ export async function reEmbedNodes(
           // 需要日志/诊断才能定位，如 Ollama 模型 404、baseURL 不可达）
           if (embedded === 0 && items.length > 0 && !lastError) {
             lastError = `batch embed returned 0/${items.length} vectors (check embedding model "${embeddingModel ?? ""}" is pulled in Ollama, baseURL and Ollama logs)`;
-            console.warn(`[graph-memory-pro] reEmbed: ${lastError}`);
+            log.warn(`reEmbed: ${lastError}`);
           }
           await new Promise((r) => setTimeout(r, 200));
           continue;
@@ -201,11 +204,9 @@ export async function reEmbedNodes(
             const msg = (err as Error)?.message ?? String(err);
             if (!lastError) lastError = msg;
             if (failed <= 5) {
-              console.warn(
-                `[graph-memory-pro] reEmbed: single-node embed failed (id=${(rec.get("id") as string) ?? "?"}): ${msg}`,
-              );
+              log.warn(`reEmbed: single-node embed failed`, { nodeId: (rec.get("id") as string) ?? "?", error: msg });
             } else if (failed === 6) {
-              console.warn(`[graph-memory-pro] reEmbed: ... further failures suppressed (total so far: ${failed})`);
+              log.warn("reEmbed: ... further failures suppressed", { totalSoFar: failed });
             }
           }
         }
@@ -235,7 +236,7 @@ export async function reEmbedNodes(
       advanced = false;
       lastBatchLen = 0;
       if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-        console.warn(`[graph-memory-pro] reEmbed: ${MAX_CONSECUTIVE_FAILURES} consecutive failures, aborting: ${lastError}`);
+        log.warn(`reEmbed: ${MAX_CONSECUTIVE_FAILURES} consecutive failures, aborting`, { error: lastError });
         break;
       }
       // 瞬态失败（连接抖动 / Ollama 503）退避后重试同一批次
@@ -364,8 +365,8 @@ export async function detectAndMigrateEmbeddings(
       );
       cleared = clearResult.records[0]?.get("cleared")?.toNumber?.() ?? 0;
 
-      console.log(
-        `[graph-memory-pro] G-4 migration: model ${configuredModel}, cleared ${cleared} nodes (was: ${Array.from(modelDistribution.entries()).map(([m, c]) => `${m}=${c}`).join(", ")})` +
+      log.info(
+        `G-4 migration: model ${configuredModel}, cleared ${cleared} nodes (was: ${Array.from(modelDistribution.entries()).map(([m, c]) => `${m}=${c}`).join(", ")})` +
           (missingEmbedding > 0 ? `, backfilling ${missingEmbedding} nodes with embeddingModel but no embedding` : ""),
       );
     } finally {

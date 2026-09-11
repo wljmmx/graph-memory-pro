@@ -17,7 +17,8 @@ import { parseArgs } from "node:util";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { initDriver, verifyWithRetry, closeDriver, withDatabase } from "../store/db.ts";
+import { initDriver, verifyWithRetry, closeDriver, withDatabase, ensureDatabase, getNeo4jEdition, setCachedEdition } from "../store/db.ts";
+import { resolveBenchmarkDatabase } from "./database.ts";
 import { ensureSchema } from "../store/store.ts";
 import { Recaller } from "../recaller/recall.ts";
 import { createCompleteFn } from "../engine/llm.ts";
@@ -25,6 +26,9 @@ import { createEmbedFn, createBatchEmbedFn } from "../engine/embed.ts";
 import { runBenchmark, formatAggregateReport } from "./runner.ts";
 import { resolveBenchmarkDataDir } from "./dataDir.ts";
 import type { GmConfig } from "../types.ts";
+import { createLogger } from "../logger.ts";
+
+const log = createLogger("benchmark-cli");
 
 /**
  * 从 ~/.openclaw/openclaw.json 读取 graph-memory-pro 插件配置。
@@ -59,7 +63,7 @@ function readConfigFromOpenclaw(): GmConfig | null {
     const neo4j = pluginConfig.neo4j;
     const hasNeo4j = neo4j && typeof neo4j === "object" && typeof (neo4j as { uri?: unknown }).uri === "string";
     if (!hasNeo4j) {
-      console.warn("[benchmark] openclaw.json 中未找到 graph-memory-pro 的 neo4j 配置，忽略 openclaw.json");
+      log.warn("[benchmark] openclaw.json 中未找到 graph-memory-pro 的 neo4j 配置，忽略 openclaw.json");
       return null;
     }
     const cfg = pluginConfig as unknown as GmConfig;
@@ -74,7 +78,7 @@ function readConfigFromOpenclaw(): GmConfig | null {
       pagerankIterations: cfg.pagerankIterations ?? 20,
     };
   } catch (err) {
-    console.warn(`[benchmark] 读取 openclaw.json 失败: ${(err as Error)?.message ?? err}`);
+    log.warn("[benchmark] 读取 openclaw.json 失败", { error: (err as Error)?.message ?? String(err) });
     return null;
   }
 }
@@ -83,19 +87,19 @@ function loadConfig(configPath?: string): GmConfig {
   // 1. 显式 --config 指定的文件（最高优先级）
   if (configPath) {
     const raw = readFileSync(configPath, "utf-8");
-    console.log(`[benchmark] 使用 --config 配置: ${configPath}`);
+    log.info(`[benchmark] 使用 --config 配置: ${configPath}`);
     return JSON.parse(raw) as GmConfig;
   }
 
   // 2. 优先读取 openclaw.json 插件配置（plugins.entries.graph-memory-pro.config）
   const fromOpenclaw = readConfigFromOpenclaw();
   if (fromOpenclaw) {
-    console.log(`[benchmark] 使用 openclaw.json 的 graph-memory-pro 插件配置`);
+    log.info(`[benchmark] 使用 openclaw.json 的 graph-memory-pro 插件配置`);
     return fromOpenclaw;
   }
 
   // 3. 兜底：环境变量构建最小配置
-  console.log("[benchmark] 未找到 openclaw.json 配置，使用环境变量 + 默认值");
+  log.info("[benchmark] 未找到 openclaw.json 配置，使用环境变量 + 默认值");
   const neo4jUri = process.env.GM_NEO4J_URI ?? "bolt://localhost:7687";
   const neo4jUser = process.env.GM_NEO4J_USER ?? "neo4j";
   const neo4jPassword = process.env.GM_NEO4J_PASSWORD ?? "";
@@ -151,35 +155,52 @@ async function main(): Promise<void> {
 
   const datasets: string[] | "all" = values.datasets === "all" ? "all" : values.datasets.split(",");
 
-  console.log("=== Graph Memory Pro Benchmark ===");
-  console.log(`Neo4j: ${cfg.neo4j.uri}`);
-  console.log(`LLM: ${cfg.llm?.model ?? "(none)"}`);
-  console.log(`Embedding: ${cfg.embedding?.model ?? "(none)"}`);
-  console.log(`Datasets: ${datasets === "all" ? "all" : (datasets as string[]).join(", ")}`);
-  console.log(`Max cases: ${maxCases || "all"}`);
-  console.log(`Build graph: ${buildGraph}`);
-  console.log(`Data dir: ${dataDir}`);
-  console.log("");
+  log.info("=== Graph Memory Pro Benchmark ===");
+  log.info(`Neo4j: ${cfg.neo4j.uri}`);
+  log.info(`LLM: ${cfg.llm?.model ?? "(none)"}`);
+  log.info(`Embedding: ${cfg.embedding?.model ?? "(none)"}`);
+  log.info(`Datasets: ${datasets === "all" ? "all" : (datasets as string[]).join(", ")}`);
+  log.info(`Max cases: ${maxCases || "all"}`);
+  log.info(`Build graph: ${buildGraph}`);
+  log.info(`Data dir: ${dataDir}`);
+  log.info("");
 
   // 1. 连接 Neo4j
   const driver = initDriver(cfg.neo4j);
   const ok = await verifyWithRetry(driver);
   if (!ok) {
-    console.error("Neo4j connection failed");
+    log.error("Neo4j connection failed");
     closeDriver();
     process.exit(1);
+  }
+
+  // v2.9.0 断链修复（①）：CLI 是独立 tsx 进程，不会经过插件主进程 index.ts 的
+  // getNeo4jEdition/setCachedEdition 链路——不检测 edition，withDatabase 闸门恒关，
+  // 物理切库静默退化为"直接执行"（benchmark 数据落生产库）。此处补齐。
+  try {
+    const edition = await getNeo4jEdition(driver);
+    setCachedEdition(edition);
+    log.info(`Neo4j edition: ${edition ?? "(unknown)"} (multi-database isolation: ${edition === "Enterprise" ? "enabled" : "not available — falling back to logical isolation"})`);
+  } catch (err) {
+    log.warn("Neo4j edition detection failed (multi-db isolation disabled, logical isolation fallback)", { error: String(err) });
   }
 
   // 2. 初始化 schema
   const embedDim = cfg.embedding?.dimensions ?? 1024;
 
-  // v2.4.0: benchmark 专用数据库（默认与生产一致；设置 cfg.benchmark.database 时物理隔离，
-  //         需 Neo4j Enterprise 多库）。ensureSchema + runBenchmark 全部在该库上下文中执行。
-  const benchDatabase = cfg.benchmark?.database ?? cfg.neo4j.database ?? "neo4j";
+  // v2.4.0: benchmark 专用数据库（默认 benchmarks 库；需 Neo4j Enterprise 多库）。
+  // ensureSchema + runBenchmark 全部在该库上下文中执行。
+  // v2.9.0 断链修复（②）：空串/缺失配置统一回落到 benchmarks 默认库名（原先 "??" 不兜空串）。
+  // v2.9.0 断链修复（③）：Enterprise 下目标库不存在时自动 CREATE DATABASE（原先静默失败）。
+  const benchDatabase = resolveBenchmarkDatabase(cfg);
+  if (benchDatabase !== (cfg.neo4j.database || "neo4j")) {
+    log.info(`benchmark database: ${benchDatabase}`);
+  }
   try {
+    await ensureDatabase(driver, benchDatabase);
     await withDatabase(benchDatabase, () => ensureSchema(driver, embedDim));
   } catch (err) {
-    console.warn(`Schema init failed: ${err}`);
+    log.warn("Schema init failed", { error: String(err) });
   }
 
   // 3. 初始化 LLM / Embed
@@ -205,21 +226,21 @@ async function main(): Promise<void> {
       batchEmbedFn: batchEmbed ?? undefined,
     }));
 
-    console.log("");
-    console.log(formatAggregateReport(result));
-    console.log("");
-    console.log(`Total duration: ${result.totalDurationMs}ms`);
+    log.info("");
+    log.info(formatAggregateReport(result));
+    log.info("");
+    log.info(`Total duration: ${result.totalDurationMs}ms`);
 
     process.exit(0);
   } catch (err) {
-    console.error(`Benchmark failed: ${err}`);
+    log.error(`Benchmark failed: ${err}`);
     process.exit(1);
   } finally {
     closeDriver();
   }
 }
 
-main().catch(err => {
-  console.error(err);
+main().catch((err) => {
+  log.error(String(err));
   process.exit(1);
 });

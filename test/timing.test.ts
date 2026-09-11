@@ -110,8 +110,16 @@ describe("recordPhaseTiming / printPhaseDistribution", () => {
 });
 
 describe("isTimingEnabled / setTimingEnabled", () => {
+  let savedDebug: string | undefined;
+  beforeEach(() => {
+    // 隔离外部环境：本组用例断言的是显式开关，不应受运行环境 GM_DEBUG 影响
+    savedDebug = process.env.GM_DEBUG;
+    delete process.env.GM_DEBUG;
+  });
   afterEach(() => {
     setTimingEnabled(false);
+    if (savedDebug === undefined) delete process.env.GM_DEBUG;
+    else process.env.GM_DEBUG = savedDebug;
   });
 
   it("默认关闭", () => {
@@ -135,9 +143,17 @@ describe("isTimingEnabled / setTimingEnabled", () => {
 });
 
 describe("logPhase", () => {
+  let savedDebug: string | undefined;
+  beforeEach(() => {
+    // 隔离外部环境：本组用例断言的是显式开关，不应受运行环境 GM_DEBUG 影响
+    savedDebug = process.env.GM_DEBUG;
+    delete process.env.GM_DEBUG;
+  });
   afterEach(() => {
     setTimingEnabled(false);
     resetAllDistributions();
+    if (savedDebug === undefined) delete process.env.GM_DEBUG;
+    else process.env.GM_DEBUG = savedDebug;
   });
 
   it("timing 关闭时不记录", () => {

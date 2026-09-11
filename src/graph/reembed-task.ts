@@ -18,6 +18,9 @@ import type { Driver } from "neo4j-driver";
 import type { EmbedFn, BatchEmbedFn } from "../engine/embed.ts";
 import type { GmConfig } from "../types.ts";
 import { reEmbedNodes } from "./reembed.ts";
+import { createLogger } from "../logger.ts";
+
+const log = createLogger("reembed-task");
 
 export type ReembedTaskStatus = "queued" | "running" | "done" | "failed" | "cancelled";
 
@@ -179,9 +182,7 @@ export function startReembedTask(
       task.phase = "counting";
       task.updatedAt = Date.now();
       const model = cfg.embedding?.model;
-      console.log(
-        `[graph-memory-pro] reembed-task ${task.taskId}: started, totalNodes=${task.totalNodes}, totalBatches=${task.totalBatches}, batchSize=${task.batchSize}, model=${model ?? "unset"}`,
-      );
+      log.info(`reembed-task ${task.taskId}: started`, { totalNodes: task.totalNodes, totalBatches: task.totalBatches, batchSize: task.batchSize, model: model ?? "unset" });
 
       if (task.totalNodes === 0) {
         task.status = "done";
@@ -229,9 +230,7 @@ export function startReembedTask(
         }
 
         const batchElapsedMs = Date.now() - batchStart;
-        console.log(
-          `[graph-memory-pro] reembed-task ${task.taskId}: batch ${batchNo}/${task.totalBatches} done in ${batchElapsedMs}ms (scanned=${res.totalScanned}, embedded=${res.reEmbedded}, failed=${res.failed}, skipped=${res.skipped}${res.lastError ? `, lastError=${res.lastError}` : ""})`,
-        );
+        log.info(`reembed-task ${task.taskId}: batch ${batchNo}/${task.totalBatches} done in ${batchElapsedMs}ms`, { scanned: res.totalScanned, embedded: res.reEmbedded, failed: res.failed, skipped: res.skipped, lastError: res.lastError ?? undefined });
         task.lastMessage = `batch ${batchNo}/${task.totalBatches} done (${res.reEmbedded} embedded, ${batchElapsedMs}ms)`;
         task.phase = "batch-done";
 
@@ -293,16 +292,13 @@ export function startReembedTask(
       }
       task.finishedAt = Date.now();
       task.updatedAt = Date.now();
-      console.log(
-        `[graph-memory-pro] reembed-task ${task.taskId}: finished with status=${task.status} (processed=${task.processedNodes}/${task.totalNodes}, embedded=${task.reEmbedded}, failed=${task.failed}, skipped=${task.skipped})` +
-          (task.lastError ? ` lastError=${task.lastError}` : ""),
-      );
+      log.info(`reembed-task ${task.taskId}: finished`, { status: task.status, processed: task.processedNodes, totalNodes: task.totalNodes, embedded: task.reEmbedded, failed: task.failed, skipped: task.skipped, lastError: task.lastError ?? undefined });
     } catch (err: unknown) {
       task.status = "failed";
       task.lastError = (err as Error)?.message ?? String(err);
       task.finishedAt = Date.now();
       task.updatedAt = Date.now();
-      console.error(`[graph-memory-pro] reembed-task ${task.taskId}: failed with exception: ${task.lastError}`);
+      log.error(`reembed-task ${task.taskId}: failed with exception`, { error: task.lastError });
     }
   })();
 

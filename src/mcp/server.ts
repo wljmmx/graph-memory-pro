@@ -23,6 +23,9 @@ import type { GmConfig } from "../types.ts";
 import type { CompleteFn } from "../engine/llm.ts";
 import type { EmbedFn, BatchEmbedFn } from "../engine/embed.ts";
 import type { Recaller } from "../recaller/recall.ts";
+import { createLogger } from "../logger.ts";
+
+const log = createLogger("mcp-server");
 import {
   upsertNode, findById, searchNodes, getTopNodes, getNodesByType,
   getNodeCount, getEdgeCount, getEdgesForNodes,
@@ -107,8 +110,6 @@ export async function startMcpServer(
   const path = cfg.mcp?.path ?? "/mcp";
   const authToken = cfg.mcp?.authToken;
   const enabledTools = cfg.mcp?.enabledTools; // 省略 = 全部启用
-  // v2.6.1: 维护类工具超时（gm_maintain / gm_reembed / gm_tune），默认 120s，可配
-  const maintenanceTimeoutMs = cfg.background?.maintenanceTimeoutMs ?? 120_000;
   // v2.8.x: gm_reembed 全量重嵌入独立超时（默认 30min）——全量重嵌入量级远大于维护，
   // 120s 只能处理约 4 批×50=200 节点（本地模型每批约 30s）就会被截断。
   // 超时后通过 AbortSignal 通知 reEmbedNodes 优雅停止（保留已嵌入节点）。
@@ -550,17 +551,35 @@ export async function startMcpServer(
         }
         try {
           const { runBenchmark } = await import("../benchmark/runner.ts");
-          const result = await withTimeout(
-            () => runBenchmark(recaller, driver, cfg, {
-              datasets: datasets,
-              maxCases: maxCases ?? cfg.benchmark?.maxCases ?? 50,
-              buildGraph: buildGraph ?? cfg.benchmark?.buildGraph ?? true,
-            }),
-            // v2.8.x: 整次评测外层超时可配（此前硬编码 300s）；默认 5min，50 cases × 30s 最坏 25min，
-            // 数据集大或 LLM 慢时可调大 benchmark.timeoutMs
-            cfg.benchmark?.timeoutMs ?? 300_000,
-            "gm_benchmark",
-          );
+          const { withDatabase, ensureDatabase } = await import("../store/db.ts");
+          const { resolveBenchmarkDatabase } = await import("../benchmark/database.ts");
+          // v2.9.0 断链修复（④）：与 CLI 对齐——解析目标隔离库名，Enterprise 下确保库存在并切库执行。
+          // 此前 MCP 路径裸跑 runBenchmark，benchmark 节点直接写进生产库。
+          // 插件主进程启动时已 setCachedEdition，withDatabase 闸门在此生效。
+          const benchDatabase = resolveBenchmarkDatabase(cfg);
+          if (benchDatabase !== (cfg.neo4j?.database || "neo4j")) {
+            try {
+              await ensureDatabase(driver, benchDatabase);
+            } catch (err) {
+              return { content: [{ type: "text", text: `Failed to ensure benchmark database '${benchDatabase}': ${(err as Error).message}` }] };
+            }
+          }
+          const result = await withDatabase(benchDatabase, async () => {
+            // schema 幂等（IF NOT EXISTS），隔离库首次使用时在此补建
+            const { ensureSchema } = await import("../store/store.ts");
+            await ensureSchema(driver, cfg.embedding?.dimensions ?? 1024);
+            return withTimeout(
+              () => runBenchmark(recaller, driver, cfg, {
+                datasets: datasets,
+                maxCases: maxCases ?? cfg.benchmark?.maxCases ?? 50,
+                buildGraph: buildGraph ?? cfg.benchmark?.buildGraph ?? true,
+              }),
+              // v2.8.x: 整次评测外层超时可配（此前硬编码 300s）；默认 5min，50 cases × 30s 最坏 25min，
+              // 数据集大或 LLM 慢时可调大 benchmark.timeoutMs
+              cfg.benchmark?.timeoutMs ?? 300_000,
+              "gm_benchmark",
+            );
+          });
           return {
             content: [{ type: "text", text: `Benchmark done: P1=${(result.aggregate.avgP1 * 100).toFixed(2)}%, MRR=${result.aggregate.avgMrr.toFixed(4)}` }],
             structuredContent: asStructured(result),
@@ -679,7 +698,7 @@ export async function startMcpServer(
       const onError = (err: NodeJS.ErrnoException) => {
         httpServer.removeListener("listening", onListening);
         if (err.code === "EADDRINUSE" && attempt < MAX_PORT_RETRIES) {
-          console.warn(`[graph-memory-pro] MCP server port ${tryPort} in use (EADDRINUSE), trying ${tryPort + 1}...`);
+          log.warn("MCP server port in use (EADDRINUSE), trying next", { port: tryPort, next: tryPort + 1 });
           resolve();
         } else {
           listenError = err;
@@ -689,7 +708,7 @@ export async function startMcpServer(
       const onListening = () => {
         httpServer.removeListener("error", onError);
         actualPort = tryPort;
-        console.log(`[graph-memory-pro] MCP server listening on http://${host}:${tryPort}${path}`);
+        log.info("MCP server listening", { url: `http://${host}:${tryPort}${path}` });
         resolve();
       };
       httpServer.once("error", onError);
@@ -709,7 +728,7 @@ export async function startMcpServer(
       // 先关 SDK 层，再优雅关 HTTP server（超时强回收）
       try { await mcpServer.close(); } catch { /* ignore */ }
       await closeHttpServer(httpServer, 2000);
-      console.log("[graph-memory-pro] MCP server closed");
+      log.info("MCP server closed");
     },
   };
 }

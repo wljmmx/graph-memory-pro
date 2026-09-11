@@ -102,7 +102,13 @@ export function getTraceId(): string | null {
 // ── Logger 实现 ──────────────────────────────────────────
 
 class StructuredLogger implements Logger {
-  constructor(private readonly namespace: string) {}
+  private readonly namespace: string;
+
+  // v2.8.x fix: 不用 TS parameter property（`constructor(private readonly x)`）——
+  // Node 原生 TS strip-only 模式不支持该语法，测试里 require() 直接加载 .ts 会炸。
+  constructor(namespace: string) {
+    this.namespace = namespace;
+  }
 
   getNamespace(): string {
     return this.namespace;

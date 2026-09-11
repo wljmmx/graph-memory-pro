@@ -113,16 +113,25 @@ export async function startApiServer(
       return;
     }
 
-    // v2.8.x: gm_reembed 流式进度端点（SSE）——特殊处理，路由 handler 模型只能返回
-    // {status, body} JSON，无法表达流；此处直接接管 res 写 SSE 事件。
-    if (req.method === "GET" && pathname === "/api/reembed/stream") {
-      await handleReembedStream(req, res, url.searchParams.get("taskId") ?? "");
-      return;
-    }
-
-    // v2.8.x: gm_maintain 流式进度端点（SSE，与 reembed 对称）
-    if (req.method === "GET" && pathname === "/api/maintain/stream") {
-      await handleMaintainStream(req, res, url.searchParams.get("taskId") ?? "");
+    // v2.8.x: gm_reembed / gm_maintain 流式进度端点（SSE）——特殊处理，路由 handler
+    // 模型只能返回 {status, body} JSON，无法表达流；此处直接接管 res 写 SSE 事件。
+    // 安全修复（P1）：这两个端点此前在鉴权检查之前直接 return，导致启用 authToken
+    // 时仍可匿名拉流。现与其他端点保持一致——启用 authToken 时要求 X-Auth-Token 头。
+    if (req.method === "GET" && (pathname === "/api/reembed/stream" || pathname === "/api/maintain/stream")) {
+      if (authToken) {
+        const provided = req.headers["x-auth-token"] as string | undefined;
+        if (provided !== authToken) {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "unauthorized" }));
+          return;
+        }
+      }
+      const taskId = url.searchParams.get("taskId") ?? "";
+      if (pathname === "/api/reembed/stream") {
+        await handleReembedStream(req, res, taskId);
+      } else {
+        await handleMaintainStream(req, res, taskId);
+      }
       return;
     }
 

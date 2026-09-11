@@ -2,6 +2,10 @@
  * graph-memory-pro — 延迟分布统计
  */
 
+import { createLogger } from "./logger.ts";
+
+const log = createLogger("timing");
+
 export type TimingPhase =
   | "recall_total"
   | "recall_precise"
@@ -185,6 +189,9 @@ export function logPhase(phase: TimingPhase, ms: number, ctx?: Record<string, un
       parts.push(`${k}=${v}`);
     }
   }
-  console.log(`[gm-timing] ${parts.join(" ")}`);
+  // v2.8.x: 走统一 logger。用 info 级别——timing 仅显式开启时才输出（setTimingEnabled/GM_DEBUG），
+  // info 是默认阈值，保证开启即可见；默认 info 级别下 debug 会被过滤（曾致 test/timing.test.ts 断言失败）。
+  // 输出行仍包含 phase / 耗时 / ctx 字段，兼容既有对输出文本的子串断言（spy console.log）。
+  log.info(`[gm-timing] ${parts.join(" ")}`);
 }
 

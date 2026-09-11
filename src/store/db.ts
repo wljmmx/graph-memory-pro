@@ -4,6 +4,9 @@
 
 import neo4j, { Driver, Session, auth } from "neo4j-driver";
 import type { Neo4jConfig } from "../types.ts";
+import { createLogger } from "../logger.ts";
+
+const log = createLogger("store:db");
 
 const RETRY_DELAYS = [1000, 3000, 5000];
 
@@ -284,12 +287,44 @@ export async function withDatabase<T>(database: string, fn: () => Promise<T>): P
   if (!cachedEditionSupportsMultiDb()) {
     return fn();
   }
+  // v2.9.0: 空数据库名 = 无处可切，直接执行（防御空串配置穿透——"" 不会报“连接不存在的库”错，而是落到默认库混入生产数据）
+  if (!database) return fn();
   const prev = _activeDatabase;
   _activeDatabase = database;
   try {
     return await fn();
   } finally {
     _activeDatabase = prev;
+  }
+}
+
+/**
+ * v2.9.0: 确保目标数据库存在（Neo4j Enterprise 多库）。
+ *
+ * SHOW DATABASES 检查；不存在则 CREATE DATABASE（需 system 库权限）并等待 online。
+ * Community/未知 edition 或空库名：直接跳过（调用方回落逻辑隔离）。
+ * 在 withDatabase 之前调用，避免 benchmark 连上不存在的库才报错（此前静默落生产库的根因之一）。
+ */
+export async function ensureDatabase(driver: Driver, database: string): Promise<void> {
+  if (!database || !cachedEditionSupportsMultiDb()) return;
+  const session = driver.session({ database: "system" });
+  try {
+    const existing = await session.run("SHOW DATABASES YIELD name RETURN name");
+    const names = existing.records.map((r) => String(r.get("name")));
+    if (names.includes(database)) return;
+
+    log.info(`database '${database}' not found, creating`);
+    await session.run(`CREATE DATABASE \`${database}\``);
+
+    // 等待 online（CREATE DATABASE 是异步的，新库秒级上线）
+    for (let i = 0; i < 30; i++) {
+      const st = await session.run("SHOW DATABASES YIELD currentStatus WHERE name = $db", { db: database });
+      if (st.records.length > 0 && st.records[0].get("currentStatus") === "online") return;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    throw new Error(`database '${database}' not online 30s after CREATE DATABASE`);
+  } finally {
+    await session.close();
   }
 }
 

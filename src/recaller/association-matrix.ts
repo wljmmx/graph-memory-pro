@@ -22,6 +22,9 @@
  */
 
 import type { GmConfig } from "../types.ts";
+import { createLogger } from "../logger.ts";
+
+const log = createLogger("association-matrix");
 
 export interface AssociationMatrixConfig {
   enabled: boolean;
@@ -376,11 +379,7 @@ export class AssociationMatrix {
     // 导致 M 全零矩阵（含对角 1 也被清零）。此处检查并跳过 NaN 向量。
     if (hasNaN(vec)) {
       // v2.5.2: 记录日志，避免静默丢弃学习信号
-      console.warn(`[graph-memory-pro:association-matrix] NaN 向量被拦截，未提交 M 更新`, {
-        vecLen: vec.length,
-        reward,
-        timestamp: Date.now(),
-      });
+      log.warn("NaN 向量被拦截，未提交 M 更新", { vecLen: vec.length, reward, timestamp: Date.now() });
       return { applied: false, neighborhoodGain: 0 };
     }
 
@@ -596,7 +595,7 @@ export class AssociationMatrix {
     // v2.5.3: 写盘前防御 —— 若已学习过但 M 全 0（死锁），重置为单位矩阵，
     // 防止坏状态被持久化永久化。
     if (this.t > 0 && isAllZero(this.M)) {
-      console.warn("[association-matrix] serialize: M 全 0（死锁），重置为单位矩阵");
+      log.warn("serialize: M 全 0（死锁），重置为单位矩阵");
       this.M = createIdentityMatrix(this.dim);
       this.mW = new Float32Array(this.dim * this.dim);
       this.vW = new Float32Array(this.dim * this.dim);
@@ -661,7 +660,7 @@ export class AssociationMatrix {
     // （曾因旧版 fromJsonArray 静默归零导致）。重置为单位矩阵并清空动量，
     // 否则零梯度 → Adam 动量恒 0 → 矩阵永远学不回来。
     if (this.t > 0 && isAllZero(this.M)) {
-      console.warn("[association-matrix] deserialize: M 全 0（状态损坏），重置为单位矩阵并清空动量");
+      log.warn("deserialize: M 全 0（状态损坏），重置为单位矩阵并清空动量");
       this.M = createIdentityMatrix(dim);
       this.mW = new Float32Array(dim * dim);
       this.vW = new Float32Array(dim * dim);

@@ -25,3 +25,7 @@ actionlint
 
 
 *.bak
+
+# generated indexes (2026-09-11)
+.codegraph/
+.env
