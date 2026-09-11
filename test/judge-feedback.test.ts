@@ -16,6 +16,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { GmNode, GmConfig } from "../src/types.ts";
 import { JudgeManager, parseLlmJudgeJson } from "../src/recaller/judge.ts";
+import { AssociationMatrix } from "../src/recaller/association-matrix.ts";
 import { mockDriver } from "./helpers/neo4j-mock.ts";
 
 // ── vi.mock：拦截 store 模块，把 upsertFeedback 替换为可断言的 vi.fn ──
@@ -447,7 +448,7 @@ describe("Recaller.processFeedback 集成测试", () => {
     const recaller = new Recaller(driver as any, mkConfig());
     const jm = new JudgeManager({ asyncMode: false, judgeWarmupFeedbacks: 1 });
     recaller.setJudgeManager(jm);
-    const { AssociationMatrix } = require("../src/recaller/association-matrix.ts") as typeof import("../src/recaller/association-matrix.ts");
+    // 静态 import（原 require() 在 ESM 测试环境不可用，Node20 下 SyntaxError）
     const am = new AssociationMatrix(4, { enabled: true, warmupFeedbacks: 1 });
     recaller.setAssociationMatrix(am);
     if (embedFn) recaller.setEmbedFn(embedFn);
