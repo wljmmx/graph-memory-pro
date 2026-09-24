@@ -1,24 +1,24 @@
 /**
  * graph-memory-pro — Neo4j Knowledge Graph Memory Plugin
  *
- * Version: 2.3.2
+ * Version: 2.4.4
  *
  * 架构定位（A 方案）:
  *   - 不占用 slots（memory/contextEngine）
  *   - 不再使用 before_prompt_build 钩子（避免与 contextEngine 双注入）
  *   - 通过 registerMemoryCorpusSupplement 把图谱暴露给 memory-core 的 memory_search
  *   - 三元组提取 / 图谱维护通过 registerService 后台运行，不阻塞主流程
- *   - HTTP 路由通过 api.registerHttpRoute 注册
+ *   - HTTP API 由内置 http server 自建（默认 127.0.0.1:7850），未走 registerHttpRoute
  *   - 保留专业工具：gm_record / gm_maintain / gm_reembed（gm_search/gm_stats 已合并）
  *
  * Latest OpenClaw Plugin SDK compliance:
  * - definePluginEntry from openclaw/plugin-sdk/plugin-entry
- * - api.config 用于配置加载（不读文件系统）
+ * - api.config/api.pluginConfig 用于配置加载（不读文件系统）
  * - api.logger 用于结构化日志
- * - api.registerHttpRoute / registerService / registerMemoryCorpusSupplement
+ * - api.registerTool / registerService / registerMemoryCorpusSupplement
  */
 
-import { definePluginEntry, buildJsonPluginConfigSchema } from "openclaw/plugin-sdk/plugin-entry";
+import { definePluginEntry, buildJsonPluginConfigSchema, type OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import { Type } from "typebox";
 import type { Driver } from "neo4j-driver";
 import type { GmConfig, GmNode, GmEdge, EdgeType, NodeType } from "./src/types.ts";
@@ -66,22 +66,6 @@ interface AgentMessageLike {
   text?: string;
   body?: string;
 }
-
-interface AgentEndEvent {
-  messages?: AgentMessageLike[];
-}
-
-interface AgentEndCtx {
-  sessionKey?: string;
-  sessionId?: string;
-  // v2.8.x: 与 corpusSupplement.search/get 的 write 端 key 对齐。
-  //   write 端用 params.agentSessionKey 写入 SessionRecallCache（index.ts search/get），
-  //   agent_end 若只取 sessionKey/sessionId 会漏掉 agentSessionKey，导致
-  //   consume(sessionKey) 返回 null → 完整 judge 与学习曲线采样永不触发。
-  agentSessionKey?: string;
-}
-
-// ─── 全局状态 ──────────────────────────────────────────
 
 // v2.5.4: 触发 after_tool_call 即时反馈的 memory 相关工具名。
 // 这些工具调用后可能产生 get()/search() 展开信号，需即时更新 M。
@@ -1784,8 +1768,7 @@ export default definePluginEntry({
     })),
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   }) as any),
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  register(api: any) {
+  register(api: OpenClawPluginApi) {
     log.info("register() called by Gateway");
     const logger = api.logger ?? console;
     // v2.2.0 P2-1：把 SDK logger 注入到结构化日志模块
@@ -1793,7 +1776,7 @@ export default definePluginEntry({
 
     // v2.3.5 fix: SDK 可能不触发 gateway_start hook，导致 driver 永远不初始化。
     // 在 register() 中直接从 api.pluginConfig 检测并启动初始化（fire-and-forget）。
-    const eventCfg = api.pluginConfig ?? api.config;
+    const eventCfg = (api.pluginConfig ?? api.config) as GmConfig | undefined;
     if (eventCfg?.neo4j?.uri) {
       log.info(`config detected in register(): neo4j.uri=${eventCfg.neo4j.uri}`);
       doGatewayInit(api, logger).catch(err => {
@@ -1804,14 +1787,14 @@ export default definePluginEntry({
     }
 
     // ── Gateway 启动时初始化（fallback） ──────────────────────
-    api.registerHook("gateway_start", async (_event: unknown) => {
+    api.on("gateway_start", async () => {
       log.info("gateway_start hook fired");
       if (_driver) {
         log.info("gateway_start: already initialized via register(), skipping");
         return;
       }
       await doGatewayInit(api, logger);
-    }, { name: "graph-memory-pro-init" });
+    });
 
     // ── Gateway 停止时清理 ──────────────────────
     // v2.3.5 fix: compaction 会触发 gateway_stop → 再 register()，导致全量重建竞态。
@@ -1819,7 +1802,7 @@ export default definePluginEntry({
     //   - driver: Neo4j 连接池创建成本高（~100ms），compaction 后立即复用
     //   - API server: 端口已绑定，关了再开会 EADDRINUSE
     //   - 真正的进程退出时 OS 会自动回收连接和端口
-    api.registerHook("gateway_stop", async () => {
+    api.on("gateway_stop", async () => {
       log.info("gateway_stop: soft cleanup (preserving driver + API server for compaction resilience)");
       // v2.3.6: compaction/停止前持久化关联矩阵 M（避免在线学习成果丢失）
       try {
@@ -1837,7 +1820,7 @@ export default definePluginEntry({
       resetSessionRecallCache();
       // 注意：不再 closeDriver() / 关闭 API server / null 化组件
       // compaction 后 register() 会检测到 _driver 已存在并跳过重复初始化
-    }, { name: "graph-memory-pro-cleanup" });
+    });
 
     // ── v2.3.5 方案 A: agent_end 自动反馈采集 ──────────────────────
     //
@@ -1864,18 +1847,18 @@ export default definePluginEntry({
     //   - fire-and-forget，不阻塞会话；异常仅 warn
     //   - 仅当存在召回缓存时触发，无召回则跳过（避免空判定）
     //   - 可通过 cfg.autoFeedback.enabled 关闭
-    api.registerHook("agent_end", async (event: AgentEndEvent, ctx: AgentEndCtx) => {
+    // v2.8.x: 必须用 api.on 注册 typed hook——api.registerHook 仅用于 legacy 内部钩子，
+    //   对 PluginHookName（agent_end/after_tool_call/llm_output/gateway_*）注册不会被调用
+    //   （宿主仅打印 "dispatched by the typed hook runner only" 警告）。这正是学习曲线
+    //   长期恒空的根因：hook 从未触发。
+    //   key 对齐：write 端（corpusSupplement.search/get）用 params.agentSessionKey 写缓存，
+    //   与宿主 ctx.sessionKey 同源，故此处用 ctx.sessionKey 消费，_lastSessionKey 兜底。
+    api.on("agent_end", async (event, ctx) => {
       // 功能开关
       if (_cfg?.autoFeedback?.enabled === false) return;
       if (!_driver || !_recaller) return;
 
-      // v2.8.x: key 提取与 after_tool_call/llm_output 全降级链对齐。
-      //   write 端（corpusSupplement.search/get）用 params.agentSessionKey 写入缓存，
-      //   agent_end 必须同样能取到它，否则 consume(sessionKey) 命中不了 →
-      //   完整 judge + 学习曲线采样永不触发。降级顺序 agentSessionKey 优先于 _lastSessionKey。
-      const ctx2 = (ctx ?? {}) as { sessionKey?: string; sessionId?: string; agentSessionKey?: string };
-      const sessionKey: string | undefined =
-        ctx2?.sessionKey ?? ctx2?.sessionId ?? ctx2?.agentSessionKey ?? _lastSessionKey;
+      const sessionKey: string | undefined = ctx?.sessionKey ?? ctx?.sessionId ?? _lastSessionKey;
       if (!sessionKey) return;
 
       // 消费该 session 的召回缓存（取完即清，避免重复采集）
@@ -1883,7 +1866,7 @@ export default definePluginEntry({
       if (!recallRecord || recallRecord.nodeIds.length === 0) return;
 
       // 从 messages[] 提取最后一轮 user query + assistant reply
-      const messages: AgentMessageLike[] = Array.isArray(event?.messages) ? event.messages : [];
+      const messages: AgentMessageLike[] = Array.isArray(event?.messages) ? (event.messages as AgentMessageLike[]) : [];
       const { userQuery, assistantReply } = extractLastTurn(messages);
       if (!assistantReply || !assistantReply.trim()) return;
 
@@ -1913,7 +1896,7 @@ export default definePluginEntry({
       } catch (err) {
         log.warn(`auto-feedback failed: ${(err as Error)?.message ?? err}`);
       }
-    }, { name: "graph-memory-pro-auto-feedback" });
+    });
 
     // ─────────────────────────────────────────────────────────────────
     // v2.5.4 L0: after_tool_call 实时反馈（长任务期间 M 矩阵即时更新）
@@ -1927,26 +1910,22 @@ export default definePluginEntry({
     //   - agent_end：完整 judge 判定 used/unused + M 更新（L1 完整层）
     // consumeGetSignals 只取 get 信号、保留召回记录，避免与 agent_end 冲突。
     // ─────────────────────────────────────────────────────────────────
-    api.registerHook("after_tool_call", async (event: { toolName?: string; sessionKey?: string; sessionId?: string; agentSessionKey?: string }, rawCtx: unknown) => {
+    // v2.8.x: 改用 api.on（api.registerHook 对 PluginHookName 不会被调用）。
+    api.on("after_tool_call", async (event, ctx) => {
       if (_cfg?.autoFeedback?.enabled === false) return;
       if (!_recaller || _cfg?.associationMatrix?.enabled !== true) return;
       const toolName = event?.toolName ?? "";
       if (!MEMORY_TOOL_NAMES.has(toolName)) return;
 
-      // v2.5.4: 多途径提取 sessionKey —— event → rawCtx → _lastSessionKey 降级链
-      //   宿主 after_tool_call 钩子的 event/rawCtx 结构不一定包含 sessionKey，
-      //   但 corpusSupplement.search/get 被调用时会更新 _lastSessionKey，作为兜底。
-      const ctx = (rawCtx ?? {}) as { sessionKey?: string; sessionId?: string; agentSessionKey?: string };
-      const sessionKey =
-        event?.sessionKey ?? event?.sessionId ?? event?.agentSessionKey ??
-        ctx?.sessionKey ?? ctx?.sessionId ?? ctx?.agentSessionKey ??
-        _lastSessionKey;
+      // v2.5.4: sessionKey 从 ctx 提取；_lastSessionKey 兜底
+      //   （corpusSupplement.search/get 被调用时会更新 _lastSessionKey）。
+      const sessionKey = ctx?.sessionKey ?? ctx?.sessionId ?? _lastSessionKey;
       if (!sessionKey) return;
 
       const signals = getSessionRecallCache().consumeGetSignals(sessionKey);
       if (!signals || signals.getNodeIds.length === 0) return;
       await flushGetSignals(sessionKey, signals.query, signals.getNodeIds, [], log);
-    }, { name: "graph-memory-pro-tool-feedback" });
+    });
 
     // ─────────────────────────────────────────────────────────────────
     // v2.5.4 L0: llm_output 实时提取（长任务中间轮 assistant 数据及时入图）
@@ -1959,17 +1938,14 @@ export default definePluginEntry({
     // 本钩子将中间轮 assistant 文本过滤去重后写入 extract-interim-queue.jsonl，
     // 由后台 extractor 定时器消费提取入库（不阻塞主流程）。
     // ─────────────────────────────────────────────────────────────────
-    api.registerHook("llm_output", async (event: { assistantTexts?: string[]; sessionId?: string; sessionKey?: string; agentSessionKey?: string }, rawCtx: unknown) => {
+    // v2.8.x: 改用 api.on（api.registerHook 对 PluginHookName 不会被调用）。
+    api.on("llm_output", async (event, ctx) => {
       if (!_driver || !_extractor || !_llm) return;
       const texts = Array.isArray(event?.assistantTexts) ? event.assistantTexts : [];
       if (texts.length === 0) return;
 
-      // v2.5.4: 多途径提取 sessionKey，与 after_tool_call 一致的降级链
-      const ctx = (rawCtx ?? {}) as { sessionKey?: string; sessionId?: string; agentSessionKey?: string };
-      const sessionKey =
-        event?.sessionKey ?? event?.sessionId ?? event?.agentSessionKey ??
-        ctx?.sessionKey ?? ctx?.sessionId ?? ctx?.agentSessionKey ??
-        _lastSessionKey;
+      // v2.5.4: sessionKey 降级链——event.sessionId（SDK 必填）→ ctx → _lastSessionKey。
+      const sessionKey = event?.sessionId ?? ctx?.sessionKey ?? ctx?.sessionId ?? _lastSessionKey;
       for (const t of texts) {
         if (typeof t !== "string" || t.trim().length < INTERIM_MIN_LEN) continue;
         const trimmed = t.trim().slice(0, INTERIM_MAX_LEN);
@@ -1988,7 +1964,7 @@ export default definePluginEntry({
         _interimTurnBuf = [];
         _interimTurnCount = 0;
       }
-    }, { name: "graph-memory-pro-interim-extract" });
+    });
 
     // ─────────────────────────────────────────────────────────────────
     // P0-1: 移除 before_prompt_build 钩子
@@ -2292,27 +2268,17 @@ export default definePluginEntry({
         id?: string;
         provenanceLabel?: string;
         sourceType?: string;
-        // v2.4.3 SDK 2026.8.1 合规：Memory result status 契约
-        //   "ok" = 成功读取；"not_found" = 允许范围内的文件/节点不存在
-        //   （SDK migration guide：“At registration, every statusless result from an older
-        //    external memory manager preserves its legacy successful-read semantics and
-        //    becomes status: 'ok'. Only an explicit status: 'not_found' reports absence.”）
-        status?: "ok" | "not_found";
+        // v2.4.4 SDK 2026.9.6 合规：Memory 结果契约
+        //   宿主（2026.8.1 起行为一致）用 `if (!result) return null` 判定“未找到”，
+        //   并对非空结果自行附加 status:"ok"。因此“不存在”必须返回 null 表达，
+        //   不能返回带 status 的对象——否则会被 compat 层当作“成功读取空内容”。
       } | null> {
         if (!_driver) return null;
         try {
           const n = await findById(_driver, params.lookup);
           if (!n) {
-            // v2.4.3 SDK 2026.8.1：必须用 status:"not_found" 显式报告不存在，
-            // 而非依靠 null 或缺内容来暗示（否则 compat 层会误判为空成功读取）。
-            return {
-              corpus: "graph-memory-pro",
-              path: params.lookup,
-              content: "",
-              fromLine: 0,
-              lineCount: 0,
-              status: "not_found",
-            };
+            // v2.4.4 SDK 2026.9.6：返回 null 明确报告“不存在”。
+            return null;
           }
           // v2.3.5 方案 C: get() 展开视为强使用信号，记录到 session 缓存
           if (params.agentSessionKey) {
@@ -2328,7 +2294,6 @@ export default definePluginEntry({
             fromLine: 0,
             lineCount: 0,
             id: n.id,
-            status: "ok",
           };
         } catch {
           return null;

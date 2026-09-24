@@ -58,8 +58,8 @@
       "minGatewayVersion": "2026.8.1"
     },
     "build": {
-      "openclawVersion": "2026.8.1",
-      "pluginSdkVersion": "2026.8.1"
+      "openclawVersion": "2026.9.6",
+      "pluginSdkVersion": "2026.9.6"
     }
   },
   "files": [
