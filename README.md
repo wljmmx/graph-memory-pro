@@ -272,7 +272,7 @@ const { result } = await res.json();
 
 ```json
 {
-  "version": "2.4.2",
+  "version": "2.4.4",
   "timestamp": "2026-08-07T10:00:00.000Z",
   "total": { "calls": 12, "promptTokens": 1234, "completionTokens": 567, "totalTokens": 1801 },
   "byProvider": { "config-llm": { "calls": 8, "totalTokens": 1200 }, "runtime-ollama": { "calls": 4, "totalTokens": 601 } },
@@ -290,13 +290,13 @@ v2.3.5 起 `byPurpose` 按真实用途分组（extract / judge / community / dia
 ```
 # HELP graph_memory_nodes_total Total nodes in the graph.
 # TYPE graph_memory_nodes_total gauge
-graph_memory_nodes_total{plugin="graph-memory-pro",version="2.2.1"} 5
+graph_memory_nodes_total{plugin="graph-memory-pro",version="2.4.4"} 5
 # HELP graph_memory_cache_hit_rate Query cache hit rate [0,1].
 # TYPE graph_memory_cache_hit_rate gauge
-graph_memory_cache_hit_rate{plugin="graph-memory-pro",version="2.2.1"} 0.123
+graph_memory_cache_hit_rate{plugin="graph-memory-pro",version="2.4.4"} 0.123
 # HELP graph_memory_association_matrix_updates_applied Total accepted M updates.
 # TYPE graph_memory_association_matrix_updates_applied gauge
-graph_memory_association_matrix_updates_applied{plugin="graph-memory-pro",version="2.2.1"} 42
+graph_memory_association_matrix_updates_applied{plugin="graph-memory-pro",version="2.4.4"} 42
 ```
 
 覆盖指标：`graph_memory_up` / `nodes_total` / `edges_total` / `feedback_total` / `cache_size` / `cache_hit_rate` / `judge_cold_start` / `association_matrix_t` / `association_matrix_updates_applied` / `association_matrix_updates_rejected` / `neo4j_pool_active_sessions` / `neo4j_pool_total_sessions` / `neo4j_pool_max_size` / `neo4j_pool_driver_active` / `circuit_breaker_state` / `circuit_breaker_failures_total` / `llm_calls_total` / `llm_tokens_total` / `llm_prompt_tokens_total` / `llm_completion_tokens_total`（v2.3.0 新增 LLM 用量指标，v2.3.2 新增连接池 + 熔断器指标）。
