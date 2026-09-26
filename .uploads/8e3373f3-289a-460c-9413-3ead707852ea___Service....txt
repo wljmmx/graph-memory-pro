@@ -1,0 +1,128 @@
+
+Service Unit: openclaw-gateway.service
+2026-09-26T19:34:19.205+08:00 [plugins] [lcm] _discoverCEFactory: path 2/4 SUCCESS (Shared State, cached engine)
+2026-09-26T19:34:19.208+08:00 [plugins] [lcm-graph-extra] heartbeat scheduled (first run in 60s, then every 5min)
+2026-09-26T19:34:19.217+08:00 [plugins] [lcm] lossless-claw adapter connected successfully
+2026-09-26T19:34:19.229+08:00 [plugins] [usage-tracker] DB fallback: JSON file storage
+2026-09-26T19:34:19.239+08:00 [plugins] debt-manager: scheduler started, pollInterval=60000ms, maxConcurrent=1
+2026-09-26T19:34:19.239+08:00 [plugins] debt-manager: resident scheduler started
+2026-09-26T19:34:19.242+08:00 [plugins] init: failed, will retry on next assemble err="Plugin lcm-graph-extra was reloaded or disabled; use its current tools."
+2026-09-26T19:34:19.243+08:00 [plugins] [lcm-graph-extra] pre-init failed (will retry on assemble/heartbeat) err="Plugin lcm-graph-extra was reloaded or disabled; use its current tools."
+2026-09-26T19:34:19.275+08:00 [plugins] [dashboard-snapshot] detected stale instance, sending shutdown request
+2026-09-26T19:34:19.342+08:00 [plugins] [dashboard-snapshot] shutdown requested by new instance
+2026-09-26T19:34:19.539+08:00 [plugins] [lcm-graph-extra] dashboard snapshot server listening on 127.0.0.1:7423
+2026-09-26T19:34:19.572+08:00 [ws] authenticated user connected conn=2b015f3e-4969-4df4-ad98-8c1e64bdc4a8 user=wljmmx@github
+2026-09-26T19:34:19.573+08:00 [ws] webchat connected conn=2b015f3e-4969-4df4-ad98-8c1e64bdc4a8 remote=127.0.0.1 client=openclaw-control-ui webchat v2026.9.6 build=2026.9.6-release-eb377ac59e6c-2026-09-23T16-33-12.144Z
+2026-09-26T19:34:25.853+08:00 XiaoYi: register() called - START
+2026-09-26T19:34:25.853+08:00 XiaoYi: Reusing EXISTING runtime instance: runtime_1790422330263_guvv4ams3
+2026-09-26T19:34:25.854+08:00 XiaoYi: [runtime_1790422330263_guvv4ams3] Setting PluginRuntime
+2026-09-26T19:34:25.854+08:00 XiaoYi: setXiaoYiRuntime() completed
+2026-09-26T19:34:25.855+08:00 XiaoYi: Reusing EXISTING runtime instance: runtime_1790422330263_guvv4ams3
+2026-09-26T19:34:25.855+08:00 XiaoYi: Got runtime instance: runtime_1790422330263_guvv4ams3, isConnected: false
+2026-09-26T19:34:25.855+08:00 XiaoYi: About to call registerChannel()
+2026-09-26T19:34:25.856+08:00 XiaoYi: registerChannel() completed
+2026-09-26T19:34:25.857+08:00 XiaoYi channel plugin registered - END
+2026-09-26T19:34:45.254+08:00 [graph-memory-pro:index] INFO module loaded, auto-start scheduled
+2026-09-26T19:34:45.255+08:00 [graph-memory-pro:index] INFO auto-start: polling for gateway driver (10s fast phase)...
+2026-09-26T19:34:45.259+08:00 [graph-memory-pro:index] INFO register() called by Gateway
+2026-09-26T19:34:45.260+08:00 [plugins] [graph-memory-pro:index] config detected in register(): neo4j.uri=bolt://192.168.50.89:7687
+2026-09-26T19:34:45.260+08:00 [plugins] [graph-memory-pro:index] config check: neo4j.uri=present
+2026-09-26T19:34:45.261+08:00 [plugins] [graph-memory-pro:index] connecting to Neo4j at bolt://192.168.50.89:7687...
+2026-09-26T19:34:48.170+08:00 [plugins] [lcm] _discoverCEFactory: path 2/4 SUCCESS (Shared State, cached engine)
+2026-09-26T19:34:48.173+08:00 [plugins] [lcm-graph-extra] heartbeat scheduled (first run in 60s, then every 5min)
+2026-09-26T19:34:48.175+08:00 [plugins] [lcm] lossless-claw adapter connected successfully
+2026-09-26T19:34:48.189+08:00 [plugins] [usage-tracker] DB fallback: JSON file storage
+2026-09-26T19:34:48.196+08:00 [plugins] debt-manager: scheduler started, pollInterval=60000ms, maxConcurrent=1
+2026-09-26T19:34:48.197+08:00 [plugins] debt-manager: resident scheduler started
+2026-09-26T19:34:48.201+08:00 [plugins] [graph-adapter] loading graph-memory-pro
+2026-09-26T19:34:50.062+08:00 [graph-memory-pro:index] INFO module loaded, auto-start scheduled
+2026-09-26T19:34:50.063+08:00 [graph-memory-pro:index] INFO auto-start: polling for gateway driver (10s fast phase)...
+2026-09-26T19:34:50.073+08:00 [ws] ⇄ res ✓ config.get 30455ms conn=2b015f3e…c4a8 id=3:58f07b82-6…a229
+2026-09-26T19:34:50.075+08:00 [ws] ⇄ res ✓ exec.approval.list 30457ms conn=2b015f3e…c4a8 id=5:796431a6-9…da6c
+2026-09-26T19:34:50.079+08:00 [ws] ⇄ res ✓ update.status 30462ms conn=2b015f3e…c4a8 id=4:257df257-b…0922
+2026-09-26T19:34:50.080+08:00 [ws] ⇄ res ✓ plugin.approval.list 30462ms conn=2b015f3e…c4a8 id=6:bb78d048-c…b985
+2026-09-26T19:34:50.081+08:00 [ws] ⇄ res ✓ plugins.controlUi.list 30463ms conn=2b015f3e…c4a8 id=8:4472215b-1…7282
+2026-09-26T19:34:50.083+08:00 [ws] ⇄ res ✓ board.get 30466ms conn=2b015f3e…c4a8 id=10:dd4ff014-…700f
+2026-09-26T19:34:50.094+08:00 [diagnostic] liveness heartbeat delayed: overdue=7333ms elapsed=37333ms; deferring recovery decisions
+2026-09-26T19:34:50.096+08:00 [diagnostic] liveness warning: reasons=event_loop_delay,event_loop_utilization,cpu interval=31s degradedFor=174s eventLoopDelayP99Ms=30501 eventLoopDelayMaxMs=30501 eventLoopUtilization=0.999 cpuCoreRatio=1.27 active=1 waiting=0 queued=0 phase=sidecars.control-ui-assets work=[active=agent:main:qqbot:direct:e6d32e82a88d881f14b068adde121063(processing,q=1,age=36s last=reply_operation:queued)]
+2026-09-26T19:34:50.100+08:00 [diagnostic] lane task error: lane=session:agent:main:qqbot:direct:e6d32e82a88d881f14b068adde121063 durationMs=53159 error="Command lane "session:agent:main:qqbot:direct:e6d32e82a88d881f14b068adde121063" task timed out: abort grace 36049ms elapsed (task budget 3629990ms, elapsed 53159ms)" errorName=CommandLaneTaskTimeoutError
+2026-09-26T19:34:50.104+08:00 [model-fallback/decision] model fallback chain stopped: reason=command_lane_task_timeout candidate=deepseek/deepseek-v4-flash errorName=CommandLaneTaskTimeoutError
+2026-09-26T19:34:50.123+08:00 [diagnostic] lane task error: lane=main durationMs=53182 error="Command lane "main" task timed out: abort grace 36073ms elapsed (task budget 3629990ms, elapsed 53182ms)" errorName=CommandLaneTaskTimeoutError
+2026-09-26T19:34:50.123+08:00 [diagnostic] lane task rejected after timeout: lane=session:agent:main:qqbot:direct:e6d32e82a88d881f14b068adde121063 timeoutMs=3629990 error="CommandLaneTaskTimeoutError: Command lane "main" task timed out: abort grace 36073ms elapsed (task budget 3629990ms, elapsed 53182ms)"
+2026-09-26T19:34:50.126+08:00 [ws] ⇄ res ✗ models.list 30547ms errorCode=UNAVAILABLE errorMessage=Authenticated profile verification is unavailable. Retry shortly; if this continues, contact a gateway administrator. conn=2b015f3e…c4a8 id=catalog:2b01…c4a8
+2026-09-26T19:34:50.127+08:00 [ws] ⇄ res ✗ sessions.subscribe 30509ms errorCode=UNAVAILABLE errorMessage=Authenticated profile verification is unavailable. Retry shortly; if this continues, contact a gateway administrator. conn=2b015f3e…c4a8 id=2:23845c14-5…d576
+2026-09-26T19:34:50.128+08:00 [ws] ⇄ res ✗ openclaw.approval.list 30510ms errorCode=UNAVAILABLE errorMessage=Authenticated profile verification is unavailable. Retry shortly; if this continues, contact a gateway administrator. conn=2b015f3e…c4a8 id=7:40f88939-4…c80e
+2026-09-26T19:34:50.129+08:00 [ws] ⇄ res ✗ projects.list 30511ms errorCode=UNAVAILABLE errorMessage=Authenticated profile verification is unavailable. Retry shortly; if this continues, contact a gateway administrator. conn=2b015f3e…c4a8 id=11:55ddcb5f-…e884
+2026-09-26T19:34:50.129+08:00 [gateway] GitHub identity sync failed conn=2b015f3e-4969-4df4-ad98-8c1e64bdc4a8: ControlUiGitHubError: GitHub request timed out
+2026-09-26T19:34:50.131+08:00 [sessions/lifecycle] slow session lifecycle operation pid=7571 threadId=0 isMainThread=true diagnosticEpoch=b196cb084bc3f7af omittedObservations=0 operationId=4 operation=mutation operationTraceId=b9966d90bed1ce52c074f01fca35e7a2 operationSpanId=36515b36c98916ec elapsedMs=36088 completionDelayMs=0 mutationQueueWaitMs=0 lifecycleQueueWaitMs=0 phaseDurationsMs={"prepare":36087,"run":0,"finalize":0} signalAborted=false
+2026-09-26T19:34:50.137+08:00 [diagnostic] message dispatch completed: channel=qqbot sessionId=unknown sessionKey=agent:main:qqbot:direct:e6d32e82a88d881f14b068adde121063 source=replyResolver outcome=error duration=36121ms error="Error: timed out draining work before reply session rollover: agent:main:qqbot:direct:e6d32e82a88d881f14b068adde121063"
+2026-09-26T19:34:50.142+08:00 [diagnostic] message processed: channel=qqbot chatId=qqbot:c2c:E6D32E82A88D881F14B068ADDE121063 messageId=ROBOT1.0_0SOqByBr6Rvaln6KSjMS4lVTQ4sUVz0sSCAiBWEicDGcv0rPPVSQaOzvuGgljuTULlkgaWIFTnr7R595QaAFm7nPLh7eEXBNBVTRGFdManw! sessionId=c7fb38d9-745f-41d3-8b1c-f60c5cad6814 sessionKey=agent:main:qqbot:direct:e6d32e82a88d881f14b068adde121063 outcome=error duration=36143ms error="Error: timed out draining work before reply session rollover: agent:main:qqbot:direct:e6d32e82a88d881f14b068adde121063"
+2026-09-26T19:34:50.144+08:00 [qqbot] [default][handle] dispatch error: Error: timed out draining work before reply session rollover: agent:main:qqbot:direct:e6d32e82a88d881f14b068adde121063
+2026-09-26T19:34:50.148+08:00 [ws] ⇄ res ✓ openclaw.chat 67347ms conn=cdfff960…ab55 id=24:94526791-…a4b0
+2026-09-26T19:34:50.151+08:00 [ws] ⇄ res ✓ openclaw.chat 57797ms conn=10dc0140…f240 id=20:d2f822df-…b2d5
+2026-09-26T19:34:50.164+08:00 [plugins] [lcm-graph-extra] dashboard snapshot server NOT started on 127.0.0.1:7423: listen error: EADDRINUSE listen EADDRINUSE: address already in use 127.0.0.1:7423 (non-fatal, plugin continues)
+2026-09-26T19:34:50.179+08:00 [ws] ⇄ res ✓ agents.list 30561ms conn=2b015f3e…c4a8 id=9:17019288-6…5b81
+2026-09-26T19:34:50.253+08:00 [ws] ⇄ res ✓ question.list 30632ms conn=2b015f3e…c4a8 id=12:a6a522a6-…0c7a
+2026-09-26T19:34:50.259+08:00 [ws] ⇄ res ✓ agent.identity.get 30642ms conn=2b015f3e…c4a8 id=16:78062ef0-…fa67
+2026-09-26T19:34:50.273+08:00 [ws] ⇄ res ✓ models.authStatus 30653ms conn=2b015f3e…c4a8 id=15:452e3f3f-…8995
+2026-09-26T19:34:50.482+08:00 [ws] ⇄ res ✓ talk.catalog 256ms conn=2b015f3e…c4a8 id=18:3968ad80-…62c0
+2026-09-26T19:34:50.484+08:00 [qqbot] [coder] [coder] WebSocket closed: 1006
+2026-09-26T19:34:50.485+08:00 [qqbot] [checker] [checker] WebSocket closed: 1006
+2026-09-26T19:34:50.485+08:00 [qqbot] [memowriter] [memowriter] WebSocket closed: 1006
+2026-09-26T19:34:50.512+08:00 [ws] ⇄ res ✓ plugin.surface.refresh 287ms conn=2b015f3e…c4a8 id=21:207e4f2c-…be5d
+2026-09-26T19:34:50.521+08:00 [ws] ⇄ res ✓ sessions.list 294ms conn=3f98ad7c…160e id=5011d3c8…13cb
+2026-09-26T19:34:50.523+08:00 [ws] ⇄ res ✓ openclaw.chat.history 289ms conn=10dc0140…f240 id=64:d07be227-…4c6b
+2026-09-26T19:34:50.573+08:00 [ws] ⇄ res ✓ models.authStatus 318ms conn=10dc0140…f240 id=65:0d9a109d-…2c6c
+2026-09-26T19:34:50.606+08:00 [ws] closed before connect conn=3dcb256c-4228-4dc4-a959-1e0f2dca2c57 peer=127.0.0.1:54480->127.0.0.1:18789 remote=127.0.0.1 fwd=n/a origin=n/a host=127.0.0.1:18789 ua=n/a code=1006 reason=n/a phase=ws_upgrade_started durationMs=73 handshake=pending phase=ws_upgrade_started host=127.0.0.1:18789 remoteAddr=127.0.0.1 remotePort=54480 localAddr=127.0.0.1 localPort=18789 endpoint=127.0.0.1:54480->127.0.0.1:18789
+2026-09-26T19:34:50.753+08:00 [ws] ⇄ res ✓ device.pair.list 526ms conn=3f98ad7c…160e id=e024eada…7bb3
+2026-09-26T19:34:50.759+08:00 [ws] ⇄ res ✓ device.pair.list 529ms conn=3f98ad7c…160e id=6afbb00d…f94d
+2026-09-26T19:34:50.761+08:00 [plugins] [graph-memory-pro:index] Neo4j connected to bolt://192.168.50.89:7687
+2026-09-26T19:34:50.761+08:00 [plugins] [graph-memory-pro] Neo4j connected to bolt://192.168.50.89:7687
+2026-09-26T19:34:50.810+08:00 [ws] ⇄ res ✓ models.authStatus 320ms conn=2b015f3e…c4a8 id=30:3af3ecff-…d11d
+2026-09-26T19:34:50.817+08:00 [ws] ⇄ res ✓ node.pair.list 590ms conn=3f98ad7c…160e id=174f3de9…b5f3
+2026-09-26T19:34:50.819+08:00 [ws] ⇄ res ✓ node.pair.list 592ms conn=3f98ad7c…160e id=8511d0bc…1a0e
+2026-09-26T19:34:50.826+08:00 [plugins] [graph-memory-pro:index] Neo4j version detected: 2026.07.1 (5.x+ supports power(): true)
+2026-09-26T19:34:50.829+08:00 [plugins] [graph-memory-pro] Neo4j version detected: 2026.07.1
+2026-09-26T19:34:50.854+08:00 [plugins] [graph-memory-pro:index] Neo4j edition detected: Enterprise (multi-database isolation: enabled)
+2026-09-26T19:34:50.855+08:00 [plugins] [graph-memory-pro] Neo4j edition: Enterprise (multi-database isolation enabled)
+2026-09-26T19:34:50.948+08:00 [agent/embedded] [trace:embedded-run] startup stages: runId=openclaw-greeting-7e4a6230-9aa9-46bc-a4d0-1c3568460805 sessionId=openclaw-greeting-7e4a6230-9aa9-46bc-a4d0-1c3568460805-session phase=attempt-dispatch pid=7571 threadId=0 isMainThread=true totalMs=31337 stages=workspace:1ms@1ms,harness-selection:0ms@1ms,prepared-runtime:31291ms@31292ms,runtime-context:1ms@31293ms,runtime-plugins:0ms@31293ms,hooks:1ms@31294ms,model-resolution:8ms@31302ms,auth:7ms@31309ms,context-engine:5ms@31314ms,attempt-workspace:22ms@31336ms,attempt-prompt:1ms@31337ms,attempt-runtime-plan:0ms@31337ms,attempt-dispatch:0ms@31337ms
+2026-09-26T19:34:51.031+08:00 [skills] Skipping invalid skill: file=~/.openclaw/agents/main/agent/workshop-skills/gpustack-gguf-compatibility/SKILL.md error=description is required
+2026-09-26T19:34:51.059+08:00 [skills] Skipping invalid skill: file=~/.openclaw/skills/mumanovel/SKILL.md error=description is required
+2026-09-26T19:34:51.193+08:00 [plugins] [dashboard-snapshot] detected stale instance, sending shutdown request
+2026-09-26T19:34:51.239+08:00 [ws] ⇄ res ✓ logs.tail 290ms conn=682576f2…5d3b id=2:915c5e0c-4…3383
+2026-09-26T19:34:51.247+08:00 [plugins] [dashboard-snapshot] detected stale instance, sending shutdown request
+2026-09-26T19:34:51.273+08:00 [env-overrides] Blocked skill env overrides for gh-issues: GH_TOKEN
+2026-09-26T19:34:51.291+08:00 [plugins] [dashboard-snapshot] shutdown requested by new instance
+Log file: /tmp/openclaw/openclaw-2026-09-26.log
+19:34:19+08:00 info plugins [dashboard-snapshot] detected stale instance, sending shutdown request
+19:34:19+08:00 info plugins [dashboard-snapshot] shutdown requested by new instance
+19:34:19+08:00 info plugins [lcm-graph-extra] dashboard snapshot server listening on 127.0.0.1:7423
+19:34:19+08:00 info gateway/ws authenticated user connected conn=2b015f3e-4969-4df4-ad98-8c1e64bdc4a8 user=wljmmx@github
+19:34:19+08:00 info gateway/ws webchat connected conn=2b015f3e-4969-4df4-ad98-8c1e64bdc4a8 remote=127.0.0.1 client=openclaw-control-ui webchat v2026.9.6 build=2026.9.6-release-eb377ac59e6c-2026-09-23T16-33-12.144Z
+19:34:25+08:00 info XiaoYi: register() called - START
+19:34:25+08:00 info XiaoYi: Reusing EXISTING runtime instance: runtime_1790422330263_guvv4ams3
+19:34:25+08:00 info XiaoYi: [runtime_1790422330263_guvv4ams3] Setting PluginRuntime
+19:34:25+08:00 info XiaoYi: setXiaoYiRuntime() completed
+19:34:25+08:00 info XiaoYi: Reusing EXISTING runtime instance: runtime_1790422330263_guvv4ams3
+19:34:25+08:00 info XiaoYi: Got runtime instance: runtime_1790422330263_guvv4ams3, isConnected: false
+19:34:25+08:00 info XiaoYi: About to call registerChannel()
+19:34:25+08:00 info XiaoYi: registerChannel() completed
+19:34:25+08:00 info XiaoYi channel plugin registered - END
+19:34:45+08:00 info [graph-memory-pro:index] INFO module loaded, auto-start scheduled
+19:34:45+08:00 info [graph-memory-pro:index] INFO auto-start: polling for gateway driver (10s fast phase)...
+19:34:45+08:00 info [graph-memory-pro:index] INFO register() called by Gateway
+19:34:45+08:00 info plugins [graph-memory-pro:index] config detected in register(): neo4j.uri=bolt://192.168.50.89:7687
+19:34:45+08:00 info plugins [graph-memory-pro:index] config check: neo4j.uri=present
+19:34:45+08:00 info plugins [graph-memory-pro:index] connecting to Neo4j at bolt://192.168.50.89:7687...
+19:34:48+08:00 info plugins [lcm] _discoverCEFactory: path 2/4 SUCCESS (Shared State, cached engine)
+19:34:48+08:00 info plugins [lcm-graph-extra] heartbeat scheduled (first run in 60s, then every 5min)
+19:34:48+08:00 info plugins [lcm] lossless-claw adapter connected successfully
+19:34:48+08:00 info plugins [usage-tracker] DB fallback: JSON file storage
+19:34:48+08:00 info plugins debt-manager: scheduler started, pollInterval=60000ms, maxConcurrent=1
+19:34:48+08:00 info plugins debt-manager: resident scheduler started
+19:34:48+08:00 info plugins [graph-adapter] loading graph-memory-pro
+19:34:50+08:00 info [graph-memory-pro:index] INFO module loaded, auto-start scheduled
+19:34:50+08:00 info [graph-memory-pro:index] INFO auto-start: polling for gateway driver (10s fast phase)...
+19:34:50+08:00 info gateway/ws ⇄ res ✓ config.get 30455ms conn=2b015f3e…c4a8 id=3:58f07b82-6…a229
+19:34:50+08:00 info gateway/ws ⇄ res ✓ exec.approval.list 30457ms conn=2b015f3e…c4a8 id=5:796431a6-9…da6c
+19:34:50+08:00 info gateway/ws ⇄ res ✓ update.status 30462ms conn=2b015f3e…c4a8 id=4:257df257-b…0922
