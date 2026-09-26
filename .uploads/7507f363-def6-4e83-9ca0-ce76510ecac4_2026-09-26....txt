@@ -1,0 +1,153 @@
+2026-09-26T20:30:24.803+08:00 [plugins] [lcm] lossless-claw adapter connected successfully
+2026-09-26T20:30:24.808+08:00 [plugins] [usage-tracker] DB fallback: JSON file storage
+2026-09-26T20:30:24.826+08:00 [plugins] debt-manager: scheduler started, pollInterval=60000ms, maxConcurrent=1
+2026-09-26T20:30:24.827+08:00 [plugins] debt-manager: resident scheduler started
+2026-09-26T20:30:24.832+08:00 [plugins] [graph-adapter] loading graph-memory-pro
+2026-09-26T20:30:27.440+08:00 [graph-memory-pro:index] INFO module loaded, auto-start scheduled
+2026-09-26T20:30:27.440+08:00 [graph-memory-pro:index] INFO auto-start: polling for gateway driver (10s fast phase)...
+2026-09-26T20:30:27.448+08:00 [plugins] [lcm-graph-extra] dashboard snapshot server NOT started on 127.0.0.1:7423: startup still pending after max wait (non-fatal, plugin continues)
+2026-09-26T20:30:27.478+08:00 [gateway] approval Web Push terminal replacement reached 0/1 eligible browsers approvalId=1d4af66b-450d-4357-9355-2c752143a34e
+2026-09-26T20:30:27.534+08:00 [ws] closed before connect conn=113614c8-c042-4413-ab23-cf950ce147c1 peer=127.0.0.1:49672->127.0.0.1:21357 remote=127.0.0.1 fwd=100.74.74.4 origin=https://ub-d-openclaw.tailaceeb8.ts.net host=ub-d-openclaw.tailaceeb8.ts.net ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 code=1006 reason=n/a phase=ws_upgrade_started durationMs=23 handshake=pending phase=ws_upgrade_started host=ub-d-openclaw.tailaceeb8.ts.net origin=https://ub-d-openclaw.tailaceeb8.ts.net userAgent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36" forwardedFor=100.74.74.4 remoteAddr=127.0.0.1 remotePort=49672 localAddr=127.0.0.1 localPort=21357 endpoint=127.0.0.1:49672->127.0.0.1:21357
+2026-09-26T20:30:27.542+08:00 [ws] closed before connect conn=d843c588-f1ce-43c1-9a77-0834163c277e peer=127.0.0.1:33558->127.0.0.1:21357 remote=127.0.0.1 fwd=100.74.74.4 origin=https://ub-d-openclaw.tailaceeb8.ts.net host=ub-d-openclaw.tailaceeb8.ts.net ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0 code=1006 reason=n/a phase=ws_upgrade_started durationMs=1 handshake=pending phase=ws_upgrade_started host=ub-d-openclaw.tailaceeb8.ts.net origin=https://ub-d-openclaw.tailaceeb8.ts.net userAgent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0" forwardedFor=100.74.74.4 remoteAddr=127.0.0.1 remotePort=33558 localAddr=127.0.0.1 localPort=21357 endpoint=127.0.0.1:33558->127.0.0.1:21357
+2026-09-26T20:30:27.543+08:00 [ws] closed before connect conn=d4e0c3f9-4905-437b-83c8-ab6e305f7917 peer=127.0.0.1:38806->127.0.0.1:18789 remote=127.0.0.1 fwd=n/a origin=n/a host=127.0.0.1:18789 ua=n/a code=1006 reason=n/a phase=ws_upgrade_started durationMs=5 handshake=pending phase=ws_upgrade_started host=127.0.0.1:18789 remoteAddr=127.0.0.1 remotePort=38806 localAddr=127.0.0.1 localPort=18789 endpoint=127.0.0.1:38806->127.0.0.1:18789
+2026-09-26T20:30:27.550+08:00 [ws] closed before connect conn=d753f061-a606-44c1-b6a0-a67fea4c6406 peer=127.0.0.1:57948->127.0.0.1:18789 remote=127.0.0.1 fwd=n/a origin=n/a host=127.0.0.1:18789 ua=n/a code=1006 reason=n/a phase=ws_upgrade_started durationMs=4 handshake=pending phase=ws_upgrade_started host=127.0.0.1:18789 remoteAddr=127.0.0.1 remotePort=57948 localAddr=127.0.0.1 localPort=18789 endpoint=127.0.0.1:57948->127.0.0.1:18789
+2026-09-26T20:30:27.560+08:00 [plugins] [graph-memory-pro:index] Neo4j connected to bolt://192.168.50.89:7687
+2026-09-26T20:30:27.560+08:00 [plugins] [graph-memory-pro] Neo4j connected to bolt://192.168.50.89:7687
+2026-09-26T20:30:27.576+08:00 [gateway] agent model: ollama/qwen3.8:27b-mtp-q4_K_M (thinking=medium, fast=auto)
+2026-09-26T20:30:27.577+08:00 [gateway] http server listening (19 plugins: browser, canvas, device-pair, diffs, duckduckgo, feishu, file-transfer, graph-memory-pro, lcm-graph-extra, llm-task, lossless-claw, memory-core, ollama, openclaw-qqbot, tavily, tts-local-cli, webhooks, workboard, xiaoyi; 45.8s)
+2026-09-26T20:30:27.578+08:00 [gateway] log file: /tmp/openclaw/openclaw-2026-09-26.log
+2026-09-26T20:30:27.584+08:00 [gateway] security warning: dangerous config flags enabled: tools.fs.workspaceOnly=false. Run `openclaw security audit`.
+2026-09-26T20:30:27.595+08:00 [plugins] [graph-memory-pro:index] Neo4j version detected: 2026.07.1 (5.x+ supports power(): true)
+2026-09-26T20:30:27.596+08:00 [plugins] [graph-memory-pro] Neo4j version detected: 2026.07.1
+2026-09-26T20:30:27.609+08:00 [ws] closed before connect conn=500cf1f5-b4d6-4809-ab4a-13b3dbdee5d3 peer=127.0.0.1:57960->127.0.0.1:18789 remote=127.0.0.1 fwd=n/a origin=n/a host=127.0.0.1:18789 ua=n/a code=1006 reason=n/a phase=ws_upgrade_started durationMs=9 handshake=pending phase=ws_upgrade_started host=127.0.0.1:18789 remoteAddr=127.0.0.1 remotePort=57960 localAddr=127.0.0.1 localPort=18789 endpoint=127.0.0.1:57960->127.0.0.1:18789
+2026-09-26T20:30:27.616+08:00 [gateway] starting channels and sidecars...
+2026-09-26T20:30:27.743+08:00 [hooks:loader] Loading managed hook code into the gateway process. Hooks are trusted local code.
+2026-09-26T20:30:27.769+08:00 [hooks] loaded 6 internal hook handlers
+2026-09-26T20:30:34.013+08:00 XiaoYi: register() called - START
+2026-09-26T20:30:34.014+08:00 XiaoYi: Reusing EXISTING runtime instance: runtime_1790425804637_175xq5tw0
+2026-09-26T20:30:34.015+08:00 XiaoYi: [runtime_1790425804637_175xq5tw0] Setting PluginRuntime
+2026-09-26T20:30:34.015+08:00 XiaoYi: setXiaoYiRuntime() completed
+2026-09-26T20:30:34.016+08:00 XiaoYi: Reusing EXISTING runtime instance: runtime_1790425804637_175xq5tw0
+2026-09-26T20:30:34.017+08:00 XiaoYi: Got runtime instance: runtime_1790425804637_175xq5tw0, isConnected: false
+2026-09-26T20:30:34.017+08:00 XiaoYi: About to call registerChannel()
+2026-09-26T20:30:34.018+08:00 XiaoYi: registerChannel() completed
+2026-09-26T20:30:34.019+08:00 XiaoYi channel plugin registered - END
+2026-09-26T20:30:53.888+08:00 [graph-memory-pro:index] INFO module loaded, auto-start scheduled
+2026-09-26T20:30:53.889+08:00 [graph-memory-pro:index] INFO auto-start: polling for gateway driver (10s fast phase)...
+2026-09-26T20:30:53.893+08:00 [graph-memory-pro:index] INFO register() called by Gateway
+2026-09-26T20:30:53.893+08:00 [plugins] [graph-memory-pro:index] config detected in register(): neo4j.uri=bolt://192.168.50.89:7687
+2026-09-26T20:30:53.894+08:00 [plugins] [graph-memory-pro:index] config check: neo4j.uri=present
+2026-09-26T20:30:53.894+08:00 [plugins] [graph-memory-pro:index] connecting to Neo4j at bolt://192.168.50.89:7687...
+2026-09-26T20:30:56.273+08:00 [plugins] [lcm] _discoverCEFactory: path 2/4 SUCCESS (Shared State, cached engine)
+2026-09-26T20:30:56.274+08:00 [plugins] [lcm-graph-extra] heartbeat scheduled (first run in 60s, then every 5min)
+2026-09-26T20:30:56.305+08:00 [plugins] [lcm] lossless-claw adapter connected successfully
+2026-09-26T20:30:56.308+08:00 [plugins] [usage-tracker] DB fallback: JSON file storage
+2026-09-26T20:30:56.315+08:00 [plugins] debt-manager: scheduler started, pollInterval=60000ms, maxConcurrent=1
+2026-09-26T20:30:56.315+08:00 [plugins] debt-manager: resident scheduler started
+2026-09-26T20:30:56.318+08:00 [plugins] [graph-adapter] loading graph-memory-pro
+2026-09-26T20:30:58.992+08:00 [graph-memory-pro:index] INFO module loaded, auto-start scheduled
+2026-09-26T20:30:58.992+08:00 [graph-memory-pro:index] INFO auto-start: polling for gateway driver (10s fast phase)...
+2026-09-26T20:30:59.000+08:00 [plugins] [lcm-graph-extra] dashboard snapshot server NOT started on 127.0.0.1:7423: startup still pending after max wait (non-fatal, plugin continues)
+2026-09-26T20:30:59.003+08:00 [ws] handshake timeout conn=0b5059ed-c394-465d-8088-e30712ef2703 peer=127.0.0.1:60894->127.0.0.1:21357 remote=127.0.0.1 phase=ws_upgrade_started
+2026-09-26T20:30:59.004+08:00 [ws] handshake timeout conn=801892e5-9e3a-494e-83d8-53d20ee66b78 peer=127.0.0.1:60896->127.0.0.1:21357 remote=127.0.0.1 phase=ws_upgrade_started
+2026-09-26T20:30:59.024+08:00 [health-monitor] [qqbot:default] health-monitor: restarting (reason: stopped)
+2026-09-26T20:30:59.030+08:00 [health-monitor] [qqbot:coder] health-monitor: restarting (reason: stopped)
+2026-09-26T20:30:59.033+08:00 [health-monitor] [qqbot:memowriter] health-monitor: restarting (reason: stopped)
+2026-09-26T20:30:59.036+08:00 [health-monitor] [qqbot:checker] health-monitor: restarting (reason: stopped)
+2026-09-26T20:30:59.039+08:00 [health-monitor] [feishu:checker] health-monitor: restarting (reason: stopped)
+2026-09-26T20:30:59.043+08:00 [health-monitor] [feishu:coder] health-monitor: restarting (reason: stopped)
+2026-09-26T20:30:59.046+08:00 [health-monitor] [feishu:main] health-monitor: restarting (reason: stopped)
+2026-09-26T20:30:59.049+08:00 [health-monitor] [feishu:memowriter] health-monitor: restarting (reason: stopped)
+2026-09-26T20:30:59.058+08:00 [diagnostic] liveness heartbeat delayed: overdue=1578ms elapsed=31578ms; deferring recovery decisions
+2026-09-26T20:30:59.060+08:00 [diagnostic] liveness warning: reasons=event_loop_delay,event_loop_utilization,cpu interval=32s degradedFor=70s eventLoopDelayP99Ms=31390.2 eventLoopDelayMaxMs=31390.2 eventLoopUtilization=1 cpuCoreRatio=0.907 active=0 waiting=0 queued=0 phase=sidecars.model-runtime recentPhases=channels.feishu.is-configured:0ms,channels.feishu.runtime:0ms,channels.feishu.approval-bootstrap:0ms,channels.feishu.is-configured:0ms,channels.feishu.runtime:0ms,channels.feishu.approval-bootstrap:0ms
+2026-09-26T20:30:59.075+08:00 [plugins] [graph-memory-pro:index] Neo4j edition detected: Enterprise (multi-database isolation: enabled)
+2026-09-26T20:30:59.075+08:00 [plugins] [graph-memory-pro] Neo4j edition: Enterprise (multi-database isolation enabled)
+2026-09-26T20:30:59.275+08:00 [feishu] starting feishu[checker] (mode: websocket)
+2026-09-26T20:30:59.416+08:00 [info]: [ 'client ready' ]
+2026-09-26T20:30:59.428+08:00 [feishu] starting feishu[coder] (mode: websocket)
+2026-09-26T20:30:59.430+08:00 [info]: [ 'client ready' ]
+2026-09-26T20:30:59.432+08:00 [feishu] starting feishu[main] (mode: websocket)
+2026-09-26T20:30:59.434+08:00 [info]: [ 'client ready' ]
+2026-09-26T20:30:59.436+08:00 [feishu] starting feishu[memowriter] (mode: websocket)
+2026-09-26T20:30:59.438+08:00 [info]: [ 'client ready' ]
+2026-09-26T20:30:59.442+08:00 [ws] closed before connect conn=f387537d-879e-4318-b880-b78a13825e7c peer=127.0.0.1:32512->127.0.0.1:18789 remote=127.0.0.1 fwd=n/a origin=n/a host=127.0.0.1:18789 ua=n/a code=1006 reason=n/a phase=ws_upgrade_started durationMs=361 handshake=pending phase=ws_upgrade_started host=127.0.0.1:18789 remoteAddr=127.0.0.1 remotePort=32512 localAddr=127.0.0.1 localPort=18789 endpoint=127.0.0.1:32512->127.0.0.1:18789
+2026-09-26T20:30:59.475+08:00 [ws] closed before connect conn=b7d7ebe5-30fd-4e91-88ba-c4adc5c093b3 peer=127.0.0.1:60902->127.0.0.1:21357 remote=127.0.0.1 fwd=100.74.74.4 origin=https://ub-d-openclaw.tailaceeb8.ts.net:443 host=ub-d-openclaw.tailaceeb8.ts.net ua=n/a code=1006 reason=n/a phase=ws_upgrade_started durationMs=12 handshake=pending phase=ws_upgrade_started host=ub-d-openclaw.tailaceeb8.ts.net origin=https://ub-d-openclaw.tailaceeb8.ts.net:443 forwardedFor=100.74.74.4 remoteAddr=127.0.0.1 remotePort=60902 localAddr=127.0.0.1 localPort=21357 endpoint=127.0.0.1:60902->127.0.0.1:21357
+2026-09-26T20:30:59.476+08:00 [ws] closed before connect conn=3caa4b41-e111-4943-af63-eb95913e3005 peer=127.0.0.1:32526->127.0.0.1:18789 remote=127.0.0.1 fwd=n/a origin=n/a host=127.0.0.1:18789 ua=n/a code=1006 reason=n/a phase=ws_upgrade_started durationMs=14 handshake=pending phase=ws_upgrade_started host=127.0.0.1:18789 remoteAddr=127.0.0.1 remotePort=32526 localAddr=127.0.0.1 localPort=18789 endpoint=127.0.0.1:32526->127.0.0.1:18789
+2026-09-26T20:30:59.503+08:00 [ws] closed before connect conn=0b5059ed-c394-465d-8088-e30712ef2703 peer=127.0.0.1:60894->127.0.0.1:21357 remote=127.0.0.1 fwd=100.74.74.4 origin=https://ub-d-openclaw.tailaceeb8.ts.net host=ub-d-openclaw.tailaceeb8.ts.net ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0 code=4000 reason=connect timeout phase=ws_upgrade_started cause=handshake-timeout durationMs=31936 handshake=failed phase=ws_upgrade_started host=ub-d-openclaw.tailaceeb8.ts.net origin=https://ub-d-openclaw.tailaceeb8.ts.net userAgent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0" forwardedFor=100.74.74.4 remoteAddr=127.0.0.1 remotePort=60894 localAddr=127.0.0.1 localPort=21357 endpoint=127.0.0.1:60894->127.0.0.1:21357 handshakeMs=31437
+2026-09-26T20:30:59.517+08:00 [plugins] [graph-memory-pro:index] Neo4j connected to bolt://192.168.50.89:7687
+2026-09-26T20:30:59.518+08:00 [plugins] [graph-memory-pro] Neo4j connected to bolt://192.168.50.89:7687
+2026-09-26T20:30:59.536+08:00 [ws] closed before connect conn=31bee13d-4d51-488e-9b2a-a7b76306c809 peer=127.0.0.1:60920->127.0.0.1:21357 remote=127.0.0.1 fwd=100.74.74.4 origin=https://ub-d-openclaw.tailaceeb8.ts.net host=ub-d-openclaw.tailaceeb8.ts.net ua=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 code=1006 reason=n/a phase=ws_upgrade_started durationMs=14 handshake=pending phase=ws_upgrade_started host=ub-d-openclaw.tailaceeb8.ts.net origin=https://ub-d-openclaw.tailaceeb8.ts.net userAgent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36" forwardedFor=100.74.74.4 remoteAddr=127.0.0.1 remotePort=60920 localAddr=127.0.0.1 localPort=21357 endpoint=127.0.0.1:60920->127.0.0.1:21357
+2026-09-26T20:30:59.537+08:00 [ws] closed before connect conn=3b08581a-0c53-4bc2-a258-0974caab487a peer=127.0.0.1:47458->127.0.0.1:18789 remote=127.0.0.1 fwd=n/a origin=n/a host=127.0.0.1:18789 ua=n/a code=1006 reason=n/a phase=ws_upgrade_started durationMs=16 handshake=pending phase=ws_upgrade_started host=127.0.0.1:18789 remoteAddr=127.0.0.1 remotePort=47458 localAddr=127.0.0.1 localPort=18789 endpoint=127.0.0.1:47458->127.0.0.1:18789
+2026-09-26T20:30:59.542+08:00 [plugins] [graph-memory-pro:index] Neo4j version detected: 2026.07.1 (5.x+ supports power(): true)
+2026-09-26T20:30:59.543+08:00 [plugins] [graph-memory-pro] Neo4j version detected: 2026.07.1
+2026-09-26T20:30:59.581+08:00 [qqbot] [default] [qqbot:token:1903094154] Background refresh started
+2026-09-26T20:30:59.583+08:00 [qqbot] [default] [default] ✅ Access token obtained
+2026-09-26T20:30:59.587+08:00 [qqbot] [coder] [qqbot:token:1903093563] Background refresh started
+2026-09-26T20:30:59.587+08:00 [qqbot] [coder] [coder] ✅ Access token obtained
+2026-09-26T20:30:59.589+08:00 [qqbot] [memowriter] [qqbot:token:1903093839] Background refresh started
+2026-09-26T20:30:59.590+08:00 [qqbot] [memowriter] [memowriter] ✅ Access token obtained
+2026-09-26T20:30:59.591+08:00 [plugins] [graph-memory-pro:index] Neo4j edition detected: Enterprise (multi-database isolation: enabled)
+2026-09-26T20:30:59.592+08:00 [plugins] [graph-memory-pro] Neo4j edition: Enterprise (multi-database isolation enabled)
+2026-09-26T20:30:59.594+08:00 [qqbot] [checker] [qqbot:token:1903093843] Background refresh started
+2026-09-26T20:30:59.595+08:00 [qqbot] [checker] [checker] ✅ Access token obtained
+2026-09-26T20:30:59.613+08:00 [ws] closed before connect conn=813b48c4-e63f-4a36-a7f6-3455700a97fa peer=127.0.0.1:47486->127.0.0.1:18789 remote=127.0.0.1 fwd=n/a origin=n/a host=127.0.0.1:18789 ua=n/a code=1006 reason=n/a phase=ws_upgrade_started durationMs=10 handshake=pending phase=ws_upgrade_started host=127.0.0.1:18789 remoteAddr=127.0.0.1 remotePort=47486 localAddr=127.0.0.1 localPort=18789 endpoint=127.0.0.1:47486->127.0.0.1:18789
+2026-09-26T20:30:59.623+08:00 [ws] closed before connect conn=7601a8a3-260d-4edc-8283-9bb90ae2cb3b peer=127.0.0.1:20442->127.0.0.1:18789 remote=127.0.0.1 fwd=n/a origin=n/a host=127.0.0.1:18789 ua=n/a code=1006 reason=n/a phase=ws_upgrade_started durationMs=5 handshake=pending phase=ws_upgrade_started host=127.0.0.1:18789 remoteAddr=127.0.0.1 remotePort=20442 localAddr=127.0.0.1 localPort=18789 endpoint=127.0.0.1:20442->127.0.0.1:18789
+2026-09-26T20:30:59.667+08:00 [ws] closed before connect conn=8f1c6094-e646-4f9c-a819-a024d4862b19 peer=127.0.0.1:20454->127.0.0.1:18789 remote=127.0.0.1 fwd=n/a origin=n/a host=127.0.0.1:18789 ua=n/a code=1006 reason=n/a phase=ws_upgrade_started durationMs=3 handshake=pending phase=ws_upgrade_started host=127.0.0.1:18789 remoteAddr=127.0.0.1 remotePort=20454 localAddr=127.0.0.1 localPort=18789 endpoint=127.0.0.1:20454->127.0.0.1:18789
+2026-09-26T20:30:59.822+08:00 [ws] closed before connect conn=fd7b6849-7f3f-4218-a3e5-b9b0bd22861e peer=127.0.0.1:40052->127.0.0.1:18789 remote=127.0.0.1 fwd=n/a origin=n/a host=127.0.0.1:18789 ua=n/a code=1006 reason=n/a phase=ws_upgrade_started durationMs=36 handshake=pending phase=ws_upgrade_started host=127.0.0.1:18789 remoteAddr=127.0.0.1 remotePort=40052 localAddr=127.0.0.1 localPort=18789 endpoint=127.0.0.1:40052->127.0.0.1:18789
+2026-09-26T20:30:59.830+08:00 [qqbot] [memowriter] [qqbot:api] <<< Status: 200 OK | TraceId: 30e7a5323d893827daa824c1d6d671d0
+2026-09-26T20:30:59.832+08:00 [qqbot] [checker] [qqbot:api] <<< Status: 200 OK | TraceId: 3980ce46fbf140867a84c5b8c3ee0f40
+2026-09-26T20:30:59.834+08:00 [qqbot] [coder] [qqbot:api] <<< Status: 200 OK | TraceId: 0e9e5c64c170b38fce4c40b56f52ccf6
+2026-09-26T20:30:59.835+08:00 [qqbot] [default] [qqbot:api] <<< Status: 200 OK | TraceId: b6e0d4275e4343c10b5562d28c83fd8a
+2026-09-26T20:30:59.885+08:00 [ws] closed before connect conn=66fa2e77-9f07-4ea9-bcfd-ae356be76a12 peer=127.0.0.1:40058->127.0.0.1:18789 remote=127.0.0.1 fwd=n/a origin=n/a host=127.0.0.1:18789 ua=n/a code=1006 reason=n/a phase=ws_upgrade_started durationMs=8 handshake=pending phase=ws_upgrade_started host=127.0.0.1:18789 remoteAddr=127.0.0.1 remotePort=40058 localAddr=127.0.0.1 localPort=18789 endpoint=127.0.0.1:40058->127.0.0.1:18789
+2026-09-26T20:30:59.887+08:00 [qqbot] [memowriter] [memowriter] Connecting to wss://api.sgroup.qq.com/websocket
+2026-09-26T20:30:59.890+08:00 [qqbot] [checker] [checker] Connecting to wss://api.sgroup.qq.com/websocket
+2026-09-26T20:30:59.892+08:00 [qqbot] [coder] [coder] Connecting to wss://api.sgroup.qq.com/websocket
+2026-09-26T20:30:59.893+08:00 [qqbot] [default] [default] Connecting to wss://api.sgroup.qq.com/websocket
+2026-09-26T20:30:59.908+08:00 [ws] closed before connect conn=f667b91c-1aac-4634-aee4-ebe22137c423 peer=127.0.0.1:40074->127.0.0.1:18789 remote=127.0.0.1 fwd=n/a origin=n/a host=127.0.0.1:18789 ua=n/a code=1006 reason=n/a phase=ws_upgrade_started durationMs=5 handshake=pending phase=ws_upgrade_started host=127.0.0.1:18789 remoteAddr=127.0.0.1 remotePort=40074 localAddr=127.0.0.1 localPort=18789 endpoint=127.0.0.1:40074->127.0.0.1:18789
+2026-09-26T20:30:59.941+08:00 [ws] closed before connect conn=34cc9a1c-f5da-4bdb-968c-6a24165add99 peer=127.0.0.1:56706->127.0.0.1:18789 remote=127.0.0.1 fwd=n/a origin=n/a host=127.0.0.1:18789 ua=n/a code=1006 reason=n/a phase=ws_upgrade_started durationMs=8 handshake=pending phase=ws_upgrade_started host=127.0.0.1:18789 remoteAddr=127.0.0.1 remotePort=56706 localAddr=127.0.0.1 localPort=18789 endpoint=127.0.0.1:56706->127.0.0.1:18789
+2026-09-26T20:31:00.003+08:00 [ws] closed before connect conn=5662db84-e2b7-450f-b9fa-52c129db95f6 peer=127.0.0.1:31046->127.0.0.1:18789 remote=127.0.0.1 fwd=n/a origin=n/a host=127.0.0.1:18789 ua=n/a code=1006 reason=n/a phase=ws_upgrade_started durationMs=11 handshake=pending phase=ws_upgrade_started host=127.0.0.1:18789 remoteAddr=127.0.0.1 remotePort=31046 localAddr=127.0.0.1 localPort=18789 endpoint=127.0.0.1:31046->127.0.0.1:18789
+2026-09-26T20:31:00.023+08:00 [qqbot] [checker] [checker] WebSocket connected
+2026-09-26T20:31:00.025+08:00 [qqbot] [memowriter] [memowriter] WebSocket connected
+2026-09-26T20:31:00.031+08:00 [ws] closed before connect conn=801892e5-9e3a-494e-83d8-53d20ee66b78 peer=127.0.0.1:60896->127.0.0.1:21357 remote=127.0.0.1 fwd=100.74.74.4 origin=https://ub-d-openclaw.tailaceeb8.ts.net:443 host=ub-d-openclaw.tailaceeb8.ts.net ua=n/a code=1006 reason=n/a phase=ws_upgrade_started cause=handshake-timeout durationMs=32428 handshake=failed phase=ws_upgrade_started host=ub-d-openclaw.tailaceeb8.ts.net origin=https://ub-d-openclaw.tailaceeb8.ts.net:443 forwardedFor=100.74.74.4 remoteAddr=127.0.0.1 remotePort=60896 localAddr=127.0.0.1 localPort=21357 endpoint=127.0.0.1:60896->127.0.0.1:21357 handshakeMs=31403
+2026-09-26T20:31:00.045+08:00 [qqbot] [coder] [coder] WebSocket connected
+2026-09-26T20:31:00.058+08:00 [agents/model-registry] model catalog load issue: Invalid models.json schema:
+  - providers.nas.apiKey: *** not have fewer than 1 characters
+File: captured:models.json
+2026-09-26T20:31:00.515+08:00 [qqbot] [default] [default] WebSocket connected
+2026-09-26T20:31:00.518+08:00 [qqbot] [memowriter] [qqbot] gateway READY
+2026-09-26T20:31:00.519+08:00 [qqbot] [memowriter] Gateway ready
+2026-09-26T20:31:03.878+08:00 (node:9454) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 11 exit listeners added to [process]. MaxListeners is 10. Use emitter.setMaxListeners() to increase limit
+(Use `node --trace-warnings ...` to show where the warning was created)
+2026-09-26T20:31:03.885+08:00 [qqbot] [memowriter][approval] registered
+2026-09-26T20:31:03.886+08:00 [qqbot] [coder] [qqbot] gateway READY
+2026-09-26T20:31:03.886+08:00 [qqbot] [coder] Gateway ready
+2026-09-26T20:31:03.889+08:00 [qqbot] [coder][approval] registered
+2026-09-26T20:31:03.890+08:00 [qqbot] [checker] [qqbot] gateway READY
+2026-09-26T20:31:03.891+08:00 [qqbot] [checker] Gateway ready
+2026-09-26T20:31:03.893+08:00 [qqbot] [checker][approval] registered
+2026-09-26T20:31:03.894+08:00 [plugins] [graph-adapter] gm-pro getRecaller() returned null, falling back to self-built Recaller
+2026-09-26T20:31:03.895+08:00 [plugins] [graph-adapter] Embedding initialized (local, keep_alive=-1)
+2026-09-26T20:31:03.913+08:00 [plugins] [graph-memory-pro:index] self-init: LLM initialized
+2026-09-26T20:31:03.914+08:00 [plugins] [graph-memory-pro:index] self-init: Embedding initialized
+2026-09-26T20:31:03.918+08:00 [qqbot] [default] [qqbot] gateway READY
+2026-09-26T20:31:03.918+08:00 [qqbot] [default] Gateway ready
+2026-09-26T20:31:03.923+08:00 [qqbot] [default][approval] registered
+2026-09-26T20:31:03.939+08:00 [plugins] [graph-memory-pro:index] self-init: JudgeManager initialized
+2026-09-26T20:31:03.947+08:00 [plugins] [graph-adapter] injected JudgeManager into Recaller (feedback loop enabled)
+2026-09-26T20:31:03.948+08:00 [plugins] [graph-adapter] Recaller ready (dual-path recall enabled)
+2026-09-26T20:31:03.960+08:00 [plugins] [graph-memory-pro] LLM initialized via runtime (provider detection deferred to first call)
+2026-09-26T20:31:03.968+08:00 [plugins] [graph-memory-pro] judge enabled (warmup=20, persisted=3418)
+2026-09-26T20:31:04.018+08:00 [feishu] feishu[coder]: bot open_id resolved: ou_6cf43ce10ccf5aa38b1b7faefec4c087
+[sqlite/transaction] slow SQLite transaction hold async=false database=/home/wljmmx/.openclaw/state/openclaw.sqlite elapsedMs=3426 isMainThread=false operation=state.write pid=9454 threadId=7 thresholdMs=1000
+2026-09-26T20:31:04.023+08:00 [plugins] [graph-memory-pro:index] self-init: LLM initialized
+2026-09-26T20:31:04.024+08:00 [plugins] [graph-memory-pro:index] self-init: Embedding initialized
+2026-09-26T20:31:04.032+08:00 [plugins] [graph-memory-pro] LLM initialized via runtime (provider detection deferred to first call)
+2026-09-26T20:31:04.035+08:00 [plugins] [graph-memory-pro:index] self-init: JudgeManager initialized
+2026-09-26T20:31:04.047+08:00 [plugins] [graph-memory-pro] judge enabled (warmup=20, persisted=3418)
+2026-09-26T20:31:04.081+08:00 [plugins] [lcm-graph-extra] Neo4j edition: Enterprise (multi-db isolation: enabled)
+2026-09-26T20:31:04.092+08:00 [feishu] feishu[main]: bot open_id resolved: ou_f9edaaafef3e9415689a25a1b4697673
+2026-09-26T20:31:04.146+08:00 [feishu] feishu[memowriter]: bot open_id resolved: ou_8e1d1d96f7b71f06b181322aa2c4e012
+2026-09-26T20:31:04.163+08:00 [feishu] feishu[checker]: bot open_id resolved: ou_e05d8f1a9dfbcee8b7b86763cc97b305
+2026-09-26T20:31:04.208+08:00 [plugins] [lcm-graph-extra] pre-init completed, graphAdapter ready for snapshot
+2026-09-26T20:31:04.226+08:00 [info]: [ 'event-dispatch is ready' ]
+2026-09-26T20:31:04.236+08:00 [feishu] feishu[coder]: starting WebSocket connection...
