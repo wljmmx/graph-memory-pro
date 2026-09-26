@@ -1,5 +1,8 @@
 node_modules/
 dist/
+# 原子发布的中间目录（见 scripts/publish-dist.mjs）
+dist.staging/
+dist.old/
 *.db
 *.db-wal
 *.db-shm

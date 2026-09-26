@@ -33,6 +33,10 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Verify dist is self-contained
+        # 阻断回归：入口必须为单文件且无相对模块引用，否则宿主捕获会丢文件 → ERR_MODULE_NOT_FOUND
+        run: npm run verify:dist
+
       - name: Test
         run: npm test
         env:

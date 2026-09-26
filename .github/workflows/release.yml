@@ -40,6 +40,10 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Verify dist is self-contained
+        # 发布门禁：上传/发布的产物必须自包含，避免宿主捕获丢文件 → ERR_MODULE_NOT_FOUND
+        run: npm run verify:dist
+
       - name: Test
         run: npm test
         env:

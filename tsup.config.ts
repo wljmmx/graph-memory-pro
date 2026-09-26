@@ -1,6 +1,10 @@
 import { defineConfig } from "tsup";
 
-export default defineConfig({
+// 原子发布：非 watch 构建先输出到 dist.staging，构建成功后再整体替换 dist（见 scripts/publish-dist.mjs）。
+//   watch 模式下宿主需要实时读取 dist，故直接写 dist、不做替换。
+const NON_WATCH_OUT_DIR = "dist.staging";
+
+export default defineConfig((overrideOptions) => ({
   entry: ["index.ts"],
   format: ["esm"],
   // 启用类型声明生成：dist/index.d.ts
@@ -9,6 +13,7 @@ export default defineConfig({
   dts: true,
   sourcemap: true,
   clean: true,
+  outDir: overrideOptions.watch ? "dist" : NON_WATCH_OUT_DIR,
   // 关闭代码分割（构建产物必须自包含）——宿主（openclaw）加载插件时按「源目录捕获」逐个文件
   //   惰性物化到 plugin-captures/.../package-N/node_modules/<pkg>/ 下：入口文件先复制，
   //   其余文件在该运行时真正 import 时才按需从源目录再复制。
@@ -18,7 +23,8 @@ export default defineConfig({
   //   等动态 import 处报错），且报错点分散、与业务逻辑无关。
   //   关闭后产物为单文件 dist/index.js：入口不依赖任何兄弟 .js，捕获不可能丢文件。
   //   本插件只有一个入口，原本也不存在跨入口去重的收益。
+  //   该不变式由 scripts/verify-dist-selfcontained.mjs 在 CI / Release 中强制校验。
   splitting: false,
   target: "es2022",
   external: [/^node:/, "openclaw", "neo4j-driver", "@modelcontextprotocol/sdk", "zod"],
-});
+}));
