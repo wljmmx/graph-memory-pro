@@ -65,6 +65,7 @@
   },
   "files": [
     "dist/",
+    "doctor-contract-api.js",
     "README.md",
     "LICENSE",
     "openclaw.plugin.json"

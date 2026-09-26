@@ -17,7 +17,11 @@
     ]
   },
   "doctorContract": {
-    "stateMigrations": true
+    "stateMigrations": [
+      {
+        "id": "graph-memory-pro-plugin-state-v1"
+      }
+    ]
   },
   "uiHints": {
     "neo4j": {
