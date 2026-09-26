@@ -4,6 +4,80 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.4.4] — 2026-09-26
+
+本轮集中修复「插件在真实宿主中加载失败 / 永久降级」的三类问题：构建产物不自包含、同进程多模块实例资源竞争、清单假声明迁移义务。
+
+### Fixed — 构建产物必须自包含（宿主捕获丢文件）
+
+**现象**：宿主日志出现 `Error [ERR_MODULE_NOT_FOUND]: Cannot find module '.../graph-memory-pro/dist/recall-NXFO5YHD.js' imported from '.../graph-memory-pro/dist/index.js'`，以及同类的 `http-server-S6HL4RCG.js`；表现为 `self-init: Recaller init failed` 与 `API server start failed`，报错点分散且与业务逻辑无关。
+
+**根因**：宿主按「源目录捕获 + 惰性物化」加载插件——先把入口 `dist/index.js` 复制到 `plugin-captures/.../` 下，其余文件在该运行时真正 `import` 时才按需复制。tsup 默认开启代码分割，`dist/` 会产出 57 个内容哈希命名的兄弟 chunk（本次复现出的 chunk 名与线上报错**逐字一致**：`recall-NXFO5YHD.js` / `http-server-S6HL4RCG.js`，哈希相同即内容相同）。一旦 `clean` 与捕获竞争，入口里写死的 chunk 名在捕获目录中不存在，即触发上述错误。
+
+**修复**：
+- [tsup.config.ts](tsup.config.ts) 关闭代码分割（`splitting: false`）→ 产物为单文件 `dist/index.js`，入口不依赖任何兄弟 `.js`。本插件只有一个入口，原本也不存在跨入口去重的收益。
+- 新增 [scripts/verify-dist-selfcontained.mjs](scripts/verify-dist-selfcontained.mjs) 与 `npm run verify:dist`，作为 CI / Release 的**阻断门禁**，断言三件事：入口存在；`dist/` 内 JS 产物有且仅有入口一个；入口内不存在相对模块引用。负向验证：把 `splitting` 改回 `true` 时该步骤 exit=1 并逐个列出 57 个兄弟 chunk。
+- 新增 [scripts/publish-dist.mjs](scripts/publish-dist.mjs) 并接入 `npm run build`：非 watch 构建先完整落在 `dist.staging`，成功后再替换 `dist`（watch 模式仍直接写 `dist`，避免打断宿主热读）。
+
+**已知边界**：POSIX 无法对非空目录做单次原子替换，替换仍是「两次 rename」，因此捕获空窗由秒级（含 dts 生成的构建期）收窄到微秒级，而非彻底消除；彻底消除需宿主侧原子物化。
+
+### Fixed — 同进程多模块实例资源竞争（端口占用 / 端口漂移 / 心跳不收敛）
+
+**现象**：同一 gateway 进程内 `module loaded` 出现 3 次、`register() called by Gateway` 出现 2 次、两套完整 self-init 序列；API server 由 7850 漂移到 7852 / 7853，MCP 由 7800 漂移到 7803；`MaxListenersExceededWarning: 11 exit listeners added to [process]`；`[graph-adapter] gm-pro getRecaller() returned null, falling back to self-built Recaller`；随后 `mcp-server` 探针每 30s 报 `unhealthy (N consecutive), recovering...` 并在 7800→7803 上反复 `EADDRINUSE`，**永不收敛**。
+
+**根因**：宿主同进程加载本插件的两个模块实例（`~/.openclaw/extensions/graph-memory-pro/dist/index.js` 一份，被 lcm-graph-extra 按包名 import 的副本另一份）。ESM 模块缓存按 specifier 隔离，模块级 `let _x` 各持一份，因此 `_apiServerHandle` / `_mcpServerHandle` / `_apiServerAutoStarted` / `_heartbeatHandle` / 定时器等守卫全部失效。第二个实例抢 MCP 端口失败后 `_mcpServerHandle` 恒为 null，其心跳探针恒判不健康 → 每 30s 触发一次注定失败的重建。`getRecaller()` 返回模块级变量，另一个实例恒为 null，正是 [index.ts](index.ts) 注释预警的「双实例 / 关联矩阵 M 分叉」。
+
+**修复**：
+- 新增 [src/process-state.ts](src/process-state.ts)：以 `globalThis` + `Symbol.for` 建立**进程级共享状态**并实现 claim-or-reuse 所有权——**资源全局唯一，注册按实例各一份**：只有所有者实例创建资源（driver / LLM / Embedding / Recaller / server 句柄 / 定时器），其余实例复用并跳过创建；tools / hooks / services 是宿主 API，仍按宿主实际调用的实例各注册一次。
+- [index.ts](index.ts) 的 server 句柄、后台定时器、心跳句柄统一经进程级状态读写；非所有者实例不再对共享资源发起重启。
+- [src/server/heartbeat.ts](src/server/heartbeat.ts)：`recover()` 返回 ≠ 已恢复，故恢复后**立即复检**；未恢复则按 `base → 2× → 4× → … → 封顶 5min` 指数退避，恢复成功即清零。原先等间隔重试的抖动循环由此收敛。
+- 顺带修复同类漏改点：`registerService("graph-memory-mcp")` 启动后的健康探测原先仍探配置端口（`cfg.mcp.port`），端口漂移后必然误报；改用 `handle.port`（心跳探针早已如此，此处漏改）。
+- 设计易错点（写测试时发现）：实例身份必须在**模块作用域**求值。若把 `instanceId` 放进共享对象，第二个实例会读到第一个实例的 id，`coreOwnerId === instanceId` 对两者同时成立，两个都会自认为所有者，单例守卫形同虚设。
+
+### Fixed — 清单假声明迁移义务（永久降级告警）
+
+**现象**：每次启动均有
+`[config] warnings: plugins.entries.graph-memory-pro: Plugin "graph-memory-pro" settings cannot be checked until its data/settings upgrade finishes.`
+与
+`[state-migrations] Plugin "graph-memory-pro" data/settings upgrade is unfinished ...`，且 `openclaw doctor --fix` 无法修复。
+
+**根因**：[openclaw.plugin.json](openclaw.plugin.json) 声明了 `doctorContract.stateMigrations: true`，但本插件从未提供 doctor contract 实现。宿主据此把插件判为「有未完成的迁移义务」，而该标记一旦落库**只增不减**（宿主 `mergeDeferredPluginMigration` 保留 `requiresStateMigration`），且没有任何 CLI 能清除；唯一能覆盖它的是插件真的报告一次「迁移已完成」。
+
+**修复**：
+- 新增 [doctor-contract-api.js](doctor-contract-api.js)（**插件根目录**，非 `dist/`）：零 import 的 ESM，导出 `stateMigrations` 一条，`detectLegacyState()` 恒返回 `null`（= 无遗留状态可迁）、`migrateLegacyState()` 返回零变更。不读写任何文件、数据库或插件状态，属 fail-closed。
+- [openclaw.plugin.json](openclaw.plugin.json) 改为数组声明 `doctorContract.stateMigrations: [{ id: "graph-memory-pro-plugin-state-v1" }]`（id 与产物逐字一致）。宿主校验要求 manifest 声明与产物导出逐项一致（id / doctorOnly / phase），故新增 [test/doctor-contract.test.ts](test/doctor-contract.test.ts) 守护该一致性。
+- 放根目录而非 `dist/`：宿主的产物解析顺序为 `[filename, dist/filename]`、根目录优先，因此不进入 `dist/`，不破坏上面的单文件自包含不变式。
+- [package.json](package.json) `files` 加入 `doctor-contract-api.js`，否则 npm 发布时被丢弃。
+
+**为何「数组声明 + 产物」是唯一可结清的组合**（四种组合均在宿主分类代码上核对）：`stateMigrations: true` → 永不完成的义务；只删声明不建产物 → 分类为 stateless，但仍被已落库的 sticky 标记一票否决；只建产物不声明 → 被判 `requiresDoctorInspection` 显式拒绝；声明空数组 + 产物 → 同上。只有「非空数组声明 + 可加载产物 + 无迁移计划」能进入宿主的 `completedPluginIds`，从而覆盖 sticky 标记并把记录翻为 completed。
+
+### Fixed — 插件 SDK 契约合规
+
+- **放弃类型契约**：[index.ts](index.ts) `register(api: any)` → `register(api: OpenClawPluginApi)`，恢复编译期检查（本次即暴露并修正了 5 处 API 误用）。
+- **typed hook 从未触发**：`api.registerHook` 对 `PluginHookName`（`agent_end` / `after_tool_call` / `llm_output`）不会被调用，改用 `api.on` 并修正 handler 签名。此为「学习曲线长期恒空」的根因——hook 从未触发。
+- **`supplement.get` 语义**：未找到时原返回带 `status: "not_found"` 的对象，与宿主 `if (!result) return null` 的判定不符，现改为直接返回 `null`。
+- **注释与实现不符**：文件头「HTTP 路由通过 api.registerHttpRoute 注册」与实际自建 `http.createServer`（默认 127.0.0.1:7850）不符，已按实现修正注释。
+
+### Changed — 版本元数据统一
+
+`src/version.ts`（2.4.2 → 2.4.4）、[package.json](package.json)、[openclaw.plugin.json](openclaw.plugin.json)（2.4.3 → 2.4.4）三处版本对齐；`openclaw.build.openclawVersion` / `pluginSdkVersion` 由 2026.8.1 更新为实跑版本 **2026.9.6**；`peerDependencies.openclaw` 保持 `>=2026.8.1`。[test/version.test.ts](test/version.test.ts) 与 [README.md](README.md) 同步。
+
+### Added — 测试
+
+- 新增 [test/process-state.test.ts](test/process-state.test.ts) 7 用例：以 `vi.resetModules()` + 二次动态 import 制造**两个真实模块实例**，覆盖「共享同一状态对象」「实例身份互不相同」「只有首个可认领、其余一律 reuse」「所有者失败后可重新认领」「`waitForCoreInit` 的 ready / failed / 有界超时」「`releaseServerHandle` 并发只关闭一次」。
+- [test/heartbeat.test.ts](test/heartbeat.test.ts) 新增 2 用例：恢复后仍不健康时的指数退避；恢复成功后退避清零（fake timers 断言具体间隔）。
+- 新增 [test/doctor-contract.test.ts](test/doctor-contract.test.ts) 6 用例：产物形状符合宿主判定 / manifest 与产物逐项一致 / `detectLegacyState` 返回 null / `migrateLegacyState` 零变更 / 产物零 import / 已列入 `files`。
+- 总测试数 697 → **712**。
+
+### Configuration Migration — 配置迁移（v2.4.0 → v2.4.4）
+
+无破坏性变更，现有 `plugins.entries.graph-memory-pro` 配置无需任何改动。
+
+**部署注意**：
+- `doctor-contract-api.js` 需存在于插件根目录（npm 安装会自动包含；若手工只同步 `dist/` 需补齐），否则宿主会拒绝该轮插件迁移执行。
+- CI / Release 新增 `npm run verify:dist` 阻断步骤：构建产物不再允许代码分割或相对模块引用。
+- 升级后首次启动建议跑一次 `openclaw doctor --fix`，以结清历史遗留的迁移义务记录。
+
 ## [2.4.0] — 2026-08-12
 
 ### Added — 检索质量与输出增强（6 项能力）
