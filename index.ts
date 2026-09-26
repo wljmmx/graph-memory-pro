@@ -42,8 +42,29 @@ import { embedNode } from "./src/store/embed-helper.ts";
 import { runIncrementalMaintenance } from "./src/graph/incremental-maintenance.ts";
 import type { IncrementalMaintenanceResult } from "./src/graph/incremental-maintenance.ts";
 import type { JudgeResult } from "./src/recaller/judge.ts";
+// v2.8.x: 进程级共享状态——消除同进程多模块实例的资源竞争（双绑定/端口漂移/心跳不收敛）
+import {
+  getProcessState,
+  getInstanceId,
+  claimCoreInit,
+  beginCoreInit,
+  settleCoreInit,
+  waitForCoreInit,
+  publishSharedState,
+  releaseServerHandle,
+} from "./src/process-state.ts";
 
 const log = createLogger("index");
+
+/**
+ * 进程级共享状态。
+ *
+ * 宿主可在同一进程内加载本插件的多个模块实例（extensions 目录一份 + 被
+ * lcm-graph-extra 按包名 import 的一份）。模块级 `let _x` 按实例各持一份，
+ * 因此**资源**（driver / recaller / server 句柄 / 定时器）一律经此共享；
+ * **注册**（tools / hooks / services）仍按宿主实际调用的实例各注册一次。
+ */
+const _ps = getProcessState();
 
 // ─── 类型定义（SDK 不导出类型，此处定义最小化接口） ──────
 
@@ -178,6 +199,59 @@ let _apiServerAutoStarted = false;
 let _apiServerDriver: Driver | null = null;
 // v2.5.x: 心跳自愈服务句柄（探测 API/MCP/driver，崩溃后自动重建）
 let _heartbeatHandle: HeartbeatHandle | null = null;
+
+// ─── 进程级资源共享访问器 ──────────────────────────────
+//
+// 下列函数把「句柄/定时器」的读写统一到进程级状态（_ps）。必要性：
+//   - 非所有者实例自身未启动 server，其模块级 `_apiServerHandle/_mcpServerHandle`
+//     恒为 null。若探针读模块变量，就会把「别人启动的服务」误判为不健康，
+//     进而每 30s 触发一次注定 EADDRINUSE 的重建 → 永不收敛的死循环。
+//   - 定时器同理：非所有者实例读到模块变量为 null 会再起一套 setInterval。
+
+/** 取进程级 API server 句柄（任一实例均可观察到所有者的句柄） */
+function currentApiHandle(): { port: number; close(): Promise<void> } | null {
+  return _ps.apiServerHandle ?? _apiServerHandle;
+}
+
+/** 取进程级 MCP server 句柄（任一实例均可观察到所有者的句柄） */
+function currentMcpHandle(): { port: number; close(): Promise<void> } | null {
+  return _ps.mcpServerHandle ?? _mcpServerHandle;
+}
+
+/**
+ * 非所有者实例：把所有者发布的核心资源引用搬进本实例，使本实例的
+ * tools / hooks / registerMemoryCorpusSupplement 也能工作。
+ *
+ * 只读取不写入 —— 非所有者绝不能覆盖所有者已发布的引用。
+ */
+function adoptSharedState(): void {
+  _driver = _ps.driver;
+  _cfg = _ps.cfg;
+  _llm = _ps.llm;
+  _embed = _ps.embed;
+  _batchEmbed = _ps.batchEmbed;
+  _recaller = _ps.recaller;
+  _extractor = _ps.extractor;
+  _apiServerHandle = _ps.apiServerHandle;
+  _mcpServerHandle = _ps.mcpServerHandle;
+  _apiServerAutoStarted = _ps.apiServerAutoStarted;
+}
+
+/** 所有者实例：把本实例持有的核心资源引用发布到进程级状态供其他实例复用 */
+function publishCoreResources(): void {
+  publishSharedState({
+    driver: _driver,
+    cfg: _cfg,
+    llm: _llm,
+    embed: _embed,
+    batchEmbed: _batchEmbed,
+    recaller: _recaller,
+    extractor: _extractor,
+    apiServerHandle: _apiServerHandle,
+    mcpServerHandle: _mcpServerHandle,
+    apiServerAutoStarted: _apiServerAutoStarted,
+  });
+}
 
 // ─── 辅助函数 ──────────────────────────────────────────
 
@@ -455,10 +529,24 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
   //   调用方（autoStartApiServer）在调用前已同步置位 _apiServerAutoStarted；此处再复查
   //   句柄，若已由其它链启动则直接返回，避免重复 startApiServer → EADDRINUSE 端口漂移
   //   （7850→7852）与双监听泄漏。
-  if (_apiServerHandle) {
+  if (currentApiHandle()) {
     log.info("startApiServerFromDriver: API server already started, skipping (idempotent guard)");
     return;
   }
+
+  // v2.8.x 进程级认领：模块级守卫只能防「同实例内」并发，防不住「同进程多实例」。
+  //   非所有者实例必须复用所有者的资源，否则会再起一套 server/池/定时器 →
+  //   EADDRINUSE + 端口漂移（7850→7852、7800→7803）+ 双份 Neo4j 连接池。
+  if (claimCoreInit() === "reuse") {
+    const waited = await waitForCoreInit();
+    adoptSharedState();
+    log.info(
+      `auto-start: reusing core resources from instance #${_ps.coreOwnerId} (${waited}); this instance #${getInstanceId()} will not start servers`,
+    );
+    return;
+  }
+  beginCoreInit();
+
   // 同步 index.ts 的 _driver（供 tools / services 使用）
   if (!_driver) {
     _driver = driver;
@@ -470,6 +558,8 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
     const cfg = await readFullConfigFromFile();
     if (!cfg) {
       log.error("no config available for API server, aborting");
+      // 必须在放弃初始化时兑现 in-flight promise，否则并发实例会白等到超时
+      settleCoreInit(false);
       return;
     }
 
@@ -530,7 +620,10 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
           const { createAssociationMatrixPersisted } = await import("./src/recaller/association-matrix-persist.ts");
           const amDim = resolveEmbedDimension(cfg);
           const { am, loaded, path } = await createAssociationMatrixPersisted(amDim, cfg);
-          if (!am) return;
+          if (!am) {
+            settleCoreInit(false);
+            return;
+          }
           _recaller.setAssociationMatrix(am);
           log.info(`self-init: AssociationMatrix initialized (dim=${amDim}, persistedRestored=${loaded}, path=${path})`);
         }
@@ -569,6 +662,8 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
       _batchEmbed ?? undefined,
     );
     log.info("API server started (module-level, full init)");
+    // v2.8.x: 立即发布句柄，让并发中的其他实例的守卫/探针能看到真实句柄
+    publishCoreResources();
 
     // 7. 启动 MCP Server（7800）— v2.5.x: self-init 路径此前遗漏 MCP 启动，
     //    仅 doGatewayInit 的 registerService 会启动，导致 self-init 部署下 7800 无监听。
@@ -586,6 +681,7 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
         // v2.3.3 MCP-1: 启动后健康探测，确认 server 真正就绪（非仅 listen 成功）
         // v2.5.x fix: 用 handle.port（自动重试后可能 ≠ cfg.mcp.port），避免端口漂移时误判
         const actualPort = _mcpServerHandle.port;
+        publishCoreResources();
         const host = cfg.mcp?.host ?? "127.0.0.1";
         try {
           const resp = await fetch(`http://${host}:${actualPort}/health`, { signal: AbortSignal.timeout(3000) });
@@ -610,22 +706,24 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
     // api.registerService 启动；在 self-init 部署下宿主未调用 register()，
     // 导致后台提取与图谱维护定时器缺失。此处按 registerService 的 start
     // 逻辑对称启动，并用模块级 timer + 防重复保护避免与宿主注册重复。
-    if (!_extractorTimer) {
+    if (!_extractorTimer && !_ps.extractorTimer) {
       try {
         const interval = getExtractorIntervalMs();
         _extractorTimer = startBackgroundExtractor(interval, apiLogger);
+        _ps.extractorTimer = _extractorTimer;
         log.info(`[graph-memory-pro] background extractor scheduled (interval=${interval}ms)`);
       } catch (err) {
         log.warn(`[graph-memory-pro] background extractor start failed: ${err}`);
       }
     }
-    if (!_maintenanceTimer) {
+    if (!_maintenanceTimer && !_ps.maintenanceTimer) {
       try {
         const interval = cfg.background?.maintenanceIntervalMs ?? 6 * 3600_000;
         // v2.5.4: initialDelay 从 5min→30min（默认），可配置。避免启动初期
         // lossless-claw compaction 与 community summary 同时调 LLM 把 Ollama 打成 503
         const initialDelay = getMaintenanceInitialDelayMs();
         _maintenanceTimer = startBackgroundMaintenance(interval, initialDelay, apiLogger);
+        _ps.maintenanceTimer = _maintenanceTimer;
         log.info(`[graph-memory-pro] background maintenance scheduled (interval=${interval}ms, initialDelay=${initialDelay}ms)`);
       } catch (err) {
         log.warn(`[graph-memory-pro] background maintenance start failed: ${err}`);
@@ -634,8 +732,14 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
 
     // 9. 启动心跳自愈服务（v2.5.x）
     startHeartbeatMonitor();
+
+    // 10. 初始化完成 —— 兑现 in-flight promise，并发布全部核心资源供其他实例复用。
+    //     缺失这步会让并发实例在 waitForCoreInit 上白等到超时。
+    publishCoreResources();
+    settleCoreInit(true);
   } catch (err) {
     log.error(`API server start failed: ${err}`);
+    settleCoreInit(false);
   }
 }
 
@@ -973,8 +1077,9 @@ function startBackgroundMaintenance(
 /** 重建 API server（先关闭旧句柄，再以当前组件重新启动） */
 async function restartApiServer(): Promise<void> {
   if (!_driver || !_cfg) return;
-  if (_apiServerHandle) {
-    try { await _apiServerHandle.close(); } catch { /* ignore */ }
+  // v2.8.x: 用进程级释放——句柄可能由所有者实例持有，避免"非所有者关不掉也起不来"
+  if (currentApiHandle()) {
+    await releaseServerHandle("api");
     _apiServerHandle = null;
   }
   const apiLogger = { info: (m: string) => log.info(m), error: (m: string) => log.error(m), warn: (m: string) => log.warn(m) };
@@ -995,6 +1100,7 @@ async function restartApiServer(): Promise<void> {
       _recaller ?? undefined,
       _batchEmbed ?? undefined,
     );
+    publishCoreResources();
     log.info(`[heartbeat] API server re-established (port=${_apiServerHandle.port})`);
   } catch (err) {
     log.error(`[heartbeat] API server restart failed: ${err}`);
@@ -1004,8 +1110,9 @@ async function restartApiServer(): Promise<void> {
 /** 重建 MCP server（先关闭旧句柄，再以当前组件重新启动） */
 async function restartMcpServer(): Promise<void> {
   if (!_driver || !_cfg || _cfg.mcp?.enabled !== true) return;
-  if (_mcpServerHandle) {
-    try { await _mcpServerHandle.close(); } catch { /* ignore */ }
+  // v2.8.x: 同 restartApiServer —— 经进程级状态释放，再短暂等待内核回收端口
+  if (currentMcpHandle()) {
+    await releaseServerHandle("mcp");
     _mcpServerHandle = null;
     // v2.5.x fix: close() 后短暂等待，给内核释放端口（TIME_WAIT → 释放）的时间窗口；
     //   MCP Streamable HTTP 常有 hold-sockets 场景，close 不等于端口立刻可用。
@@ -1020,6 +1127,7 @@ async function restartMcpServer(): Promise<void> {
       _recaller ?? undefined,
       _batchEmbed ?? undefined,
     );
+    publishCoreResources();
     log.info(`[heartbeat] MCP server re-established (port=${_mcpServerHandle.port})`);
   } catch (err) {
     log.error(`[heartbeat] MCP server restart failed: ${err}`);
@@ -1057,9 +1165,11 @@ async function recoverDriver(): Promise<void> {
   }
 }
 
-/** 启动心跳自愈服务（幂等：已有句柄则跳过） */
+/** 启动心跳自愈服务（进程级幂等：任一实例已启动则跳过） */
 function startHeartbeatMonitor(): void {
-  if (_heartbeatHandle) return;
+  // v2.8.x: 读进程级句柄 —— 模块级守卫只能防同实例重复启动，
+  //   多实例下会各自跑一套心跳，同一资源被 N 个心跳同时"恢复"。
+  if (_ps.heartbeatHandle || _heartbeatHandle) return;
   if (_cfg?.heartbeat?.enabled === false) {
     log.info("[heartbeat] monitor disabled via config");
     return;
@@ -1073,10 +1183,13 @@ function startHeartbeatMonitor(): void {
   probes.push({
     name: "api-server",
     check: async () => {
-      if (!_apiServerHandle) return false;
+      // v2.8.x: 用进程级句柄 —— 非所有者实例自身没启动 server，但必须能
+      //   观察到所有者的句柄，否则会把健康服务误判为不健康并反复重建。
+      const handle = currentApiHandle();
+      if (!handle) return false;
       // v2.5.x fix: 用 handle.port（自动重试后可能 ≠ cfg.apiServer.port），避免
       //   端口漂移（EADDRINUSE → 7851/7852）后仍探测 7850 持续 false → 抖动重启循环
-      const port = _apiServerHandle.port;
+      const port = handle.port;
       try {
         const resp = await fetch(`http://${apiHost}:${port}/health`, { signal: AbortSignal.timeout(3000) });
         return resp.ok;
@@ -1091,10 +1204,11 @@ function startHeartbeatMonitor(): void {
     probes.push({
       name: "mcp-server",
       check: async () => {
-        if (!_mcpServerHandle) return false;
+        const handle = currentMcpHandle();
+        if (!handle) return false;
         // v2.5.x fix: 用 handle.port（自动重试后可能 ≠ cfg.mcp.port），避免
         //   端口漂移后仍探测 7800 持续 false → 反复触发重启
-        const port = _mcpServerHandle.port;
+        const port = handle.port;
         try {
           const resp = await fetch(`http://${mcpHost}:${port}/health`, { signal: AbortSignal.timeout(3000) });
           return resp.ok;
@@ -1108,8 +1222,9 @@ function startHeartbeatMonitor(): void {
   probes.push({
     name: "neo4j-driver",
     check: async () => {
-      if (!_driver) return false;
-      return verifyConnectivity(_driver);
+      const driver = _ps.driver ?? _driver;
+      if (!driver) return false;
+      return verifyConnectivity(driver);
     },
     recover: recoverDriver,
   });
@@ -1123,11 +1238,13 @@ function startHeartbeatMonitor(): void {
       debug: (m: string) => log.debug?.(m),
     },
   });
+  _ps.heartbeatHandle = _heartbeatHandle;
   log.info(`[heartbeat] monitor started (interval=${intervalMs}ms, probes=[${probes.map(p => p.name).join(", ")}])`);
 }
 
 async function autoStartApiServer(): Promise<void> {
-  if (_apiServerAutoStarted) return;
+  // v2.8.x: 同时看进程级状态 —— 其他实例已认领时，本实例不再启动任何 server
+  if (_apiServerAutoStarted || _ps.apiServerAutoStarted) return;
 
   // v2.3.5 fix: 缩短纯轮询窗口（30s→10s），尽快尝试 self-init。
   //   原逻辑 30s 纯轮询期间 driver 为 null，quickHealth 误报 "driver unavailable"。
@@ -1142,13 +1259,14 @@ async function autoStartApiServer(): Promise<void> {
   for (let i = 0; i < FAST_ATTEMPTS; i++) {
     // v2.5.x fix: 每轮复查，避免 register()→doGatewayInit 已在上一轮 await 期间
     // 声明占用（_apiServerAutoStarted=true）后，本循环仍启动第二个 API server。
-    if (_apiServerAutoStarted || _apiServerHandle) {
+    if (_apiServerAutoStarted || currentApiHandle()) {
       log.info("auto-start: API server already started, skipping fast-loop");
       return;
     }
     const driver = getDriver();
     if (driver) {
       _apiServerAutoStarted = true;
+      _ps.apiServerAutoStarted = true;
       await startApiServerFromDriver(driver);
       return;
     }
@@ -1157,19 +1275,23 @@ async function autoStartApiServer(): Promise<void> {
 
   // 阶段 2：自驱动初始化 — 轮询失败，尝试自建 driver
   log.warn("auto-start: gateway driver not ready after 10s, trying self-init...");
-  if (_apiServerAutoStarted || _apiServerHandle) return;
+  if (_apiServerAutoStarted || currentApiHandle()) return;
   const selfDriver = await trySelfInitDriver();
   if (selfDriver) {
     _apiServerAutoStarted = true;
+    _ps.apiServerAutoStarted = true;
     await startApiServerFromDriver(selfDriver);
     return;
   }
 
   // 阶段 3：慢速重试 — 自建失败，持续等待外部 driver 就绪
   log.warn("auto-start: self-init failed, switching to slow retry (every 10s)");
+  // v2.8.x: 进程级唯一 —— 多实例各起一个重试定时器只会放大启动期的端口争用
+  if (_ps.autoStartRetryTimer) return;
   _autoStartRetryTimer = setInterval(async () => {
-    if (_apiServerAutoStarted) {
+    if (_apiServerAutoStarted || _ps.apiServerAutoStarted) {
       if (_autoStartRetryTimer) { clearInterval(_autoStartRetryTimer); _autoStartRetryTimer = null; }
+      _ps.autoStartRetryTimer = null;
       return;
     }
 
@@ -1177,7 +1299,9 @@ async function autoStartApiServer(): Promise<void> {
     const driver = getDriver();
     if (driver) {
       _apiServerAutoStarted = true;
+      _ps.apiServerAutoStarted = true;
       if (_autoStartRetryTimer) { clearInterval(_autoStartRetryTimer); _autoStartRetryTimer = null; }
+      _ps.autoStartRetryTimer = null;
       await startApiServerFromDriver(driver);
       return;
     }
@@ -1185,13 +1309,16 @@ async function autoStartApiServer(): Promise<void> {
     // 再次尝试自建 driver（Neo4j 可能刚启动）
     const selfDriverRetry = await trySelfInitDriver();
     // v2.5.x fix: await 后复查——期间 doGatewayInit 可能已完成启动
-    if (_apiServerAutoStarted || _apiServerHandle) return;
+    if (_apiServerAutoStarted || currentApiHandle()) return;
     if (selfDriverRetry) {
       _apiServerAutoStarted = true;
+      _ps.apiServerAutoStarted = true;
       if (_autoStartRetryTimer) { clearInterval(_autoStartRetryTimer); _autoStartRetryTimer = null; }
+      _ps.autoStartRetryTimer = null;
       await startApiServerFromDriver(selfDriverRetry);
     }
   }, SLOW_POLL_MS);
+  _ps.autoStartRetryTimer = _autoStartRetryTimer;
 }
 
 /**
@@ -1208,12 +1335,17 @@ export function registerExternalDriver(driver: Driver): void {
 }
 
 /**
- * 返回模块级 Recaller 单例(A)，供外部插件（如 lcm-graph-extra）复用，
+ * 返回进程级 Recaller 单例(A)，供外部插件（如 lcm-graph-extra）复用，
  * 避免各自 new Recaller 造成双实例 / 关联矩阵 M 分叉。
  * 未初始化时返回 null（调用方应降级或稍后重试）。
+ *
+ * v2.8.x: 改为读进程级状态。此前返回模块级 `_recaller`，而 lcm-graph-extra
+ *   加载的是本插件的**另一个模块实例**，其 `_recaller` 恒为 null →
+ *   graph-adapter 打印 "getRecaller() returned null, falling back to self-built
+ *   Recaller" 并回退自建，正是本注释警告的 M 分叉场景。
  */
 export function getRecaller(): Recaller | null {
-  return _recaller;
+  return _ps.recaller ?? _recaller;
 }
 
 /**
@@ -1396,6 +1528,23 @@ async function doGatewayInit(api: any, logger: LoggerLike): Promise<void> {
     apiServer: pluginConfig.apiServer ?? { enabled: true, port: 7850, host: "127.0.0.1" },
   };
 
+  // v2.8.x 进程级认领：同一进程内多个模块实例时，只有所有者创建资源
+  //   （driver / LLM / Embedding / Recaller / server / 定时器）。
+  //   非所有者复用所有者发布的引用 —— 否则两套实例会争抢 7850/7800，
+  //   且各自的 Recaller 会写同一份 association-matrix.json，导致 M 矩阵分叉。
+  if (claimCoreInit() === "reuse") {
+    const waited = await waitForCoreInit();
+    if (_ps.driver) adoptSharedState();
+    log.info(
+      `gateway init: reusing core resources from instance #${_ps.coreOwnerId} (${waited}); instance #${getInstanceId()} skips driver/LLM/Recaller/server creation`,
+    );
+    if (!_driver) {
+      log.warn("gateway init: owner resources not published yet; tools on this instance may be degraded until the owner finishes");
+    }
+    return;
+  }
+  beginCoreInit();
+
   // 1. 连接 Neo4j
   const driver = await getOrCreateDriver(_cfg, logger);
   if (!driver) {
@@ -1404,6 +1553,9 @@ async function doGatewayInit(api: any, logger: LoggerLike): Promise<void> {
     //   只能依赖 autoStartApiServer 的 10s 慢轮询恢复。心跳幂等，已有句柄则跳过；
     //   neo4j-driver 探针在 _driver 为 null 时返回 false，连续失败后由 recoverDriver 重连。
     startHeartbeatMonitor();
+    // 兑现 in-flight promise 并标记失败：允许 Neo4j 恢复后由本实例或其他实例重新认领，
+    // 同时避免并发实例在 waitForCoreInit 上白等到超时。
+    settleCoreInit(false);
     return;
   }
   _driver = driver;
@@ -1479,7 +1631,10 @@ async function doGatewayInit(api: any, logger: LoggerLike): Promise<void> {
     const { createAssociationMatrixPersisted } = await import("./src/recaller/association-matrix-persist.ts");
     const amDim = resolveEmbedDimension(_cfg);
     const { am, loaded, path } = await createAssociationMatrixPersisted(amDim, _cfg);
-    if (!am) return;
+    if (!am) {
+      settleCoreInit(false);
+      return;
+    }
     _recaller.setAssociationMatrix(am);
     logger?.info?.(`[graph-memory-pro] association-matrix enabled (dim=${amDim}, warmup=${_cfg.associationMatrix?.warmupFeedbacks ?? _cfg.warmup?.warmupFeedbacks ?? 40}, persistedRestored=${loaded}, path=${path})`);
   }
@@ -1548,6 +1703,12 @@ async function doGatewayInit(api: any, logger: LoggerLike): Promise<void> {
 
   // v2.5.x: 启动心跳自愈服务（幂等，self-init 已启动则跳过）
   startHeartbeatMonitor();
+
+  // v2.8.x: 发布核心资源并兑现 in-flight promise
+  //   —— 并发/后到的其他模块实例据此复用同一套 driver/Recaller/句柄，
+  //   不会再各自起一套 server 去争抢 7850/7800。
+  publishCoreResources();
+  settleCoreInit(true);
 }
 
 // ─── Plugin Entry ──────────────────────────────────────
@@ -1817,6 +1978,11 @@ export default definePluginEntry({
       if (_maintenanceTimer) { clearInterval(_maintenanceTimer); _maintenanceTimer = null; }
       if (_autoStartRetryTimer) { clearInterval(_autoStartRetryTimer); _autoStartRetryTimer = null; }
       if (_heartbeatHandle) { _heartbeatHandle.stop(); _heartbeatHandle = null; }
+      // v2.8.x: 同步清空进程级定时器句柄，否则其他实例的守卫会误判"仍在运行"而不再启动
+      _ps.extractorTimer = null;
+      _ps.maintenanceTimer = null;
+      _ps.autoStartRetryTimer = null;
+      _ps.heartbeatHandle = null;
       resetSessionRecallCache();
       // 注意：不再 closeDriver() / 关闭 API server / null 化组件
       // compaction 后 register() 会检测到 _driver 已存在并跳过重复初始化
@@ -1989,7 +2155,8 @@ export default definePluginEntry({
       id: "graph-memory-extractor",
       async start(_ctx: unknown) {
         // v2.5.x: self-init 已启动定时器，避免宿主 register() 重复 setInterval（旧 timer 泄漏）
-        if (_extractorTimer) return;
+        // v2.8.x: 同时看进程级句柄——多实例下否则会各起一套提取定时器
+        if (_extractorTimer || _ps.extractorTimer) return;
         const interval = getExtractorIntervalMs();
         _extractorTimer = setInterval(async () => {
           if (!_driver || !_extractor || !_llm) return;
@@ -2106,9 +2273,11 @@ export default definePluginEntry({
             _extractorRunning = false;
           }
         }, interval);
+        _ps.extractorTimer = _extractorTimer;
       },
       async stop(_ctx: unknown) {
         if (_extractorTimer) { clearInterval(_extractorTimer); _extractorTimer = null; }
+        _ps.extractorTimer = null;
       },
     });
 
@@ -2121,7 +2290,8 @@ export default definePluginEntry({
       id: "graph-memory-maintenance",
       async start(_ctx: unknown) {
         // v2.5.x: self-init 已启动定时器，避免宿主 register() 重复 setInterval（旧 timer 泄漏）
-        if (_maintenanceTimer) return;
+        // v2.8.x: 同时看进程级句柄——多实例下否则会各起一套维护定时器
+        if (_maintenanceTimer || _ps.maintenanceTimer) return;
         const interval = _cfg?.background?.maintenanceIntervalMs ?? 6 * 3600_000;
         // v2.5.4: 启动后延迟从 5min→30min（默认），可配置。避免启动初期
         // lossless-claw compaction 与 community summary 抢 LLM 导致 503
@@ -2145,9 +2315,11 @@ export default definePluginEntry({
         };
         setTimeout(runOnce, initialDelay);
         _maintenanceTimer = setInterval(runOnce, interval);
+        _ps.maintenanceTimer = _maintenanceTimer;
       },
       async stop(_ctx: unknown) {
         if (_maintenanceTimer) { clearInterval(_maintenanceTimer); _maintenanceTimer = null; }
+        _ps.maintenanceTimer = null;
       },
     });
 
@@ -2163,7 +2335,8 @@ export default definePluginEntry({
         async start(_ctx: unknown) {
           if (!_driver || !_cfg) return;
           // v2.5.x: self-init 已启动 MCP，避免重复监听 EADDRINUSE
-          if (_mcpServerHandle) return;
+          // v2.8.x: 同时看进程级句柄——多实例下否则会再来抢 7800 并漂移到 7803
+          if (currentMcpHandle()) return;
           try {
             const { startMcpServer } = await import("./src/mcp/server.ts");
             _mcpServerHandle = await startMcpServer(
@@ -2173,8 +2346,11 @@ export default definePluginEntry({
               _recaller ?? undefined,
               _batchEmbed ?? undefined,
             );
+            publishCoreResources();
             // v2.3.3 MCP-1: 启动后健康探测，确认 server 真正就绪（非仅 listen 成功）
-            const port = _cfg.mcp?.port ?? 7800;
+            // v2.5.x fix（同一类问题的漏改点）：必须用 handle.port —— 端口漂移后
+            //   （7800→7803）仍探测配置端口会误报 "health returned 404/failed"。
+            const port = _mcpServerHandle.port;
             const host = _cfg.mcp?.host ?? "127.0.0.1";
             try {
               const resp = await fetch(`http://${host}:${port}/health`, { signal: AbortSignal.timeout(3000) });
@@ -2192,8 +2368,8 @@ export default definePluginEntry({
           }
         },
         async stop(_ctx: unknown) {
-          if (_mcpServerHandle) {
-            try { await _mcpServerHandle.close(); } catch { /* ignore */ }
+          if (currentMcpHandle()) {
+            await releaseServerHandle("mcp");
             _mcpServerHandle = null;
           }
         },
