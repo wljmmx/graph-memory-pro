@@ -1097,3 +1097,85 @@ describe("createEmbedFn", () => {
     expect(url).toBe("http://localhost:11434/api/embed");
   });
 });
+
+// ────────────────────────────────────────────────────────────
+// Embedding — OpenAI 兼容 / OVMS v3 端点（v2.8.x）
+// 背景：此前 embed 只有 Ollama 原生 /api/embed 一条路径，且无条件剥离 /v1，
+// OVMS 内网服务走 /v3/embeddings 会被改写成 /v3/api/embed → 404。现按 baseURL
+// 自动判定（11434→ollama；含版本路径 /v1、/v3…→openai），并支持 apiFormat 强制覆盖。
+// ────────────────────────────────────────────────────────────
+describe("createEmbedFn — OpenAI 兼容 / OVMS v3", () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    clearEmbedCacheAll();
+    fetchSpy = vi.spyOn(globalThis, "fetch");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("OVMS /v3 baseURL：POST /v3/embeddings，解析 data.data[].embedding，绝不复写为 /api/embed", async () => {
+    fetchSpy.mockResolvedValue(mockResponse({
+      object: "list",
+      data: [{ object: "embedding", index: 0, embedding: [0.1, 0.2, 0.3] }],
+      model: "Qwen3.5-Embedding-0.6B",
+    }));
+    const embed = createEmbedFn({ baseURL: "http://192.168.50.5:9000/v3", model: "Qwen3.5-Embedding-0.6B" });
+    const vec = await embed("hello");
+
+    expect(vec).toEqual([0.1, 0.2, 0.3]);
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toBe("http://192.168.50.5:9000/v3/embeddings");
+    // body 仅 model/input，不携带 Ollama 专有字段
+    expect(JSON.parse(init.body as string)).toEqual({ model: "Qwen3.5-Embedding-0.6B", input: ["hello"] });
+  });
+
+  it("OpenAI /v1 baseURL：POST /v1/embeddings（此前会被剥离 /v1 走原生）", async () => {
+    fetchSpy.mockResolvedValue(mockResponse({ data: [{ embedding: [0.5], index: 0 }] }));
+    const embed = createEmbedFn({ baseURL: "https://api.openai.com/v1", model: "text-embedding-3-small", apiKey: "sk-x" });
+    await embed("t");
+
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(url).toBe("https://api.openai.com/v1/embeddings");
+    expect((init.headers as Record<string, string>).Authorization).toBe("Bearer sk-x");
+  });
+
+  it("data.data 乱序 index 时按升序对齐（取 index 0）", async () => {
+    fetchSpy.mockResolvedValue(mockResponse({
+      data: [{ index: 1, embedding: [2] }, { index: 0, embedding: [1] }],
+    }));
+    const embed = createEmbedFn({ baseURL: "http://ovms.local:9000/v3", model: "m" });
+    const vec = await embed("t");
+    expect(vec).toEqual([1]);
+  });
+
+  it("显式 apiFormat=openai：无版本段的 baseURL 补 /v1 走 /embeddings", async () => {
+    fetchSpy.mockResolvedValue(mockResponse({ data: [{ embedding: [0.7], index: 0 }] }));
+    const embed = createEmbedFn({ baseURL: "http://my-gateway:8080", model: "m", apiFormat: "openai" });
+    await embed("t");
+    const [url] = fetchSpy.mock.calls[0];
+    expect(url).toBe("http://my-gateway:8080/v1/embeddings");
+  });
+
+  it("显式 apiFormat=ollama：自定义端口 + /v1 仍走原生 /api/embed（剥离 /v1）", async () => {
+    fetchSpy.mockResolvedValue(mockResponse({ embeddings: [[0.9]] }));
+    const embed = createEmbedFn({ baseURL: "http://10.0.0.5:8080/v1", model: "m", apiFormat: "ollama" });
+    await embed("t");
+    const [url] = fetchSpy.mock.calls[0];
+    expect(url).toBe("http://10.0.0.5:8080/api/embed");
+  });
+
+  it("OpenAI 兼容无 data 时抛错（含模型名），且 4xx 不重试路径不受影响", async () => {
+    vi.useFakeTimers();
+    fetchSpy.mockResolvedValue(mockResponse({ object: "list", data: [] }));
+    const embed = createEmbedFn({ baseURL: "http://ovms.local:9000/v3", model: "m" });
+    const promise = embed("t");
+    const assertion = expect(promise).rejects.toThrow(/no embedding data.*model=m/);
+    await vi.advanceTimersByTimeAsync(12_000);
+    await assertion;
+    expect(fetchSpy).toHaveBeenCalledTimes(4); // 1 + 3 次重试
+  });
+});

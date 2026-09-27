@@ -55,6 +55,18 @@ export interface EmbeddingConfig {
    * 但单请求耗时与内存占用上升，弱 CPU 下过大反而易超时，按需调整。
    */
   batchSize?: number;
+  /**
+   * v2.8.x: 嵌入接口格式。
+   * - "ollama"：Ollama 原生 POST {baseURL}/api/embed（body: input/keep_alive/options）
+   * - "openai"：OpenAI 兼容 POST {baseURL}/embeddings（body: input），
+   *   用于 OVMS 内网服务 /v3/embeddings、OpenAI /v1/embeddings 等
+   *
+   * 不设置时按 baseURL 自动判定：
+   *   1) 命中 Ollama 默认端口 11434 → "ollama"（与 llm.ts 一致，允许 baseURL 含 /v1 并自动剥离）
+   *   2) 含版本化路径（/v1、/v3、/v1beta…）→ "openai"（保留原路径，绝不复写为 /api/embed）
+   *   3) 其余 → "ollama"（向后兼容）
+   */
+  apiFormat?: "ollama" | "openai";
 }
 
 /** Timing / latency distribution options */

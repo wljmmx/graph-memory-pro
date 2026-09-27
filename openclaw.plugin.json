@@ -236,6 +236,11 @@
             "minimum": 1,
             "description": "v2.8.x: 批量嵌入单请求最大文本数（默认 32，Ollama /api/embed 由服务端批处理；调大减少请求往返，但单请求耗时/内存上升，弱 CPU 下建议调小）"
           },
+          "apiFormat": {
+            "type": "string",
+            "enum": ["ollama", "openai"],
+            "description": "v2.8.x: 嵌入接口格式。ollama=POST {baseURL}/api/embed；openai=POST {baseURL}/embeddings（OVMS 内网服务 /v3/embeddings、OpenAI /v1/embeddings 等）。留空自动判定：命中 11434 端口→ollama；含 /v1、/v3 等版本路径→openai；否则 ollama"
+          },
           "options": {
             "type": "object",
             "additionalProperties": true,

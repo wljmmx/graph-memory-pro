@@ -83,9 +83,12 @@
 |------|---------|------|
 | LLM | `http://localhost:11434` | **推荐**（不含 `/v1`，命中默认端口 11434 自动走 Ollama 原生 `/api/chat`，keep_alive 完整支持）|
 | LLM | `http://localhost:11434/v1` | 可选（含 `/v1`，走 OpenAI 兼容层 `/chat/completions`）|
-| Embedding | `http://localhost:11434` | 原生 `/api/embed`（`embed.ts` 会自动剥离 `/v1`）|
+| Embedding | `http://localhost:11434` | Ollama 原生 `/api/embed`（`embed.ts` 会自动剥离 `/v1`）|
+| Embedding | `http://<host>:<port>/v3` | OVMS 内网服务等 OpenAI 兼容 `/v3/embeddings`（版本路径原样保留，不会被改写为 `/api/embed`）|
 
 > LLM 的 /v1 说明：插件通过 `isOllamaNative` 自动检测——baseURL 命中 `localhost:11434` / `127.0.0.1:11434` / `0.0.0.0:11434` 且**不含 `/v1`** 时走 Ollama 原生 `/api/chat`；含 `/v1` 或指向其他地址时走 OpenAI 兼容 `/chat/completions`。两种均支持。**注意**：原生路径仅在默认端口 11434 时触发，若 Ollama 用自定义端口，请使用 `/v1` 兼容路径（否则请求 `/chat/completions` 会 404）。
+
+> Embedding 的接口格式说明（v2.8.x）：`embed.ts` 按 baseURL 自动判定——命中端口 11434 → Ollama 原生 `POST {baseURL}/api/embed`；含版本化路径（`/v1`、`/v3` 等，**OVMS 内网服务走此路径**）→ OpenAI 兼容 `POST {baseURL}/embeddings`；其余仍走原生。可用 `embedding.apiFormat`（`"ollama"` / `"openai"`）强制覆盖。OVMS 需把版本段写进 baseURL（如 `http://192.168.50.5:8000/v3`），此时插件请求 `/v3/embeddings`，**不会**被改写为 `/api/embed`；OVMS 的 LLM 侧同样走 `{baseURL}/chat/completions`。
 
 模型选择约定：
 - LLM 模型须为 chat 模型（如 `qwen2.5:7b`、`llama3.1:8b`）

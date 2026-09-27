@@ -1,14 +1,18 @@
 /**
  * graph-memory-pro — Embedding 引擎（原生 fetch，无外部依赖）
  *
- * 使用 Ollama 原生 API: baseURL/api/embed
- * 返回格式: data.embeddings[0]
+ * 支持两种接口格式，按 baseURL 自动判定（可用 embedding.apiFormat 强制覆盖）：
+ *   - Ollama 原生：POST {baseURL}/api/embed，响应 data.embeddings[]
+ *   - OpenAI 兼容：POST {baseURL}/embeddings，响应 data.data[].embedding
+ *     用于 OVMS 内网服务 /v3/embeddings、OpenAI /v1/embeddings 等
  *
  * 处理逻辑:
- *   1. 如果 baseURL 包含 /v1 → 删除 /v1，使用 Ollama 原生 API
- *   2. 如果不包含 /v1 → 直接使用 Ollama 原生 API
- *   3. 清洗 baseURL 中的反引号/首尾空格（防止 markdown 代码块标记误入 JSON）
- *   4. 传递 keep_alive 参数到 Ollama（默认 5m，可配置 1h/-1 永久）
+ *   1. 清洗 baseURL 中的反引号/首尾空格/尾部斜杠（防止 markdown 代码块标记误入 JSON）
+ *   2. 判定 apiFormat：
+ *      - 命中 Ollama 默认端口 11434 → ollama（含 /v1 时剥离 /v1 走原生）
+ *      - 含版本化路径（/v1、/v3、/v1beta…）→ openai（保留原路径，绝不复写为 /api/embed）
+ *      - 其余 → ollama（向后兼容）
+ *   3. ollama 传 keep_alive/options；openai 传 input（忽略 Ollama 专有字段）
  */
 
 import type { EmbeddingConfig } from "../types.ts";
@@ -169,9 +173,47 @@ function sanitizeBaseURL(url: string | null | undefined): string {
     .replace(/\/+$/, "");
 }
 
+/** 嵌入接口格式 */
+type EmbedApiFormat = "ollama" | "openai";
+
+/** Ollama 默认端口判定（与 llm.ts isOllamaNative 一致，不限 host） */
+function isOllamaPort(baseURL: string): boolean {
+  return /:11434(?:\/|$)/.test(baseURL);
+}
+
+/**
+ * 版本化路径判定：/v1、/v3、/v1beta、/v2.1 等。
+ * 用于识别 OpenAI 兼容服务（OVMS v3 / OpenAI v1 / 多数网关）。
+ */
+function hasVersionSegment(baseURL: string): boolean {
+  return /\/v\d+[a-z0-9._-]*(?:\/|$)/i.test(baseURL);
+}
+
+/**
+ * 解析嵌入接口格式：显式 apiFormat 优先，否则按 baseURL 自动判定。
+ *
+ * 关键点：OVMS 内网服务走 /v3/embeddings（OpenAI 兼容），
+ * baseURL 形如 http://host:port/v3 时须判定为 "openai"，
+ * 绝不能被改写成 Ollama 原生 /api/embed。
+ */
+function resolveEmbedApiFormat(baseURL: string, explicit?: unknown): EmbedApiFormat {
+  if (explicit === "ollama" || explicit === "openai") return explicit;
+  if (isOllamaPort(baseURL)) return "ollama";
+  if (hasVersionSegment(baseURL)) return "openai";
+  return "ollama";
+}
+
+/**
+ * OpenAI 兼容端点规范化：至少含版本段。
+ * 已含 /v3、/v1 等原样保留；缺版本段时补 /v1（与 llm.ts compatBase 一致）。
+ */
+function resolveOpenAICompatBase(baseURL: string): string {
+  return hasVersionSegment(baseURL) ? baseURL : `${baseURL}/v1`;
+}
+
 /**
  * 内置 embedding 引擎
- * 统一使用 Ollama 原生 API
+ * 按 apiFormat 分发：Ollama 原生 /api/embed 或 OpenAI 兼容 /embeddings（含 OVMS v3）
  */
 
 // 模块级共享 LRU 缓存（keyed by baseURL|model）：
@@ -201,31 +243,31 @@ function buildKeepAlive(config: EmbeddingConfig): string | number {
 // 本地 CPU Ollama 在极端负载下 30s 可能超时，误触发重试风暴（表现为
 // gm_reembed 首批次"跑几分钟 0 进展"），故批量路径上调到 120s。
 async function performEmbedRequest(
-  baseURL: string,
-  apiKey: string,
-  model: string,
-  keepAlive: string | number,
-  options: Record<string, number | boolean | string> | undefined,
+  client: EmbedClient,
   inputs: string[],
-  expectedDim: number | undefined,
   timeoutMs = 30_000,
 ): Promise<number[][]> {
+  const { apiFormat, baseURL, apiKey, model, keepAlive, options, expectedDim } = client;
+  // Ollama 原生 → /api/embed；OpenAI 兼容（含 OVMS /v3/embeddings）→ /embeddings
+  const isOllama = apiFormat === "ollama";
+  const endpoint = isOllama ? `${baseURL}/api/embed` : `${baseURL}/embeddings`;
   const delays = [...RETRY_DELAYS];
   const lastErr: Error[] = [];
   for (let attempt = 0; attempt <= delays.length; attempt++) {
     try {
-      const response = await fetch(`${baseURL}/api/embed`, {
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           ...(apiKey ? { "Authorization": `Bearer ${apiKey}` } : {}),
         },
-        body: JSON.stringify({
-          model,
-          input: inputs,
-          keep_alive: keepAlive,
-          ...(options ? { options } : {}),
-        }),
+        body: JSON.stringify(
+          isOllama
+            // Ollama 原生：input 数组 + keep_alive/options
+            ? { model, input: inputs, keep_alive: keepAlive, ...(options ? { options } : {}) }
+            // OpenAI 兼容：仅 model/input，忽略 Ollama 专有字段（keep_alive/options）
+            : { model, input: inputs },
+        ),
         signal: AbortSignal.timeout(timeoutMs),
       });
 
@@ -238,17 +280,32 @@ async function performEmbedRequest(
         throw new Error(`Embedding API ${response.status}: ${body.slice(0, 200)}${hint}`);
       }
 
-      const data = await response.json() as { embeddings?: number[][] };
+      const data = await response.json() as {
+        embeddings?: number[][];
+        data?: Array<{ embedding?: number[]; index?: number }>;
+      };
 
-      if (!data.embeddings || data.embeddings.length === 0) {
+      // 响应解析：Ollama → data.embeddings[]；
+      // OpenAI 兼容（OVMS / OpenAI）→ data.data[].embedding，按 index 升序对齐输入顺序
+      let vecs: number[][] | undefined;
+      if (isOllama) {
+        vecs = data.embeddings;
+      } else if (Array.isArray(data.data)) {
+        vecs = [...data.data]
+          .sort((a, b) => (a?.index ?? 0) - (b?.index ?? 0))
+          .map((d) => d?.embedding)
+          .filter((v): v is number[] => Array.isArray(v));
+      }
+
+      if (!vecs || vecs.length === 0) {
         const respPreview = JSON.stringify(data).slice(0, 300);
-        log.warn("Ollama /api/embed returned no embedding data", { model, responsePreview: respPreview, inputsLen: inputs.length });
+        const label = isOllama ? "Ollama /api/embed" : "OpenAI-compatible /embeddings";
+        log.warn(`${label} returned no embedding data`, { model, baseURL, responsePreview: respPreview, inputsLen: inputs.length });
         throw new Error(
-          `Ollama embedding API returned no embedding data (model=${model}, response=${respPreview})`,
+          `Embedding API returned no embedding data (model=${model}, response=${respPreview})`,
         );
       }
 
-      const vecs = data.embeddings;
       if (expectedDim) {
         for (const v of vecs) {
           if (v.length !== expectedDim) {
@@ -296,6 +353,7 @@ async function performEmbedRequest(
 }
 
 type EmbedClient = {
+  apiFormat: EmbedApiFormat;
   baseURL: string;
   apiKey: string;
   model: string;
@@ -309,9 +367,16 @@ type EmbedClient = {
 
 function buildEmbedClient(config: EmbeddingConfig): EmbedClient {
   const apiKey = config.apiKey || "";
-  let baseURL = sanitizeBaseURL(config.baseURL || "http://localhost:11434");
-  if (baseURL.endsWith("/v1")) {
-    baseURL = baseURL.slice(0, -3);
+  const rawBaseURL = sanitizeBaseURL(config.baseURL || "http://localhost:11434");
+  const apiFormat = resolveEmbedApiFormat(rawBaseURL, config.apiFormat);
+  // 端点规范化：
+  //   - ollama：剥离尾部 /v1（Ollama OpenAI 兼容路径 → 原生 /api/embed）
+  //   - openai：保留版本路径（OVMS /v3 原样保留），必要时补 /v1，绝不复写为 /api/embed
+  let baseURL = rawBaseURL;
+  if (apiFormat === "ollama") {
+    if (baseURL.endsWith("/v1")) baseURL = baseURL.slice(0, -3);
+  } else {
+    baseURL = resolveOpenAICompatBase(baseURL);
   }
   const model = config.model || "Qwen3.5-Embedding-0.6B-GGUF";
   const keepAlive = buildKeepAlive(config);
@@ -322,7 +387,7 @@ function buildEmbedClient(config: EmbeddingConfig): EmbedClient {
   const cache = getSharedEmbedCache(cacheLabel, cacheSize, cacheTtlMs);
   const maxConcurrency = config.maxConcurrency ?? DEFAULT_EMBED_MAX_CONCURRENCY;
   const semaphore = getSemaphore(baseURL, model, maxConcurrency);
-  return { apiKey, baseURL, model, keepAlive, expectedDim, cache, cacheLabel, semaphore, options: config.options };
+  return { apiFormat, apiKey, baseURL, model, keepAlive, expectedDim, cache, cacheLabel, semaphore, options: config.options };
 }
 
 /**
@@ -352,9 +417,7 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
     // v2.4.0: acquire 信号量，确保并发不超限（重试在持锁期间复用同一槽位）
     const release = await c.semaphore.acquire();
     try {
-      const vecs = await performEmbedRequest(
-        c.baseURL, c.apiKey, c.model, c.keepAlive, c.options, [text], c.expectedDim,
-      );
+      const vecs = await performEmbedRequest(c, [text]);
       const vec = vecs[0];
       // v2.3.2 阶段二: 成功后写入 LRU 缓存
       if (cacheKey) c.cache!.set(cacheKey, vec);
@@ -422,7 +485,7 @@ export function createBatchEmbedFn(config: EmbeddingConfig): BatchEmbedFn {
         const release = await c.semaphore.acquire();
         try {
           const vecs = await performEmbedRequest(
-            c.baseURL, c.apiKey, c.model, c.keepAlive, c.options, inputs, c.expectedDim,
+            c, inputs,
             // v2.8.x: 批量请求放宽到 120s（输入多为 32 段文本，弱 CPU 下 30s 易误超时）
             120_000,
           );

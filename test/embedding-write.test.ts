@@ -600,6 +600,35 @@ describe("createBatchEmbedFn（v2.8.x 子批次并发限流）", () => {
     expect(out).toHaveLength(10);
     expect(sizes).toEqual([3, 3, 3, 1]); // 10 文本按 batchSize=3 切分
   });
+
+  it("OVMS /v3 baseURL：批量请求走 /v3/embeddings（OpenAI 兼容），解析 data.data[].embedding", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = vi.fn(async (url: unknown, init: any) => {
+      urls.push(String(url));
+      const body = JSON.parse(init.body);
+      expect(body.keep_alive).toBeUndefined(); // 不得携带 Ollama 专有字段
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          object: "list",
+          data: body.input.map((_: string, i: number) => ({ object: "embedding", index: i, embedding: [0.1, 0.2, 0.3] })),
+        }),
+      } as unknown as Response;
+    });
+
+    const batchEmbed = createBatchEmbedFn({
+      baseURL: "http://192.168.50.5:9000/v3",
+      model: "Qwen3.5-Embedding-0.6B",
+      maxConcurrency: 1,
+      batchSize: 2,
+    });
+
+    const out = await batchEmbed(["a", "b", "c"]);
+    expect(urls.every((u) => u === "http://192.168.50.5:9000/v3/embeddings")).toBe(true);
+    expect(out).toHaveLength(3);
+    expect(out.every((v) => v !== null && v.length === 3)).toBe(true);
+  });
 });
 
 // ── embedNode 分块批量嵌入（v2.8.x） ──────────────────────────
