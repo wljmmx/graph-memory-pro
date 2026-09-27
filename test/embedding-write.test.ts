@@ -12,7 +12,7 @@
 
 import { describe, it, expect, vi, afterEach } from "vitest";
 import type { Driver } from "neo4j-driver";
-import { embedNodesMissing } from "../src/store/embed-helper.ts";
+import { embedNodesMissing, embedNode } from "../src/store/embed-helper.ts";
 import { writeExtractResult } from "../src/services/extract-service.ts";
 import { detectAndMigrateEmbeddings, reEmbedNodes } from "../src/graph/reembed.ts";
 import { createBatchEmbedFn } from "../src/engine/embed.ts";
@@ -573,5 +573,127 @@ describe("createBatchEmbedFn（v2.8.x 子批次并发限流）", () => {
     expect(peak).toBeGreaterThanOrEqual(2); // 确实并行（非串行）
     expect(out).toHaveLength(100);
     expect(out.every((v) => v !== null && v.length === 3)).toBe(true);
+  });
+
+  it("batchSize 可配：按自定义批次切分子请求（默认 32 的替代）", async () => {
+    const sizes: number[] = [];
+    globalThis.fetch = vi.fn(async (_url: unknown, init: any) => {
+      const body = JSON.parse(init.body);
+      sizes.push(body.input.length);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ embeddings: body.input.map(() => [0.1, 0.2, 0.3]) }),
+      } as unknown as Response;
+    });
+
+    // maxConcurrency=1 → 子批次串行发送，切分顺序确定
+    const batchEmbed = createBatchEmbedFn({
+      baseURL: "http://localhost:11434",
+      model: "test-embed",
+      maxConcurrency: 1,
+      batchSize: 3,
+    });
+
+    const out = await batchEmbed(Array.from({ length: 10 }, (_, i) => `t-${i}`));
+
+    expect(out).toHaveLength(10);
+    expect(sizes).toEqual([3, 3, 3, 1]); // 10 文本按 batchSize=3 切分
+  });
+});
+
+// ── embedNode 分块批量嵌入（v2.8.x） ──────────────────────────
+// 背景：chunked 分支此前逐段 await embedFn → N 段 = N 次串行 HTTP，
+// 未吃到服务端批处理收益。现优先走 batchEmbedFn 一次批量请求，按原顺序回填成功项。
+
+const CHUNKED_CFG = {
+  recall: {
+    memorySliceChars: 800,
+    chunking: { enabled: true, chunkSize: 400, chunkOverlap: 40 },
+  },
+};
+
+/** 1205 字符 → chunkSize=400/overlap=40 切分为 4 段 */
+function longContent(): string {
+  return "x".repeat(1200);
+}
+
+describe("embedNode（分块批量嵌入，v2.8.x）", () => {
+  it("分块 + batchEmbedFn → 仅一次批量请求，逐段串行 embed 不再调用", async () => {
+    const driver = mockDriver();
+    const batchEmbed = vi.fn(async (texts: string[]) => texts.map(() => [0.1, 0.2, 0.3]));
+    const embed = vi.fn(async () => [0.1, 0.2, 0.3]);
+
+    const n = await embedNode(
+      driver as unknown as Driver,
+      embed,
+      "n1",
+      { name: "甲", description: "d", content: longContent(), embeddingModel: EMBEDDING_MODEL },
+      CHUNKED_CFG,
+      batchEmbed,
+    );
+
+    expect(n).toBe(4);
+    expect(batchEmbed).toHaveBeenCalledTimes(1);
+    expect(batchEmbed.mock.calls[0][0] as string[]).toHaveLength(4);
+    expect(embed).not.toHaveBeenCalled(); // 未走逐段串行路径
+    // 分块向量落库（saveChunkVectors）
+    const save = driver.getAllRunCalls().find((c) => c.query.includes("n.chunkTexts = $chunkTexts"));
+    expect(save).toBeDefined();
+    expect(save!.params.chunkVectors).toHaveLength(4);
+  });
+
+  it("分块 + 无 batchEmbedFn → 回退逐段串行 embed（保持原行为）", async () => {
+    const driver = mockDriver();
+    const embed = vi.fn(async () => [0.1, 0.2, 0.3]);
+
+    const n = await embedNode(
+      driver as unknown as Driver,
+      embed,
+      "n1",
+      { name: "甲", description: "d", content: longContent(), embeddingModel: EMBEDDING_MODEL },
+      CHUNKED_CFG,
+    );
+
+    expect(n).toBe(4);
+    expect(embed).toHaveBeenCalledTimes(4);
+  });
+
+  it("分块 + batchEmbedFn 全返回 null → 返回 0，不写库", async () => {
+    const driver = mockDriver();
+    const batchEmbed = vi.fn(async (texts: string[]) => texts.map(() => null));
+    const embed = vi.fn(async () => [0.1]);
+
+    const n = await embedNode(
+      driver as unknown as Driver,
+      embed,
+      "n1",
+      { name: "甲", description: "d", content: longContent(), embeddingModel: EMBEDDING_MODEL },
+      CHUNKED_CFG,
+      batchEmbed,
+    );
+
+    expect(n).toBe(0);
+    expect(batchEmbed).toHaveBeenCalledTimes(1);
+    expect(driver.getAllRunCalls()).toHaveLength(0);
+  });
+
+  it("短文本（未触发分块）→ 走单向量路径，不受 batchEmbedFn 影响", async () => {
+    const driver = mockDriver();
+    const batchEmbed = vi.fn(async (texts: string[]) => texts.map(() => [0.1]));
+    const embed = vi.fn(async () => [0.1, 0.2, 0.3]);
+
+    const n = await embedNode(
+      driver as unknown as Driver,
+      embed,
+      "n1",
+      { name: "甲", description: "d", content: "短内容", embeddingModel: EMBEDDING_MODEL },
+      CHUNKED_CFG,
+      batchEmbed,
+    );
+
+    expect(n).toBe(1);
+    expect(embed).toHaveBeenCalledTimes(1);
+    expect(batchEmbed).not.toHaveBeenCalled();
   });
 });

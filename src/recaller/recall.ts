@@ -5,7 +5,7 @@
 import type { Driver } from "neo4j-driver";
 import { createHash } from "crypto";
 import type { GmConfig, RecallResult, GmNode, GmEdge } from "../types.ts";
-import type { EmbedFn } from "../engine/embed.ts";
+import type { EmbedFn, BatchEmbedFn } from "../engine/embed.ts";
 import {
   searchNodes, vectorSearchWithScore,
   graphWalk,
@@ -30,6 +30,8 @@ const REPORT_INTERVAL = 50;
 
 export class Recaller {
   private embed: EmbedFn | null = null;
+  // v2.8.x: 可选批量嵌入函数——供 syncEmbed 分块路径一次批量请求，避免逐段串行 HTTP
+  private batchEmbed: BatchEmbedFn | null = null;
   private timingCallCount = 0;
   // v2.1.2 第二批：I-1 QueryCache + I-2 JudgeManager
   private queryCache: QueryCache;
@@ -49,6 +51,9 @@ export class Recaller {
   setDriver(driver: Driver): void { this.driver = driver; }
 
   setEmbedFn(fn: EmbedFn): void { this.embed = fn; }
+
+  /** v2.8.x: 注入批量嵌入函数（可选）。注入后 syncEmbed 的分块路径一次性批量请求。 */
+  setBatchEmbedFn(fn: BatchEmbedFn): void { this.batchEmbed = fn; }
 
   /**
    * 运行时更新配置（由 AutoTuner 调参后热生效，无需重启 Gateway）
@@ -765,7 +770,7 @@ export class Recaller {
         description: node.description,
         content: node.content,
         embeddingModel: node.embeddingModel,
-      }, this.cfg);
+      }, this.cfg, this.batchEmbed ?? undefined);
       logPhase("vec_embed", Date.now() - tSync, { context: "syncEmbed" });
     } catch (e) {
       // v2.4.x fix: syncEmbed 失败不再静默吞 — 此前 catch{} 导致向量缺失无人察觉（recall 静默降级）

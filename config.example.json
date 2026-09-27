@@ -26,7 +26,9 @@
     "model": "nomic-embed-text",
     "dimensions": 1024,
     "keepAlive": -1,
-    "maxConcurrency": 3
+    "maxConcurrency": 3,
+    "$comment_batchSize": "v2.8.x: 批量嵌入单请求最大文本数（默认 32）。Ollama /api/embed 由服务端批处理，调大减少请求往返；弱 CPU 下建议调小（如 8-16）以避免单请求超时",
+    "batchSize": 32
   },
   "recallMaxNodes": 6,
   "recallMaxDepth": 2,

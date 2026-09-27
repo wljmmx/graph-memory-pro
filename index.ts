@@ -601,6 +601,7 @@ async function startApiServerFromDriver(driver: Driver): Promise<void> {
         const { Recaller } = await import("./src/recaller/recall.ts");
         _recaller = new Recaller(driver, cfg);
         if (_embed) _recaller.setEmbedFn(_embed);
+        if (_batchEmbed) _recaller.setBatchEmbedFn(_batchEmbed);
 
         // 注入 JudgeManager
         if (cfg.judge?.enabled !== false) {
@@ -1405,7 +1406,7 @@ export async function evolveNode(
     name: updatedNode.name,
     description: updatedNode.description,
     content: updatedNode.content,
-  }, _cfg ?? undefined);
+  }, _cfg ?? undefined, _batchEmbed ?? undefined);
 }
 
 /**
@@ -1609,6 +1610,7 @@ async function doGatewayInit(api: any, logger: LoggerLike): Promise<void> {
   // 4. 初始化 Recaller / Extractor
   _recaller = new Recaller(driver, _cfg);
   if (_embed) _recaller.setEmbedFn(_embed);
+  if (_batchEmbed) _recaller.setBatchEmbedFn(_batchEmbed);
 
   // v2.1.2 第二批 I-2：注入 JudgeManager
   if (_cfg.judge?.enabled !== false) {
@@ -1750,6 +1752,7 @@ export default definePluginEntry({
       cacheSize: Type.Optional(Type.Number({ default: 256, description: "v2.3.2 阶段二: embed LRU 缓存容量（默认 256，0 禁用缓存）" })),
       cacheTtlMs: Type.Optional(Type.Number({ default: 600_000, description: "v2.3.2 阶段二: embed LRU 缓存 TTL ms（默认 10min，0 禁用缓存）" })),
       maxConcurrency: Type.Optional(Type.Number({ default: 3, description: "v2.4.0: embed 最大并发请求数（默认 3 for 本地 Ollama，过高会触发 503 server busy）" })),
+      batchSize: Type.Optional(Type.Number({ default: 32, description: "v2.8.x: 批量嵌入单请求最大文本数（默认 32，服务端批处理；本地弱 CPU 可调小降低超时风险）" })),
       options: Type.Optional(Type.Object({}, { additionalProperties: true, default: {} })),
     })),
     timing: Type.Optional(Type.Object({
@@ -2527,7 +2530,7 @@ export default definePluginEntry({
                 description: p.description,
                 content: p.content,
                 embeddingModel: _cfg.embedding.model,
-              }, _cfg);
+              }, _cfg, _batchEmbed ?? undefined);
             } catch {
               // 嵌入失败不影响节点记录（下次 gm_reembed 会补）
             }

@@ -230,6 +230,12 @@
             "minimum": 1,
             "description": "v2.8.x: embed 最大并发请求数（默认 2：Ollama 同模型请求串行，并发过高会占满队列拖慢对话召回 embed；云端可调高，过高触发 503 时调低）"
           },
+          "batchSize": {
+            "type": "integer",
+            "default": 32,
+            "minimum": 1,
+            "description": "v2.8.x: 批量嵌入单请求最大文本数（默认 32，Ollama /api/embed 由服务端批处理；调大减少请求往返，但单请求耗时/内存上升，弱 CPU 下建议调小）"
+          },
           "options": {
             "type": "object",
             "additionalProperties": true,

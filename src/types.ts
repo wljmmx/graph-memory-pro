@@ -49,6 +49,12 @@ export interface EmbeddingConfig {
   cacheTtlMs?: number;
   /** v2.8.x: 最大并发请求数（默认 2：Ollama 同模型请求串行，并发过高会占满队列拖慢对话召回 embed；云端可调高，过高触发 503 server busy 时调低） */
   maxConcurrency?: number;
+  /**
+   * v2.8.x: 批量嵌入单请求最大文本数（默认 32）。
+   * Ollama /api/embed 的 input 数组由服务端批处理：调大可减少请求往返，
+   * 但单请求耗时与内存占用上升，弱 CPU 下过大反而易超时，按需调整。
+   */
+  batchSize?: number;
 }
 
 /** Timing / latency distribution options */

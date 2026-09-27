@@ -335,7 +335,7 @@ export async function startMcpServer(
               await embedNode(driver, embed, id, {
                 name, description, content,
                 embeddingModel: cfg.embedding.model,
-              }, cfg);
+              }, cfg, batchEmbed ?? undefined);
             } catch {
               // 嵌入失败不影响节点记录（下次 gm_reembed 会补）
             }

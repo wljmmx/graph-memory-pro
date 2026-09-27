@@ -191,7 +191,7 @@ export async function reEmbedNodes(
               description: desc,
               content,
               embeddingModel: embeddingModel ?? undefined,
-            }, cfg);
+            }, cfg, batchEmbedFn);
             if (vectors > 0) {
               reEmbedded++;
             } else {

@@ -376,11 +376,16 @@ export function createEmbedFn(config: EmbeddingConfig): EmbedFn {
  */
 export type BatchEmbedFn = (texts: string[]) => Promise<(number[] | null)[]>;
 // v2.8.x: 单请求最大文本数 16 → 32。Ollama /api/embed 的 input 数组由服务端批处理，
-// 更大批次减少请求往返；配合 maxConcurrency=8 并发子批次，GPU 利用率更高。
-const BATCH_SIZE = 32;
+// 更大批次减少请求往返；配合 maxConcurrency 并发子批次，GPU 利用率更高。
+// v2.8.x: 改为可配置（embedding.batchSize），默认仍为 32；本地弱 CPU 可调小以降低单请求超时风险。
+const DEFAULT_BATCH_SIZE = 32;
 
 export function createBatchEmbedFn(config: EmbeddingConfig): BatchEmbedFn {
   const c = buildEmbedClient(config);
+  // v2.8.x: 批次大小可配——非法/非正值回退默认，避免 0 导致批次切分死循环。
+  const batchSize = Number.isFinite(config.batchSize) && (config.batchSize as number) >= 1
+    ? Math.floor(config.batchSize as number)
+    : DEFAULT_BATCH_SIZE;
 
   return async function batchEmbed(texts: string[]): Promise<(number[] | null)[]> {
     const out: (number[] | null)[] = new Array(texts.length).fill(null);
@@ -406,10 +411,10 @@ export function createBatchEmbedFn(config: EmbeddingConfig): BatchEmbedFn {
 
     // v2.8.x: 子批次并发发送（此前串行 for 循环，未利用 maxConcurrency）。
     // 信号量 acquire 自然限流：并发数 ≤ maxConcurrency（本地 Ollama 默认 8），
-    // 每请求携带 ≤ BATCH_SIZE 文本，GPU 批处理利用率更高。
+    // 每请求携带 ≤ batchSize 文本，GPU 批处理利用率更高。
     const subBatches: number[][] = [];
-    for (let start = 0; start < toEmbed.length; start += BATCH_SIZE) {
-      subBatches.push(toEmbed.slice(start, start + BATCH_SIZE));
+    for (let start = 0; start < toEmbed.length; start += batchSize) {
+      subBatches.push(toEmbed.slice(start, start + batchSize));
     }
     await Promise.all(
       subBatches.map(async (idxs) => {

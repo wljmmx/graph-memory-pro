@@ -26,6 +26,8 @@ export interface EmbedNodeParams {
 /**
  * 嵌入一个节点并写库。
  *
+ * @param batchEmbedFn 可选批量嵌入函数：分块模式下优先用它把 N 段文本一次批量请求，
+ *                     避免逐段串行 HTTP（服务端批处理收益）；缺省时回退单段串行路径。
  * @returns { vectors } 实际写入的向量数（失败返回 0）
  */
 export async function embedNode(
@@ -34,6 +36,7 @@ export async function embedNode(
   nodeId: string,
   params: EmbedNodeParams,
   cfg?: GmConfig,
+  batchEmbedFn?: BatchEmbedFn,
 ): Promise<number> {
   const { texts, chunked } = buildEmbedTexts({
     name: params.name,
@@ -46,19 +49,40 @@ export async function embedNode(
 
   const hash = computeEmbeddingHash(params.name, params.description, params.content);
 
-  // 分块模式：逐段 embed，保存分块向量 + 主向量（主向量用首段结果，供向量索引）
+  // 分块模式：保存分块向量 + 主向量（主向量用首个成功段结果，供向量索引）。
+  // v2.8.x: 有 batchEmbedFn 时把 N 段文本一次批量请求（服务端批处理），
+  // 替代此前逐段 await embedFn 的 N 次串行 HTTP；无则回退单段串行路径。
   if (chunked) {
     const chunkVectors: number[][] = [];
     const chunkTexts: string[] = [];
     let mainVec: number[] | null = null;
-    for (let i = 0; i < texts.length; i++) {
-      const vec = await embedFn(texts[i]);
-      if (!vec || vec.length === 0) continue;
-      chunkTexts.push(texts[i]);
-      chunkVectors.push(vec);
-      if (mainVec === null) mainVec = vec;
+
+    if (batchEmbedFn) {
+      // 展平一次批量调用，返回与 texts 等长（失败项为 null），按原顺序回填成功项
+      const vectors = await batchEmbedFn(texts);
+      for (let i = 0; i < texts.length; i++) {
+        const vec = vectors[i];
+        if (!vec || vec.length === 0) continue;
+        chunkTexts.push(texts[i]);
+        chunkVectors.push(vec);
+        if (mainVec === null) mainVec = vec;
+      }
+    } else {
+      // 回退：逐段串行 embed（保持原行为，未提供 batchEmbedFn 的调用方不受影响）
+      for (let i = 0; i < texts.length; i++) {
+        const vec = await embedFn(texts[i]);
+        if (!vec || vec.length === 0) continue;
+        chunkTexts.push(texts[i]);
+        chunkVectors.push(vec);
+        if (mainVec === null) mainVec = vec;
+      }
     }
-    if (mainVec === null || chunkVectors.length === 0) return 0;
+    if (mainVec === null || chunkVectors.length === 0) {
+      if (batchEmbedFn) {
+        log.warn("embedNode: chunked batch embed produced no vectors", { nodeId, chunks: texts.length });
+      }
+      return 0;
+    }
     await saveChunkVectors(
       driver,
       nodeId,

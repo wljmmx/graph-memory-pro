@@ -1340,7 +1340,7 @@ async function handleCreateNode(params: Record<string, unknown>): Promise<{ stat
           description: String(description ?? ""),
           content: String(content ?? ""),
           embeddingModel: _cfg.embedding.model,
-        }, _cfg);
+        }, _cfg, _batchEmbed ?? undefined);
       } catch {
         // 嵌入失败不影响节点创建（下次 gm_reembed 会补）
       }
@@ -1380,7 +1380,7 @@ async function handleUpdateNode(params: Record<string, unknown>): Promise<{ stat
             description: nn.description ?? "",
             content: nn.content ?? "",
             embeddingModel: _cfg.embedding.model,
-          }, _cfg);
+          }, _cfg, _batchEmbed ?? undefined);
         } catch {
           // 嵌入失败不影响节点更新（下次 gm_reembed 会补）
         }
