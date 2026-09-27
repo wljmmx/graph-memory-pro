@@ -23,38 +23,72 @@ export const DEFAULT_CHUNK_SIZE = 400;
 export const DEFAULT_CHUNK_OVERLAP = 40;
 
 /**
- * 自然边界字符：换行（段落/行）与中英文句末/分句标点。
- * 切点落在这些字符之后时，段尾是完整的语法单元。
+ * 强边界：段落/句末。切点落在此类字符之后时，句子是完整的。
+ * 分块时优先选这类切点——「不把句子劈开」靠的就是它。
  */
-const BOUNDARY_CHARS = new Set([
+const STRONG_BOUNDARY = new Set([
   "\n",
-  "。", "！", "？", "!", "?", "；", ";",
+  "。", "！", "？", "!", "?", "；", ";", "…",
+]);
+
+/**
+ * 弱边界：句内分句（逗号/顿号/冒号/右括号等）。
+ * 仅在窗口内找不到任何强边界时才使用（如单句本身超过 chunkSize），
+ * 属于「必须断句」时的次优选择——仍比硬切一个字符好。
+ */
+const WEAK_BOUNDARY = new Set([
   "，", ",", "、", "：", ":",
   "）", ")", "】", "」", "』",
 ]);
 
 /**
- * 最小填充比例：切点吸附不得让本段短于 chunkSize 的该比例，
- * 否则宁可硬切（避免过早出现的标点切出过短段，段数暴涨）。
+ * 最小填充比例：切点不得让本段短于 chunkSize 的该比例，
+ * 否则宁可继续往后找/硬切（避免过早出现的标点切出过短段，段数暴涨）。
  */
 const MIN_FILL_RATIO = 0.5;
 
 /**
- * 在 (minEnd, hardEnd] 内寻找最靠右的自然边界切点（返回“边界后一位”的下标）。
- * 找不到返回 -1，调用方退回硬切 hardEnd。
+ * 在 (minEnd, hardEnd] 内寻找最靠右的指定边界切点（返回「边界后一位」下标）。
+ * 找不到返回 -1。
  */
-function lastBoundaryIn(text: string, minEnd: number, hardEnd: number): number {
+function lastBoundaryIn(
+  text: string,
+  minEnd: number,
+  hardEnd: number,
+  boundary: Set<string>,
+): number {
   for (let p = hardEnd; p > minEnd; p--) {
-    if (BOUNDARY_CHARS.has(text[p - 1])) return p;
+    if (boundary.has(text[p - 1])) return p;
   }
   return -1;
 }
 
 /**
- * 将文本按 chunkSize 切分为若干段（含重叠）。
+ * 在 (minEnd, hardEnd] 内挑选切点，按边界强度分级：
+ *   1) 强边界（段落/句末）——句子完整，最优
+ *   2) 弱边界（分句标点）——句子被劈开，但断在自然停顿处
+ *   3) 硬切 hardEnd    ——界内无任何标点（如无标点长串），不可避免
  *
+ * 关键点：先找强边界，找到就用，即使窗口更靠右处存在弱边界。
+ * 例如窗口内句末 。在 300、逗号在 390，选 300 而非 390——
+ * 后者会把下一句从中间劈开（此前实现的缺陷）。
+ */
+function pickCut(text: string, minEnd: number, hardEnd: number): number {
+  const strong = lastBoundaryIn(text, minEnd, hardEnd, STRONG_BOUNDARY);
+  if (strong > 0) return strong;
+  const weak = lastBoundaryIn(text, minEnd, hardEnd, WEAK_BOUNDARY);
+  if (weak > 0) return weak;
+  return hardEnd; // 兜底硬切
+}
+
+/**
+ * 将文本分段（含重叠）。
+ *
+ * 切点由「语义单元边界」决定，长度只作为预算——不是按定长切：
  * - 文本长度 <= chunkSize → 返回单段（原文）
- * - 切点优先吸附到段落/句末/分句边界（最靠右者），无可用边界时硬切
+ * - 每段切点优先落在段落/句末边界（强边界），句子不被劈开
+ * - 窗口内无强边界时退到分句标点（弱边界），仍无则硬切
+ * - 每段长度 ≤ chunkSize（不越过预算去凑整句）
  * - chunkOverlap >= chunkSize 时自动收敛为 chunkSize-1，避免死循环
  * - 空文本 → 返回空数组
  */
@@ -71,14 +105,11 @@ export function chunkText(text: string, opts: Partial<ChunkOptions> = {}): strin
   let start = 0;
   while (start < text.length) {
     const hardEnd = Math.min(text.length, start + chunkSize);
-    let end = hardEnd;
-    // 仅在本段之后仍有内容时才吸附边界（末段直接切到文本末尾）
-    if (hardEnd < text.length) {
-      const snapped = lastBoundaryIn(text, start + minFill - 1, hardEnd);
-      if (snapped > start) end = snapped;
-    }
-    const chunk = text.slice(start, end);
-    chunks.push(chunk);
+    // 仅在本段之后仍有内容时才挑选切点（末段直接切到文本末尾）
+    const end = hardEnd < text.length
+      ? pickCut(text, start + minFill - 1, hardEnd)
+      : hardEnd;
+    chunks.push(text.slice(start, end));
     if (end >= text.length) break;
     // 重叠：下一段回退 overlap 个字符（重叠落在本段预算内，故每段仍 ≤ chunkSize）。
     // 回退量 >= 本段长度时（极端 overlap 配置）放弃重叠，保证严格前进不死循环。

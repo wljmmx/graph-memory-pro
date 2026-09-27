@@ -97,6 +97,58 @@ describe("chunkText (点6)", () => {
     const chunks = chunkText(text, { chunkSize: 400, chunkOverlap: 40 });
     expect(chunks[chunks.length - 1].endsWith("收尾无标点")).toBe(true);
   });
+
+  // ── v2.8.x: 边界分级（强=句末 / 弱=分句）──
+  // 缺陷复现：未分级时「最靠右边界」会把句中逗号当切点，
+  // 即使窗口更靠左处存在句末句号，导致句子被劈开。
+  const STRONG = /[。！？!?；;…\n]$/;
+
+  it("强边界优先于更靠右的弱边界：逗号不得抢走句末切点（句子不被劈开）", () => {
+    // 单句 300 字：逗号在第 90 位（句中），句末 。在第 300 位
+    const sent = "甲".repeat(89) + "，" + "乙".repeat(209) + "。";
+    const text = Array(4).fill(sent).join("");
+    const chunks = chunkText(text, { chunkSize: 400, chunkOverlap: 40 });
+
+    expect(chunks.length).toBeGreaterThan(2);
+    // 修复前：chunk[0] 长 390 且以「，」结尾（句子被劈开）
+    // 修复后：以句末「。」结尾，单句完整
+    for (let i = 0; i < chunks.length - 1; i++) {
+      expect(STRONG.test(chunks[i])).toBe(true);
+    }
+    expect(chunks[0]).toHaveLength(300); // 落在句末而非窗口右端 390 的逗号
+  });
+
+  it("窗口内无强边界时退到弱边界（分句标点），仍优于硬切", () => {
+    // 单个超长句（1200+ 字）句内只有逗号，无句末标点
+    const longSent = "甲".repeat(300) + "，" + "乙".repeat(300) + "，" + "丙".repeat(300) + "。";
+    const chunks = chunkText(longSent, { chunkSize: 400, chunkOverlap: 40 });
+
+    expect(chunks.length).toBeGreaterThan(2);
+    // 非末段应断在逗号（弱边界），而不是任意字符
+    for (let i = 0; i < chunks.length - 1; i++) {
+      expect(/[，,]$/.test(chunks[i])).toBe(true);
+    }
+  });
+
+  it("强/弱边界均不可用时才硬切（无标点长串）", () => {
+    const chunks = chunkText("a".repeat(1000), { chunkSize: 400, chunkOverlap: 40 });
+    expect(chunks.map((c) => c.length)).toEqual([400, 400, 280]);
+    expect(chunks[0].endsWith("a")).toBe(true); // 硬切，非边界收尾
+  });
+
+  it("全篇无句子被劈开：拼接后每段（非末段）都落在句末", () => {
+    // 句长 130（含句中逗号），多句连续
+    const sent = "前半句内容" + "甲".repeat(110) + "，后半句" + "乙".repeat(8) + "。";
+    const text = Array(10).fill(sent).join("");
+    const chunks = chunkText(text, { chunkSize: 400, chunkOverlap: 40 });
+
+    expect(chunks.length).toBeGreaterThan(2);
+    for (let i = 0; i < chunks.length - 1; i++) {
+      expect(STRONG.test(chunks[i])).toBe(true);
+    }
+    // 段长受预算约束
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(400);
+  });
 });
 
 describe("buildEmbedTexts (点2+点6)", () => {

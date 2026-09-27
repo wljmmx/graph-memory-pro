@@ -1023,7 +1023,7 @@
           "chunking": {
             "type": "object",
             "additionalProperties": false,
-            "description": "点6：长文本分段嵌入。启用后嵌入文本超过 chunkSize 会分段（含重叠），每段分别 embed 并保存到 chunkEmbeddings，提升长文本局部匹配能力。切点按 v2.8.x 起为结构边界优先（段落/句末/分句），不会把一句话拦腰砍断；仅当单句本身超过 chunkSize 时才硬切。",
+            "description": "点6：长文本分段嵌入。启用后嵌入文本超过 chunkSize 会分段（含重叠），每段分别 embed 并保存到 chunkEmbeddings，提升长文本局部匹配能力。切点按语义边界选取而非定长切：优先段落/句末（强边界），窗口内无强边界时才退到分句标点（弱边界），两者都无才硬切——因此句子不会被拦腰劈开。每段长度仍受 chunkSize 上限约束。",
             "properties": {
               "enabled": {
                 "type": "boolean",

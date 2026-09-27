@@ -89,7 +89,7 @@ graph-memory-pro 是**记忆底层引擎**，只做"图内"操作：
 | 3 | 标准格式化输出 | `recall.outputFormat` | 为系统提示注入「简洁 / 贴近原文 / 减少自由篡改」policy，减少 LLM 自由发挥 |
 | 4 | 时序权重 | `recall.temporalWeight` | 结合节点 validTo/updatedAt 新鲜度做时序衰减，与关联矩阵 M 共同加权，避免过期/冲突节点被排前 |
 | 5 | 多阶段检索 | `recall.multiStage` | 先 FTS 种子 + graphWalk 图邻域筛选候选，再向量相似度排序，减少全局向量搜索干扰 |
-| 6 | 长文本分段嵌入 | `recall.chunking` | 超长文本按 chunkSize（含重叠）切分逐段 embed，分块向量存 `chunkEmbeddings`，提升长文本局部匹配 |
+| 6 | 长文本分段嵌入 | `recall.chunking` | 超长文本按语义边界（段落/句末优先，分句次之）分段并逐段 embed，分块向量存 `chunkEmbeddings`，提升长文本局部匹配；切点不落在句子中间 |
 
 ### 测试覆盖
 - 25 个单元测试文件，544 个用例（Neo4j mock 基础设施，CI 友好）+ 1 个 smoke test 文件（真实 Neo4j 集成）
