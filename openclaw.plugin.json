@@ -1023,7 +1023,7 @@
           "chunking": {
             "type": "object",
             "additionalProperties": false,
-            "description": "点6：长文本分段嵌入。启用后嵌入文本超过 chunkSize 会按 chunkSize 切分（含重叠），每段分别 embed 并保存到 chunkEmbeddings，提升长文本局部匹配能力。",
+            "description": "点6：长文本分段嵌入。启用后嵌入文本超过 chunkSize 会分段（含重叠），每段分别 embed 并保存到 chunkEmbeddings，提升长文本局部匹配能力。切点按 v2.8.x 起为结构边界优先（段落/句末/分句），不会把一句话拦腰砍断；仅当单句本身超过 chunkSize 时才硬切。",
             "properties": {
               "enabled": {
                 "type": "boolean",
@@ -1033,13 +1033,13 @@
                 "type": "integer",
                 "default": 400,
                 "minimum": 1,
-                "description": "单段字符数（默认 400）"
+                "description": "单段字符数（默认 400）。注意这是字符数而非 token 数：中文约 0.6~1 token/字，请按所用 embedding 模型的有效窗口留出安全余量后设置。"
               },
               "chunkOverlap": {
                 "type": "integer",
                 "default": 40,
                 "minimum": 0,
-                "description": "段间重叠字符数（默认 40）"
+                "description": "段间重叠字符数（默认 40，约占 chunkSize 的 10%）。作用是为跨切点的表述保留上下文连续性，便于向量召回命中边界附近的语句；越高越连贯但请求量随之上升。"
               }
             }
           },

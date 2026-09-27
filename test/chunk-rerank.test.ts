@@ -42,6 +42,61 @@ describe("chunkText (点6)", () => {
     const chunks = chunkText(text, { chunkSize: 10, chunkOverlap: 100 });
     expect(chunks.length).toBeGreaterThanOrEqual(1);
   });
+
+  // ── v2.8.x: 结构边界优先切分（此前为定长字符切，会拦腰砍断句子）──
+  const isBoundaryEnd = (s: string) => /[。！？!?；;，,、：:）)】」』\n]$/.test(s);
+
+  it("切点吸附到自然边界：非末段均以标点/换行收尾，不拦腰砍断句子", () => {
+    const para = "开头短句。这是一段较长的补充说明，用于把长度推过切分边界。" + "更多描述内容".repeat(40) + "结尾句。";
+    const text = Array(6).fill(para).join("\n\n"); // 1648 字 → 多段
+    const chunks = chunkText(text, { chunkSize: 400, chunkOverlap: 40 });
+
+    expect(chunks.length).toBeGreaterThan(2);
+    // 除末段（切至文末）外，每段都应以自然边界收尾
+    for (let i = 0; i < chunks.length - 1; i++) {
+      expect(isBoundaryEnd(chunks[i])).toBe(true);
+    }
+  });
+
+  it("无任何边界字符时退回硬切，每段仍 ≤ chunkSize，覆盖完整", () => {
+    const text = "a".repeat(1000);
+    const chunks = chunkText(text, { chunkSize: 400, chunkOverlap: 40 });
+    // 无边界可用 → 硬切，段长严格按 chunkSize/step 推进
+    expect(chunks.map((c) => c.length)).toEqual([400, 400, 280]);
+    // 覆盖完整（重叠导致拼接长度 > 原文）
+    expect(chunks.join("")).toHaveLength(1080);
+  });
+
+  it("单句超过 chunkSize 时该段硬切（界内无可用边界）", () => {
+    const text = "无标点的超长单句".repeat(80); // 640 字，全无边界字符
+    const chunks = chunkText(text, { chunkSize: 400, chunkOverlap: 40 });
+    expect(chunks[0]).toHaveLength(400);
+    expect(chunks.length).toBeGreaterThan(1);
+  });
+
+  it("过早出现的标点不被吸附：段长不小于 chunkSize 的 50%（防段数暴涨）", () => {
+    // 第 5 字即为句号，其后为无边界长串 → 不得在位置 5 切断
+    const text = "短句。" + "摸".repeat(995);
+    const chunks = chunkText(text, { chunkSize: 400, chunkOverlap: 40 });
+    for (const c of chunks) expect(c.length).toBeGreaterThanOrEqual(200);
+    expect(chunks[0]).toHaveLength(400);
+  });
+
+  it("边界吸附后仍保留 chunkOverlap 约定的重叠字符", () => {
+    const para = "内容句子。另一句说明文字，用于把长度推过切分边界。" + "补充内容".repeat(60);
+    const text = Array(6).fill(para).join("\n\n"); // 1600 字 → 多段
+    const chunks = chunkText(text, { chunkSize: 400, chunkOverlap: 40 });
+    expect(chunks.length).toBeGreaterThan(2);
+    for (let i = 1; i < chunks.length; i++) {
+      expect(chunks[i].startsWith(chunks[i - 1].slice(-40))).toBe(true);
+    }
+  });
+
+  it("末段直接切至文本末尾（不吸附边界）", () => {
+    const text = "甲。".repeat(200) + "收尾无标点"; // 末段不以标点结束
+    const chunks = chunkText(text, { chunkSize: 400, chunkOverlap: 40 });
+    expect(chunks[chunks.length - 1].endsWith("收尾无标点")).toBe(true);
+  });
 });
 
 describe("buildEmbedTexts (点2+点6)", () => {

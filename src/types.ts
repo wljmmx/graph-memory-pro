@@ -457,14 +457,20 @@ export interface GmConfig {
 
     /**
      * 点6：长文本分段嵌入。
-     * enabled=true 时，嵌入文本超过 chunkSize 会按 chunkSize 切分（含 chunkOverlap 重叠），
+     * enabled=true 时，嵌入文本超过 chunkSize 会分段（含 chunkOverlap 重叠），
      * 每段分别 embed 并保存到 chunkEmbeddings，提升长文本局部匹配能力。
+     *
+     * v2.8.x: 切点由「定长字符切」改为「结构边界优先」——优先吸附到段落/句末/分句
+     * 边界，不再把一句话拦腰砍断；仅当单句本身超过 chunkSize 时才硬切。
      */
     chunking?: {
       enabled?: boolean;
-      /** 单段字符数（默认 400） */
+      /**
+       * 单段字符数（默认 400）。注意单位是字符而非 token：
+       * 中文约 0.6~1 token/字，应按所用 embedding 模型的有效窗口留安全余量。
+       */
       chunkSize?: number;
-      /** 段间重叠字符数（默认 40） */
+      /** 段间重叠字符数（默认 40，约占 chunkSize 的 10%），用于保留跨切点上下文连续性 */
       chunkOverlap?: number;
     };
 
