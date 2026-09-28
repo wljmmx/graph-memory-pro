@@ -2329,7 +2329,7 @@ export default definePluginEntry({
     });
 
     // ─────────────────────────────────────────────────────────────────
-    // v2.2.0: MCP Server（对外暴露 13 个 tools，供 dashboard 调用）
+    // v2.2.0: MCP Server（对外暴露 14 个 tools，供 dashboard 调用）
     //
     // 通过 api.registerService 注册，复用宿主进程的 _driver/_cfg/_recaller。
     // 启用条件：cfg.mcp.enabled === true

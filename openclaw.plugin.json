@@ -987,7 +987,8 @@
           "enabledTools": {
             "type": "array",
             "items": { "type": "string", "default": "" },
-            "default": []
+            "default": [],
+            "description": "启用的 MCP 工具白名单（空数组 = 全部启用）。可选值：gm_status / gm_stats / gm_health / gm_get_node / gm_search / gm_top / gm_nodes_by_type / gm_embed_bench（read）与 gm_record / gm_maintain / gm_reembed / gm_feedback / gm_benchmark / gm_tune（write，gm_tune 另需 autoTuner.enabled）。dashboard 的维护面板即通过 MCP 枚举/调用这些工具。"
           }
         }
       },

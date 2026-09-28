@@ -186,7 +186,7 @@ npm install @openclaw/graph-memory-pro
 
 - `host: "127.0.0.1"` 仅本机；`"0.0.0.0"` 对外开放
 - `authToken` 设置后客户端需在 `Authorization: Bearer <token>` 头携带
-- `enabledTools` 省略则启用全部 13 个工具
+- `enabledTools` 省略则启用全部 14 个工具
 
 ### 端点
 - `POST http://<host>:<port>/mcp` — MCP JSON-RPC
@@ -203,6 +203,7 @@ npm install @openclaw/graph-memory-pro
 | `gm_search` | read | 全文搜索 + 关联边 |
 | `gm_top` | read | PageRank Top-N |
 | `gm_nodes_by_type` | read | 按类型筛选 |
+| `gm_embed_bench` | read | embed 批处理容量实测（三画像 → 建议 `embedding.maxBatchChars`；只读，不改配置） |
 | `gm_record` | write | 手动记录节点（含 source 参数） |
 | `gm_maintain` | write | 触发维护管线 |
 | `gm_reembed` | write | 批量重嵌入 |
@@ -426,7 +427,7 @@ src/
 │   ├── crud.ts           # HTTP 路由（含 /api/metrics, /api/auto-tuner/state, /api/maintain/* 等）
 │   └── reload.ts         # 配置热更新纯函数（diffConfigSegments/checkReloadAuth/normalizeReloadConfig）（v2.3.2）
 ├── mcp/
-│   └── server.ts         # MCP Server（Streamable HTTP，13 个 tools）
+│   └── server.ts         # MCP Server（Streamable HTTP，14 个 tools）
 ├── store/
 │   ├── db.ts             # Neo4j 连接管理
 │   ├── store.ts          # 数据操作层 barrel（barrel，69 行）

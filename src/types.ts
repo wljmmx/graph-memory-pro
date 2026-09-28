@@ -439,7 +439,7 @@ export interface GmConfig {
     maxRecallRecordsPerSession?: number;
   };
 
-  /** MCP Server 配置（v2.2.0 新增，对外暴露 13 个 tools） */
+  /** MCP Server 配置（v2.2.0 新增，对外暴露 14 个 tools） */
   mcp?: {
     /** 是否启用 MCP server（默认 false） */
     enabled?: boolean;

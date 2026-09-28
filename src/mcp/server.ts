@@ -7,11 +7,16 @@
  * 传输方式：Streamable HTTP
  * 部署形态：复用 OpenClaw 宿主进程，共享 _driver/_cfg/_recaller
  *
- * 暴露 13 个 tools：
+ * 暴露 14 个 tools：
  *   read:  gm_status / gm_stats / gm_health / gm_get_node / gm_search /
- *          gm_top / gm_nodes_by_type
+ *          gm_top / gm_nodes_by_type / gm_embed_bench
  *   write: gm_record / gm_maintain / gm_reembed / gm_feedback /
  *          gm_benchmark / gm_tune（条件注册）
+ *
+ * v2.8.x: gm_embed_bench 加入 MCP —— dashboard（lcm-graph-extra）的维护面板
+ * 通过 MCP 枚举/调用工具，只注册为宿主插件工具时它在那里不可见。
+ * MCP 侧只做「测量 + 建议」（read-only）：apply/persist 会改运行配置与磁盘文件，
+ * 属于危险动作，仅保留在宿主工具 gm_embed_bench 上。
  */
 
 import type { Driver } from "neo4j-driver";
@@ -196,6 +201,66 @@ export async function startMcpServer(
           content: [{ type: "text", text: JSON.stringify(report) }],
           structuredContent: asStructured(report),
         };
+      },
+    );
+  }
+
+  // v2.8.x: embed 批处理容量实测（只读诊断，供 dashboard 维护面板调用）
+  //   只测量 + 给建议；apply/persist（改运行配置 / 写 openclaw.json）仅在宿主
+  //   插件工具 gm_embed_bench 上提供，MCP 侧不暴露写动作。
+  if (toolEnabled("gm_embed_bench")) {
+    mcpServer.registerTool(
+      "gm_embed_bench",
+      {
+        title: "Embed Batch Capacity Bench",
+        description: "Measure the safe per-request char budget for batch embedding (embedding.maxBatchChars) on this machine. Runs three load profiles — short (~40 chars/item), mixed (40/400/800 rotating), long (~800 chars/item) — with item-count steps derived from the configured embedding.batchSize. Returns a recommended maxBatchChars whose value fits the latency budget, or 0 when batchSize alone already bounds the worst-case payload. Read-only: issues embedding requests only, writes nothing to the graph or config. NOTE: makes many embedding calls — narrow `profiles` and set repeats=1 if the embedding service is slow.",
+        inputSchema: {
+          profiles: z.array(z.enum(["short", "mixed", "long"])).optional()
+            .describe("Profiles to test (default: all three). Narrow to one to shorten runtime."),
+          targetMs: z.number().int().positive().max(600000).optional()
+            .describe("Latency budget per request in ms (default 60000 = half of the 120s batch timeout). Lower = more conservative recommendation."),
+          safety: z.number().positive().max(1).optional()
+            .describe("Safety factor applied to the measured budget (default 0.9)."),
+          repeats: z.number().int().positive().max(5).optional()
+            .describe("Repeat each step and take the slowest success (default 1 for MCP; raise for less noise, at the cost of runtime)."),
+        },
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      },
+      async ({ profiles, targetMs, safety, repeats }: { profiles?: Array<"short" | "mixed" | "long">; targetMs?: number; safety?: number; repeats?: number }) => {
+        if (!cfg.embedding?.baseURL && !cfg.embedding?.model) {
+          return { content: [{ type: "text", text: "embedding not configured (baseURL/model both empty); nothing to measure." }] };
+        }
+        try {
+          const { runEmbedBatchBench } = await import("../engine/embed-bench.ts");
+          // MCP 侧默认 repeats=1：这是同步调用，repeats 越高越可能拖住会话
+          const report = await runEmbedBatchBench(cfg.embedding, {
+            profiles,
+            targetMs,
+            safety,
+            repeats: repeats ?? 1,
+          });
+          const rec = report.recommendedMaxBatchChars;
+          const conclusion = rec === undefined
+            ? "No usable value: no step met the latency budget."
+            : rec === 0
+              ? "Recommended: keep embedding.maxBatchChars = 0 (disabled) — batchSize alone already bounds the worst-case payload, enabling it would only fragment safe requests."
+              : `Recommended: "embedding": { "maxBatchChars": ${rec} } (write it via the host tool gm_embed_bench with persist:true, or edit openclaw.json).`;
+          return {
+            content: [{ type: "text", text: `${report.summary}\n\n${conclusion}` }],
+            structuredContent: asStructured({
+              endpoint: report.endpoint,
+              config: report.config,
+              targetMs: report.targetMs,
+              safety: report.safety,
+              recommendedMaxBatchChars: rec ?? null,
+              recommendationReason: report.recommendationReason,
+              beneficial: report.beneficial,
+              results: report.results,
+            }),
+          };
+        } catch (err: unknown) {
+          return { content: [{ type: "text", text: `Error: ${(err as Error).message}` }] };
+        }
       },
     );
   }
