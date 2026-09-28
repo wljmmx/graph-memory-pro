@@ -238,36 +238,94 @@ function buildKeepAlive(config: EmbeddingConfig): string | number {
   return trimmed;
 }
 
+/**
+ * 嵌入请求目标（端点 + 鉴权 + 模型 + 格式）。
+ * 引擎与 bench/诊断工具共用同一份解析，避免两处端点逻辑漂移。
+ */
+export interface EmbedEndpoint {
+  apiFormat: EmbedApiFormat;
+  /** 规范化后的 baseURL（ollama 已剥离 /v1；openai 保留/补全版本段） */
+  baseURL: string;
+  /** 完整请求 URL */
+  url: string;
+  model: string;
+  apiKey: string;
+  keepAlive: string | number;
+  options: Record<string, number | boolean | string> | undefined;
+}
+
+/**
+ * 解析嵌入端点与请求参数（无缓存/信号量副作用，可安全用于 bench）。
+ * 端点规则：ollama → {baseURL}/api/embed；openai → {baseURL}/embeddings。
+ */
+export function resolveEmbedEndpoint(config: EmbeddingConfig): EmbedEndpoint {
+  const rawBaseURL = sanitizeBaseURL(config.baseURL || "http://localhost:11434");
+  const apiFormat = resolveEmbedApiFormat(rawBaseURL, config.apiFormat);
+  // 端点规范化：
+  //   - ollama：剥离尾部 /v1（Ollama OpenAI 兼容路径 → 原生 /api/embed）
+  //   - openai：保留版本路径（OVMS /v3 原样保留），必要时补 /v1，绝不复写为 /api/embed
+  const baseURL = apiFormat === "ollama"
+    ? (rawBaseURL.endsWith("/v1") ? rawBaseURL.slice(0, -3) : rawBaseURL)
+    : resolveOpenAICompatBase(rawBaseURL);
+  return {
+    apiFormat,
+    baseURL,
+    url: apiFormat === "ollama" ? `${baseURL}/api/embed` : `${baseURL}/embeddings`,
+    model: config.model || "Qwen3.5-Embedding-0.6B-GGUF",
+    apiKey: config.apiKey || "",
+    keepAlive: buildKeepAlive(config),
+    options: config.options,
+  };
+}
+
+/**
+ * 构造嵌入请求体。
+ * ollama → input 数组 + keep_alive/options；
+ * openai 兼容（含 OVMS /v3）→ 仅 model/input，忽略 Ollama 专有字段。
+ */
+export function buildEmbedRequestBody(
+  endpoint: Pick<EmbedEndpoint, "apiFormat" | "model" | "keepAlive" | "options">,
+  inputs: string[],
+): Record<string, unknown> {
+  return endpoint.apiFormat === "ollama"
+    ? {
+        model: endpoint.model,
+        input: inputs,
+        keep_alive: endpoint.keepAlive,
+        ...(endpoint.options ? { options: endpoint.options } : {}),
+      }
+    : { model: endpoint.model, input: inputs };
+}
+
+/** 构造嵌入请求头（含可选 Bearer 鉴权） */
+export function buildEmbedRequestHeaders(
+  endpoint: Pick<EmbedEndpoint, "apiKey">,
+): Record<string, string> {
+  return {
+    "Content-Type": "application/json",
+    ...(endpoint.apiKey ? { "Authorization": `Bearer ${endpoint.apiKey}` } : {}),
+  };
+}
+
 // 单次请求：发送 inputs 数组，返回对齐的向量数组（带重试 + 维度校验）
-// v2.8.x: timeoutMs 可配——批量路径输入多（每请求 ≤ BATCH_SIZE 段文本），
-// 本地 CPU Ollama 在极端负载下 30s 可能超时，误触发重试风暴（表现为
-// gm_reembed 首批次"跑几分钟 0 进展"），故批量路径上调到 120s。
+// v2.8.x: timeoutMs 可配——批量路径输入多（每请求 ≤ 段数上限），本地 CPU Ollama
+// 在极端负载下 30s 可能超时，误触发重试风暴（表现为 gm_reembed 首批次
+// "跑几分钟 0 进展"），故批量路径上调到 120s。
 async function performEmbedRequest(
   client: EmbedClient,
   inputs: string[],
   timeoutMs = 30_000,
 ): Promise<number[][]> {
-  const { apiFormat, baseURL, apiKey, model, keepAlive, options, expectedDim } = client;
-  // Ollama 原生 → /api/embed；OpenAI 兼容（含 OVMS /v3/embeddings）→ /embeddings
+  const { apiFormat, url, model, baseURL, expectedDim } = client;
   const isOllama = apiFormat === "ollama";
-  const endpoint = isOllama ? `${baseURL}/api/embed` : `${baseURL}/embeddings`;
   const delays = [...RETRY_DELAYS];
   const lastErr: Error[] = [];
   for (let attempt = 0; attempt <= delays.length; attempt++) {
     try {
-      const response = await fetch(endpoint, {
+      const response = await fetch(url, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(apiKey ? { "Authorization": `Bearer ${apiKey}` } : {}),
-        },
-        body: JSON.stringify(
-          isOllama
-            // Ollama 原生：input 数组 + keep_alive/options
-            ? { model, input: inputs, keep_alive: keepAlive, ...(options ? { options } : {}) }
-            // OpenAI 兼容：仅 model/input，忽略 Ollama 专有字段（keep_alive/options）
-            : { model, input: inputs },
-        ),
+        headers: buildEmbedRequestHeaders(client),
+        body: JSON.stringify(buildEmbedRequestBody(client, inputs)),
         signal: AbortSignal.timeout(timeoutMs),
       });
 
@@ -355,6 +413,8 @@ async function performEmbedRequest(
 type EmbedClient = {
   apiFormat: EmbedApiFormat;
   baseURL: string;
+  /** 完整请求 URL（由 resolveEmbedEndpoint 解析，performEmbedRequest 直接用） */
+  url: string;
   apiKey: string;
   model: string;
   keepAlive: string | number;
@@ -366,28 +426,28 @@ type EmbedClient = {
 };
 
 function buildEmbedClient(config: EmbeddingConfig): EmbedClient {
-  const apiKey = config.apiKey || "";
-  const rawBaseURL = sanitizeBaseURL(config.baseURL || "http://localhost:11434");
-  const apiFormat = resolveEmbedApiFormat(rawBaseURL, config.apiFormat);
-  // 端点规范化：
-  //   - ollama：剥离尾部 /v1（Ollama OpenAI 兼容路径 → 原生 /api/embed）
-  //   - openai：保留版本路径（OVMS /v3 原样保留），必要时补 /v1，绝不复写为 /api/embed
-  let baseURL = rawBaseURL;
-  if (apiFormat === "ollama") {
-    if (baseURL.endsWith("/v1")) baseURL = baseURL.slice(0, -3);
-  } else {
-    baseURL = resolveOpenAICompatBase(baseURL);
-  }
-  const model = config.model || "Qwen3.5-Embedding-0.6B-GGUF";
-  const keepAlive = buildKeepAlive(config);
+  // 端点解析复用 resolveEmbedEndpoint —— 引擎/bench 单一事实来源，避免逻辑漂移
+  const ep = resolveEmbedEndpoint(config);
   const expectedDim = config.dimensions;
   const cacheSize = config.cacheSize ?? DEFAULT_EMBED_CACHE_SIZE;
   const cacheTtlMs = config.cacheTtlMs ?? DEFAULT_EMBED_CACHE_TTL_MS;
-  const cacheLabel = `${baseURL}|${model}`;
+  const cacheLabel = `${ep.baseURL}|${ep.model}`;
   const cache = getSharedEmbedCache(cacheLabel, cacheSize, cacheTtlMs);
   const maxConcurrency = config.maxConcurrency ?? DEFAULT_EMBED_MAX_CONCURRENCY;
-  const semaphore = getSemaphore(baseURL, model, maxConcurrency);
-  return { apiFormat, apiKey, baseURL, model, keepAlive, expectedDim, cache, cacheLabel, semaphore, options: config.options };
+  const semaphore = getSemaphore(ep.baseURL, ep.model, maxConcurrency);
+  return {
+    apiFormat: ep.apiFormat,
+    apiKey: ep.apiKey,
+    baseURL: ep.baseURL,
+    url: ep.url,
+    model: ep.model,
+    keepAlive: ep.keepAlive,
+    expectedDim,
+    cache,
+    cacheLabel,
+    semaphore,
+    options: ep.options,
+  };
 }
 
 /**

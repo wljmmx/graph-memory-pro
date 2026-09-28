@@ -2834,6 +2834,91 @@ export default definePluginEntry({
       },
     });
 
+    // v2.8.x: embed 批处理容量实测工具
+    // 直接读取**当前生效配置**（_cfg.embedding），在本机实测出 maxBatchChars 参考值。
+    // 与 CLI（npm run bench:embed-batch）共用 src/engine/embed-bench.ts，逻辑不漂移。
+    api.registerTool({
+      name: "gm_embed_bench",
+      label: "Graph Memory Embed Batch Bench",
+      description:
+        "Measure the safe per-request char budget for batch embedding (embedding.maxBatchChars) on THIS machine, using the live config. Tested across three profiles: short (~40 chars/item), mixed (40/400/800 rotating), long (~800 chars/item). Item-count steps are derived from the configured embedding.batchSize (not hardcoded), and requests never exceed batchSize. Returns a recommended maxBatchChars = most conservative passing value across profiles x safety factor. Read-only: it only issues embedding requests, never writes config or graph. Note: a short-text-only workload is always bounded by batchSize, so the char budget gives no benefit there.",
+      parameters: Type.Object({
+        targetMs: Type.Optional(Type.Number({
+          description: "Latency budget per request in ms (default: half of the batch timeout, 60000). Lower = more conservative recommendation.",
+        })),
+        safety: Type.Optional(Type.Number({
+          description: "Extra safety factor applied to the passing budget (default 0.9). targetMs already carries ~2x headroom over the 120s timeout.",
+        })),
+        repeats: Type.Optional(Type.Number({
+          description: "Repeat each step and take the slowest success (default 2). Higher = less noisy but slower.",
+        })),
+        profiles: Type.Optional(Type.Array(Type.String(), {
+          description: "Restrict profiles: subset of [\"short\",\"mixed\",\"long\"] (default: all three).",
+        })),
+        batchSize: Type.Optional(Type.Number({
+          description: "Override embedding.batchSize for this run only (does not persist). Useful to preview a different item cap.",
+        })),
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      async execute(_callId: string, params: any) {
+        if (!_cfg) {
+          return { content: [{ type: "text", text: "Graph Memory Pro not connected" }], details: {} };
+        }
+        const embedCfg = _cfg.embedding;
+        if (!embedCfg?.baseURL && !embedCfg?.model) {
+          return { content: [{ type: "text", text: "embedding 未配置（baseURL / model 均为空），无法实测。" }], details: {} };
+        }
+        try {
+          const { runEmbedBatchBench } = await import("./src/engine/embed-bench.ts");
+          // 覆盖项只作用于本次实测，不写回配置
+          const runCfg = params?.batchSize
+            ? { ...embedCfg, batchSize: Math.max(1, Math.floor(params.batchSize)) }
+            : embedCfg;
+          const report = await runEmbedBatchBench(runCfg, {
+            targetMs: params?.targetMs ? Math.floor(params.targetMs) : undefined,
+            safety: params?.safety ? Number(params.safety) : undefined,
+            repeats: params?.repeats ? Math.max(1, Math.floor(params.repeats)) : undefined,
+            profiles: Array.isArray(params?.profiles) && params.profiles.length
+              ? params.profiles.filter((p: unknown) => p === "short" || p === "mixed" || p === "long")
+              : undefined,
+          });
+
+          const header = [
+            "Embed batch capacity bench（读取当前配置实测）",
+            `端点: ${report.endpoint}`,
+            `模型: ${report.config.model}｜batchSize=${report.config.batchSize}（配置值）｜当前 maxBatchChars=${report.config.maxBatchChars || "0（未启用）"}`,
+            `目标单请求耗时: ≤ ${report.targetMs}ms｜安全系数: ${report.safety}`,
+            "",
+          ];
+          const rec = report.recommendedMaxBatchChars;
+          const tail = rec === undefined
+            ? ["", "未测出结论：无档位达标，请检查服务可用性或放宽 targetMs。"]
+            : rec === 0
+              ? ["", "结论：保持 maxBatchChars = 0（关闭）——条数上限本身已能兜住最坏载荷，启用反而会把安全请求切碎。"]
+              : [
+                  "",
+                  "将参考值写入 embedding 配置即可生效（本工具不会自动改配置）：",
+                  `  "embedding": { "maxBatchChars": ${rec} }`,
+                ];
+          return {
+            content: [{ type: "text", text: [...header, report.summary, ...tail].join("\n") }],
+            details: {
+              endpoint: report.endpoint,
+              config: report.config,
+              targetMs: report.targetMs,
+              safety: report.safety,
+              recommendedMaxBatchChars: rec,
+              recommendationReason: report.recommendationReason,
+              beneficial: report.beneficial,
+              results: report.results,
+            },
+          };
+        } catch (err) {
+          return { content: [{ type: "text", text: `Embed bench failed: ${(err as Error).message}` }], details: {} };
+        }
+      },
+    });
+
   },
 });
 

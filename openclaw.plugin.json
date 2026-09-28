@@ -240,7 +240,7 @@
             "type": "integer",
             "default": 0,
             "minimum": 0,
-            "description": "v2.8.x: 动态批处理的总长度阈值（单请求累计字符数预算，0=关闭）。开启后装箱同时受两个上限约束：条数 ≤ batchSize，且累计字符数超阈值时当前批次封箱、该条转入下一个子批次（同一次调用内继续提交，不丢给未来轮次）。用途：条数相同但长度差异极大时（32×短句 vs 32×800 字）稳定单请求耗时，避免击穿批量超时。建议用 scripts/embed-batch-bench.ts 在本机实测取值。"
+            "description": "v2.8.x: 动态批处理的总长度阈值（单请求累计字符数预算，0=关闭）。开启后装箱同时受两个上限约束：条数 ≤ batchSize，且累计字符数超阈值时当前批次封箱、该条转入下一个子批次（同一次调用内继续提交，不丢给未来轮次）。用途：条数相同但长度差异极大时（32×短句 vs 32×800 字）稳定单请求耗时，避免击穿批量超时。取值请实测：调用插件工具 gm_embed_bench（按 short/mixed/long 三画像实测并按真实 batchSize 推导档位），或用 CLI npm run bench:embed-batch。"
           },
           "apiFormat": {
             "type": "string",

@@ -29,7 +29,7 @@
     "maxConcurrency": 3,
     "$comment_batchSize": "v2.8.x: 批量嵌入单请求最大文本数（默认 32）。Ollama /api/embed 由服务端批处理，调大减少请求往返；弱 CPU 下建议调小（如 8-16）以避免单请求超时",
     "batchSize": 32,
-    "$comment_maxBatchChars": "v2.8.x: 动态批处理总长度阈值（单请求累计字符数预算，0=关闭）。batchSize 只管条数，管不住长度——32 条短句与 32 条 800 字的单请求工作量差数十倍，会让固定批量超时（120s）时松时紧。设为 >0 后装箱同受两个上限约束：超阈值即封箱，余下转下一子批次（同一次调用内继续提交，不会留待未来轮次）。用 `npm run bench:embed-batch -- --config config.json` 在本机实测取值",
+    "$comment_maxBatchChars": "v2.8.x: 动态批处理总长度阈值（单请求累计字符数预算，0=关闭）。batchSize 只管条数、管不住长度——32 条短句与 32 条 800 字的单请求工作量差数十倍，会让固定批量超时（120s）时松时紧。设为 >0 后装箱同受两个上限约束：超阈值即封箱，余下转下一子批次（同一次调用内继续提交，不会留待未来轮次）。⚠ 取值必须在本机实测（取决于硬件/模型/文本分布），不要照抄：让 Agent 调用插件工具 gm_embed_bench，或运行 CLI `npm run bench:embed-batch`。工具会按 short/mixed/long 三画像实测，并用配置里的 batchSize 推导档位，直接输出可粘贴的配置行；若结论为 0，说明条数上限本身已足够，保持关闭即可。",
     "maxBatchChars": 0
   },
   "recallMaxNodes": 6,

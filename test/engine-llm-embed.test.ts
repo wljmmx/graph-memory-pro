@@ -18,7 +18,13 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createCompleteFn, createRuntimeCompleteFn, __test__ } from "../src/engine/llm.ts";
-import { createEmbedFn, clearEmbedCacheAll } from "../src/engine/embed.ts";
+import { createEmbedFn, clearEmbedCacheAll, resolveEmbedEndpoint } from "../src/engine/embed.ts";
+import {
+  deriveItemCounts,
+  buildProfileInputs,
+  BENCH_PROFILES,
+  runEmbedBatchBench,
+} from "../src/engine/embed-bench.ts";
 
 /** 构造一个最小可用的 mock Response（避免依赖真实 Response 构造器） */
 function mockResponse(body: unknown, init: { ok?: boolean; status?: number } = {}): Response {
@@ -1177,5 +1183,147 @@ describe("createEmbedFn — OpenAI 兼容 / OVMS v3", () => {
     await vi.advanceTimersByTimeAsync(12_000);
     await assertion;
     expect(fetchSpy).toHaveBeenCalledTimes(4); // 1 + 3 次重试
+  });
+});
+
+// ────────────────────────────────────────────────────────────
+// embed-bench（v2.8.x：三画像批处理容量实测）
+// 覆盖确定性部分：画像构造、档位推导（读真实 batchSize 而非写死）、端点解析、
+// 以及「全达标 → 建议保持关闭」与「全失败 → 无结论」两条汇总分支。
+// 「需要长度预算」分支依赖真实耗时，不在单测内断言（易抖），由 CLI/工具实测覆盖。
+// ────────────────────────────────────────────────────────────
+describe("embed-bench 纯函数", () => {
+  it("deriveItemCounts：档位由 batchSize 推导，且不超过它（非写死 32）", () => {
+    expect(deriveItemCounts(32)).toEqual([1, 2, 4, 8, 16, 32]);
+    expect(deriveItemCounts(8)).toEqual([1, 2, 4, 8]);
+    expect(deriveItemCounts(64)).toEqual([1, 2, 4, 8, 16, 32, 64]);
+    // 小于最小档位时仍需给出 1 档，避免空档位
+    expect(deriveItemCounts(1)).toEqual([1]);
+    expect(deriveItemCounts(3)).toEqual([1, 2, 3]);
+    // 任何情况下都不应出现超过 batchSize 的档位
+    for (const bs of [1, 2, 3, 8, 32, 64]) {
+      for (const c of deriveItemCounts(bs)) expect(c).toBeLessThanOrEqual(bs);
+    }
+  });
+
+  it("buildProfileInputs：条数受 batchSize 硬约束，不超上限", () => {
+    const long = BENCH_PROFILES.long;
+    expect(buildProfileInputs(long, 4, 32)).toHaveLength(4);
+    expect(buildProfileInputs(long, 99, 8)).toHaveLength(8); // 被 batchSize 截断
+    expect(buildProfileInputs(long, 0, 8)).toHaveLength(1); // 至少 1 条，保证前进
+  });
+
+  it("三个画像的段长符合定义：short≈40 / long≈800 / mixed 轮换", () => {
+    expect(BENCH_PROFILES.short.seg(0)).toHaveLength(40);
+    expect(BENCH_PROFILES.long.seg(0)).toHaveLength(800);
+    // mixed 在 40 / 400 / 800 之间轮换 → 同请求内长度方差大
+    expect(BENCH_PROFILES.mixed.seg(0)).toHaveLength(40);
+    expect(BENCH_PROFILES.mixed.seg(1)).toHaveLength(400);
+    expect(BENCH_PROFILES.mixed.seg(2)).toHaveLength(800);
+    expect(BENCH_PROFILES.mixed.seg(3)).toHaveLength(40);
+    expect(BENCH_PROFILES.mixed.avgSegChars).toBeCloseTo((40 + 400 + 800) / 3, 5);
+  });
+
+  it("画像文本可复现：相同 seed 产出相同内容（保证跨运行测量可比）", () => {
+    expect(BENCH_PROFILES.long.seg(7)).toBe(BENCH_PROFILES.long.seg(7));
+    expect(BENCH_PROFILES.long.seg(7)).not.toBe(BENCH_PROFILES.long.seg(8));
+  });
+});
+
+describe("resolveEmbedEndpoint（引擎与 bench 共用的端点解析）", () => {
+  it("ollama：剥离 /v1 走 /api/embed", () => {
+    const ep = resolveEmbedEndpoint({ baseURL: "http://h:11434/v1", model: "m" });
+    expect(ep.apiFormat).toBe("ollama");
+    expect(ep.url).toBe("http://h:11434/api/embed");
+  });
+
+  it("openai：/v3 原样保留走 /v3/embeddings（OVMS）；显式 openai 且无版本段时补 /v1", () => {
+    expect(resolveEmbedEndpoint({ baseURL: "http://ovms:9000/v3", model: "m" }).url)
+      .toBe("http://ovms:9000/v3/embeddings");
+    // 无版本段的地址默认判定为 ollama（自动判定规则），要显式声明才是 OpenAI 兼容
+    expect(resolveEmbedEndpoint({ baseURL: "http://gw:8080", model: "m", apiFormat: "openai" }).url)
+      .toBe("http://gw:8080/v1/embeddings");
+  });
+
+  it("无缓存/信号量副作用：多次调用结果稳定（可安全用于 bench）", () => {
+    const cfg = { baseURL: "http://h:11434", model: "m" };
+    expect(resolveEmbedEndpoint(cfg)).toEqual(resolveEmbedEndpoint(cfg));
+  });
+});
+
+describe("runEmbedBatchBench 汇总分支", () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  /** 快路径参数：只测两个画像、不热身、单次，保持用例轻量 */
+  const fastOpts = { profiles: ["short", "long"] as Array<"short" | "long">, warmup: false, repeats: 1 };
+
+  it("全部档位达标 → 建议保持 0（条数上限本身已安全，启用反而切碎请求）", async () => {
+    globalThis.fetch = vi.fn(async (_url: unknown, init: any) => {
+      const body = JSON.parse(init.body);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ embeddings: body.input.map(() => [0.1, 0.2]) }),
+      } as unknown as Response;
+    });
+
+    // targetMs 极大 → 所有档位必然达标
+    const report = await runEmbedBatchBench(
+      { baseURL: "http://localhost:11434", model: "m", batchSize: 4 },
+      { ...fastOpts, targetMs: 10_000_000 },
+    );
+
+    expect(report.recommendedMaxBatchChars).toBe(0);
+    expect(report.beneficial).toBe(false);
+    expect(report.recommendationReason).toContain("无需长度预算");
+    // 档位条数由配置的 batchSize=4 推导
+    expect(report.results.map((r) => r.samples.map((s) => s.count))).toEqual([
+      [1, 2, 4],
+      [1, 2, 4],
+    ]);
+    expect(report.config.batchSize).toBe(4);
+  });
+
+  it("全部档位失败 → 无结论（undefined），并给出失败说明", async () => {
+    globalThis.fetch = vi.fn(async () => {
+      throw new Error("ECONNREFUSED");
+    });
+
+    const report = await runEmbedBatchBench(
+      { baseURL: "http://localhost:11434", model: "m", batchSize: 2 },
+      fastOpts,
+    );
+
+    expect(report.recommendedMaxBatchChars).toBeUndefined();
+    expect(report.beneficial).toBe(false);
+    expect(report.recommendationReason).toContain("无任何档位达标");
+    expect(report.results.every((r) => r.samples.every((s) => !s.ok))).toBe(true);
+  });
+
+  it("报告读的是真实配置：batchSize / maxBatchChars / 端点均来自传入 config", async () => {
+    globalThis.fetch = vi.fn(async () => mockResponse({ embeddings: [[0.1]] }));
+
+    const report = await runEmbedBatchBench(
+      {
+        baseURL: "http://192.168.50.5:11434",
+        model: "Qwen3.5-Embedding-0.6B-GGUF",
+        batchSize: 16,
+        maxBatchChars: 4096,
+        maxConcurrency: 3,
+      },
+      fastOpts,
+    );
+
+    expect(report.endpoint).toBe("http://192.168.50.5:11434/api/embed");
+    expect(report.config.batchSize).toBe(16); // 非写死 32
+    expect(report.config.maxBatchChars).toBe(4096);
+    expect(report.config.maxConcurrency).toBe(3);
+    expect(report.config.model).toBe("Qwen3.5-Embedding-0.6B-GGUF");
+    // 档位上限受 batchSize=16 约束
+    expect(Math.max(...report.results.flatMap((r) => r.samples.map((s) => s.count)))).toBe(16);
   });
 });
