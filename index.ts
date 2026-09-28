@@ -2864,6 +2864,9 @@ export default definePluginEntry({
         apply: Type.Optional(Type.Boolean({
           description: "Default false (measure only). When true, apply the value to the running engine immediately (runtime-only, reverts on restart).",
         })),
+        persist: Type.Optional(Type.Boolean({
+          description: "Default false. When true, also write the value into ~/.openclaw/openclaw.json (plugins.entries[\"graph-memory-pro\"].config.embedding) so it survives restarts. Safety: only writes when the file is strict JSON and the plugin's embedding section is already present (never creates structure); backs up to <path>.bak-<timestamp> first and replaces atomically. Combine with apply:true to get both immediate effect and persistence.",
+        })),
       }),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       async execute(_callId: string, params: any) {
@@ -2908,57 +2911,95 @@ export default definePluginEntry({
                   `  "embedding": { "maxBatchChars": ${rec} }`,
                 ];
 
-          // ── 可选：热应用到当前运行中的引擎（默认不应用）──
+          // ── 可选：应用到运行时（apply）与/或落盘（persist），默认两者都不做 ──
           const applyLines: string[] = [];
           // 应用后的实际值（供 details 回传）；null = 本次未应用
           let appliedChars: number | null = null;
           let appliedSize: number | null = null;
-          if (params?.apply === true) {
-            const explicit = Number.isFinite(params?.maxBatchChars) && params.maxBatchChars >= 0
-              ? Math.floor(params.maxBatchChars)
-              : undefined;
-            const target = explicit ?? rec;
+          let persisted: { ok: boolean; path: string; changed?: boolean; backupPath?: string; error?: string } | null = null;
+
+          const wantsApply = params?.apply === true;
+          const wantsPersist = params?.persist === true;
+          const explicitTarget = Number.isFinite(params?.maxBatchChars) && params.maxBatchChars >= 0
+            ? Math.floor(params.maxBatchChars)
+            : undefined;
+          // apply 与 persist 共用同一个目标值：显式指定优先，否则用实测结论
+          const target = explicitTarget ?? rec;
+
+          if (wantsApply || wantsPersist) {
             if (target === undefined) {
-              applyLines.push("", "⚠ 未应用：没有可用值（无档位达标）。请放宽 targetMs 或检查 embedding 服务后重试。");
+              applyLines.push("", "⚠ 未执行：没有可用值（无档位达标）。请放宽 targetMs 或检查 embedding 服务后重试。");
             } else {
-              const beforeChars = embedCfg.maxBatchChars ?? 0;
-              const beforeSize = embedCfg.batchSize ?? 32;
-              // 替换为新的 embedding 对象（_cfg 被 publishSharedState 按引用共享，故各实例可见）
-              _cfg.embedding = {
-                ...embedCfg,
-                maxBatchChars: target,
-                ...(overrideBatchSize !== undefined ? { batchSize: overrideBatchSize } : {}),
-              };
-              const { createBatchEmbedFn } = await import("./src/engine/embed.ts");
-              _batchEmbed = createBatchEmbedFn(_cfg.embedding);
-              // 重新注入：Recaller 持有函数引用、API routes 持有函数引用，都必须换新
-              if (_recaller) _recaller.setBatchEmbedFn(_batchEmbed);
-              if (_driver) {
-                try {
-                  const { initRoutes } = await import("./src/routes/crud.ts");
-                  initRoutes(_driver, _cfg, _llm ?? undefined, _embed ?? undefined, _recaller ?? undefined, _batchEmbed ?? undefined);
-                } catch (err) {
-                  applyLines.push(`⚠ routes 重新注入失败（不影响 Recaller 路径）：${(err as Error).message}`);
+              // ① 热应用到运行中的引擎
+              if (wantsApply) {
+                const beforeChars = embedCfg.maxBatchChars ?? 0;
+                const beforeSize = embedCfg.batchSize ?? 32;
+                // 替换为新的 embedding 对象（_cfg 被 publishSharedState 按引用共享，故各实例可见）
+                _cfg.embedding = {
+                  ...embedCfg,
+                  maxBatchChars: target,
+                  ...(overrideBatchSize !== undefined ? { batchSize: overrideBatchSize } : {}),
+                };
+                const { createBatchEmbedFn } = await import("./src/engine/embed.ts");
+                _batchEmbed = createBatchEmbedFn(_cfg.embedding);
+                // 重新注入：Recaller 持有函数引用、API routes 持有函数引用，都必须换新
+                if (_recaller) _recaller.setBatchEmbedFn(_batchEmbed);
+                if (_driver) {
+                  try {
+                    const { initRoutes } = await import("./src/routes/crud.ts");
+                    initRoutes(_driver, _cfg, _llm ?? undefined, _embed ?? undefined, _recaller ?? undefined, _batchEmbed ?? undefined);
+                  } catch (err) {
+                    applyLines.push(`⚠ routes 重新注入失败（不影响 Recaller 路径）：${(err as Error).message}`);
+                  }
+                }
+                publishCoreResources();
+                appliedChars = target;
+                appliedSize = _cfg.embedding.batchSize ?? 32;
+                applyLines.push(
+                  "",
+                  "✅ 已热应用到运行中的引擎（即时生效，无需重启）：",
+                  `  maxBatchChars: ${beforeChars} → ${target}`,
+                  `  batchSize: ${beforeSize} → ${appliedSize}`,
+                  "  已重建 batch embed 引擎，并重新注入 Recaller / API routes / 进程内共享状态。",
+                );
+              }
+
+              // ② 自动落盘到 openclaw.json（重启后依然生效）
+              if (wantsPersist) {
+                const { persistEmbeddingParams } = await import("./src/config-file.ts");
+                const r = await persistEmbeddingParams({
+                  maxBatchChars: target,
+                  ...(overrideBatchSize !== undefined ? { batchSize: overrideBatchSize } : {}),
+                });
+                persisted = { ok: r.ok, path: r.path, changed: r.changed, backupPath: r.backupPath, error: r.error };
+                const manual = `   "embedding": { "maxBatchChars": ${target}${overrideBatchSize !== undefined ? `, "batchSize": ${overrideBatchSize}` : ""} }`;
+                if (!r.ok) {
+                  applyLines.push(
+                    "",
+                    `⚠ 落盘失败：${r.error}`,
+                    `  目标文件：${r.path}`,
+                    "  如需手工落盘，请写入：",
+                    manual,
+                  );
+                } else if (r.changed === false) {
+                  applyLines.push("", `✅ 配置文件已是目标值，无需改动：${r.path}`);
+                } else {
+                  applyLines.push(
+                    "",
+                    "✅ 已自动落盘到配置文件（重启后依然生效）：",
+                    `  ${r.path}`,
+                    `  embedding.maxBatchChars = ${target}${overrideBatchSize !== undefined ? `, embedding.batchSize = ${overrideBatchSize}` : ""}`,
+                    ...(r.backupPath ? [`  原文件已备份：${r.backupPath}`] : []),
+                    "  注意：宿主当前生效配置来自内存，重启 Gateway 后才会读到本次写入的值。",
+                  );
                 }
               }
-              publishCoreResources();
-              appliedChars = target;
-              appliedSize = _cfg.embedding.batchSize ?? 32;
-              applyLines.push(
-                "",
-                "✅ 已热应用到运行中的引擎：",
-                `  maxBatchChars: ${beforeChars} → ${target}`,
-                `  batchSize: ${beforeSize} → ${appliedSize}`,
-                "  已重建 batch embed 引擎，并重新注入 Recaller / API routes / 进程内共享状态。",
-                "⚠ 仅运行时生效，**未写入配置文件**：Gateway 重启后回到配置值。",
-                "   确认效果满意后，请把下面这行落盘持久化（否则重启即失效）：",
-                `   "embedding": { "maxBatchChars": ${target}${overrideBatchSize !== undefined ? `, "batchSize": ${overrideBatchSize}` : ""} }`,
-              );
             }
           } else if (rec !== undefined) {
             applyLines.push(
               "",
-              "如需即时生效（不改配置文件、重启前有效）而无需重启 Gateway，可再调用一次并传 apply:true。",
+              "如需即时生效（不改配置文件、重启前有效）可传 apply:true；",
+              "如需写入 openclaw.json 持久化（重启后仍生效）可传 persist:true；两者可同时传。",
             );
           }
 
@@ -2976,6 +3017,7 @@ export default definePluginEntry({
               applied: params?.apply === true,
               appliedMaxBatchChars: appliedChars,
               appliedBatchSize: appliedSize,
+              persisted,
             },
           };
         } catch (err) {
