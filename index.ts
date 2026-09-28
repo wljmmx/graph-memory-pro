@@ -2841,7 +2841,7 @@ export default definePluginEntry({
       name: "gm_embed_bench",
       label: "Graph Memory Embed Batch Bench",
       description:
-        "Measure the safe per-request char budget for batch embedding (embedding.maxBatchChars) on THIS machine, using the live config. Tested across three profiles: short (~40 chars/item), mixed (40/400/800 rotating), long (~800 chars/item). Item-count steps are derived from the configured embedding.batchSize (not hardcoded), and requests never exceed batchSize. Returns a recommended maxBatchChars = most conservative passing value across profiles x safety factor. Read-only: it only issues embedding requests, never writes config or graph. Note: a short-text-only workload is always bounded by batchSize, so the char budget gives no benefit there.",
+        "Measure the safe per-request char budget for batch embedding (embedding.maxBatchChars) on THIS machine, using the live config. Tested across three profiles: short (~40 chars/item), mixed (40/400/800 rotating), long (~800 chars/item). Item-count steps are derived from the configured embedding.batchSize (not hardcoded), and requests never exceed batchSize. Returns a recommended maxBatchChars = most conservative passing value across profiles x safety factor. By default read-only (measures and recommends only). Pass apply:true to also hot-apply the resulting maxBatchChars/batchSize to the RUNNING engine (rebuilds the batch embed fn, re-injects into Recaller/API routes/shared state) — this takes effect immediately without a Gateway restart, but is RUNTIME-ONLY: it does not write the config file, so a restart reverts it. Persist manually with the printed config line if the value proves good.",
       parameters: Type.Object({
         targetMs: Type.Optional(Type.Number({
           description: "Latency budget per request in ms (default: half of the batch timeout, 60000). Lower = more conservative recommendation.",
@@ -2856,7 +2856,13 @@ export default definePluginEntry({
           description: "Restrict profiles: subset of [\"short\",\"mixed\",\"long\"] (default: all three).",
         })),
         batchSize: Type.Optional(Type.Number({
-          description: "Override embedding.batchSize for this run only (does not persist). Useful to preview a different item cap.",
+          description: "Override embedding.batchSize. Without apply it only affects this run's steps; with apply:true it is also written to the running config.",
+        })),
+        maxBatchChars: Type.Optional(Type.Number({
+          description: "Explicit maxBatchChars to use instead of the measured recommendation (only meaningful with apply:true). 0 disables the char budget.",
+        })),
+        apply: Type.Optional(Type.Boolean({
+          description: "Default false (measure only). When true, apply the value to the running engine immediately (runtime-only, reverts on restart).",
         })),
       }),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2870,10 +2876,11 @@ export default definePluginEntry({
         }
         try {
           const { runEmbedBatchBench } = await import("./src/engine/embed-bench.ts");
-          // 覆盖项只作用于本次实测，不写回配置
-          const runCfg = params?.batchSize
-            ? { ...embedCfg, batchSize: Math.max(1, Math.floor(params.batchSize)) }
-            : embedCfg;
+          const overrideBatchSize = Number.isFinite(params?.batchSize) && params.batchSize >= 1
+            ? Math.floor(params.batchSize)
+            : undefined;
+          // 覆盖项：不带 apply 时只作用于本次实测的档位推导
+          const runCfg = overrideBatchSize ? { ...embedCfg, batchSize: overrideBatchSize } : embedCfg;
           const report = await runEmbedBatchBench(runCfg, {
             targetMs: params?.targetMs ? Math.floor(params.targetMs) : undefined,
             safety: params?.safety ? Number(params.safety) : undefined,
@@ -2883,6 +2890,7 @@ export default definePluginEntry({
               : undefined,
           });
 
+          const rec = report.recommendedMaxBatchChars;
           const header = [
             "Embed batch capacity bench（读取当前配置实测）",
             `端点: ${report.endpoint}`,
@@ -2890,18 +2898,72 @@ export default definePluginEntry({
             `目标单请求耗时: ≤ ${report.targetMs}ms｜安全系数: ${report.safety}`,
             "",
           ];
-          const rec = report.recommendedMaxBatchChars;
           const tail = rec === undefined
             ? ["", "未测出结论：无档位达标，请检查服务可用性或放宽 targetMs。"]
             : rec === 0
               ? ["", "结论：保持 maxBatchChars = 0（关闭）——条数上限本身已能兜住最坏载荷，启用反而会把安全请求切碎。"]
               : [
                   "",
-                  "将参考值写入 embedding 配置即可生效（本工具不会自动改配置）：",
+                  "将参考值写入 embedding 配置即可生效（持久化，需重启）：",
                   `  "embedding": { "maxBatchChars": ${rec} }`,
                 ];
+
+          // ── 可选：热应用到当前运行中的引擎（默认不应用）──
+          const applyLines: string[] = [];
+          // 应用后的实际值（供 details 回传）；null = 本次未应用
+          let appliedChars: number | null = null;
+          let appliedSize: number | null = null;
+          if (params?.apply === true) {
+            const explicit = Number.isFinite(params?.maxBatchChars) && params.maxBatchChars >= 0
+              ? Math.floor(params.maxBatchChars)
+              : undefined;
+            const target = explicit ?? rec;
+            if (target === undefined) {
+              applyLines.push("", "⚠ 未应用：没有可用值（无档位达标）。请放宽 targetMs 或检查 embedding 服务后重试。");
+            } else {
+              const beforeChars = embedCfg.maxBatchChars ?? 0;
+              const beforeSize = embedCfg.batchSize ?? 32;
+              // 替换为新的 embedding 对象（_cfg 被 publishSharedState 按引用共享，故各实例可见）
+              _cfg.embedding = {
+                ...embedCfg,
+                maxBatchChars: target,
+                ...(overrideBatchSize !== undefined ? { batchSize: overrideBatchSize } : {}),
+              };
+              const { createBatchEmbedFn } = await import("./src/engine/embed.ts");
+              _batchEmbed = createBatchEmbedFn(_cfg.embedding);
+              // 重新注入：Recaller 持有函数引用、API routes 持有函数引用，都必须换新
+              if (_recaller) _recaller.setBatchEmbedFn(_batchEmbed);
+              if (_driver) {
+                try {
+                  const { initRoutes } = await import("./src/routes/crud.ts");
+                  initRoutes(_driver, _cfg, _llm ?? undefined, _embed ?? undefined, _recaller ?? undefined, _batchEmbed ?? undefined);
+                } catch (err) {
+                  applyLines.push(`⚠ routes 重新注入失败（不影响 Recaller 路径）：${(err as Error).message}`);
+                }
+              }
+              publishCoreResources();
+              appliedChars = target;
+              appliedSize = _cfg.embedding.batchSize ?? 32;
+              applyLines.push(
+                "",
+                "✅ 已热应用到运行中的引擎：",
+                `  maxBatchChars: ${beforeChars} → ${target}`,
+                `  batchSize: ${beforeSize} → ${appliedSize}`,
+                "  已重建 batch embed 引擎，并重新注入 Recaller / API routes / 进程内共享状态。",
+                "⚠ 仅运行时生效，**未写入配置文件**：Gateway 重启后回到配置值。",
+                "   确认效果满意后，请把下面这行落盘持久化（否则重启即失效）：",
+                `   "embedding": { "maxBatchChars": ${target}${overrideBatchSize !== undefined ? `, "batchSize": ${overrideBatchSize}` : ""} }`,
+              );
+            }
+          } else if (rec !== undefined) {
+            applyLines.push(
+              "",
+              "如需即时生效（不改配置文件、重启前有效）而无需重启 Gateway，可再调用一次并传 apply:true。",
+            );
+          }
+
           return {
-            content: [{ type: "text", text: [...header, report.summary, ...tail].join("\n") }],
+            content: [{ type: "text", text: [...header, report.summary, ...tail, ...applyLines].join("\n") }],
             details: {
               endpoint: report.endpoint,
               config: report.config,
@@ -2911,6 +2973,9 @@ export default definePluginEntry({
               recommendationReason: report.recommendationReason,
               beneficial: report.beneficial,
               results: report.results,
+              applied: params?.apply === true,
+              appliedMaxBatchChars: appliedChars,
+              appliedBatchSize: appliedSize,
             },
           };
         } catch (err) {

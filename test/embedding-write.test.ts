@@ -800,6 +800,34 @@ describe("createBatchEmbedFn（v2.8.x 动态批处理 / maxBatchChars）", () =>
     expect(batches).toHaveLength(0);
     expect(out2.every((v) => v !== null)).toBe(true);
   });
+
+  // ── 运行时热生效（gm_embed_bench apply:true）的前提 ──
+  // 装箱上限在 createBatchEmbedFn 调用时就被固化进闭包：改配置后**必须重建引擎函数**，
+  // 否则旧函数仍按旧上限切分。这条用例钉住该前提，防止「改了配置以为生效」的错觉。
+  it("装箱上限在创建时固化：改配置后必须重建，旧函数仍按旧上限工作", async () => {
+    const cfg = {
+      baseURL: "http://localhost:11434",
+      model: "test-embed",
+      maxConcurrency: 1,
+      batchSize: 32,
+      maxBatchChars: 250,
+    };
+    const stale = createBatchEmbedFn(cfg); // 模拟「已注入到 Recaller/routes 的旧函数」
+    const texts = Array.from({ length: 5 }, (_, i) => String(i).repeat(100)); // 每条 100 字
+
+    // 仅改配置对象，不重建 → 旧函数行为不变（每批仍 2 条）
+    cfg.maxBatchChars = 150;
+    const batchesA = spyBatchSizes();
+    await stale(texts);
+    expect(batchesA.map((b) => b.count)).toEqual([2, 2, 1]);
+
+    // 重建后才按新上限（150 → 每批 1 条）
+    clearEmbedCacheAll();
+    const rebuilt = createBatchEmbedFn(cfg);
+    const batchesB = spyBatchSizes();
+    await rebuilt(texts);
+    expect(batchesB.map((b) => b.count)).toEqual([1, 1, 1, 1, 1]);
+  });
 });
 
 // ── embedNode 分块批量嵌入（v2.8.x） ──────────────────────────
