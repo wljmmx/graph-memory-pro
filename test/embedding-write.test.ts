@@ -10,12 +10,12 @@
  *   3. detectAndMigrateEmbeddings —— 检出「有 embeddingModel 但无向量」节点并触发补录
  */
 
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import type { Driver } from "neo4j-driver";
 import { embedNodesMissing, embedNode } from "../src/store/embed-helper.ts";
 import { writeExtractResult } from "../src/services/extract-service.ts";
 import { detectAndMigrateEmbeddings, reEmbedNodes } from "../src/graph/reembed.ts";
-import { createBatchEmbedFn } from "../src/engine/embed.ts";
+import { createBatchEmbedFn, clearEmbedCacheAll } from "../src/engine/embed.ts";
 import { mockDriver, MockInteger } from "./helpers/neo4j-mock.ts";
 
 const EMBEDDING_MODEL = "test-embed";
@@ -628,6 +628,177 @@ describe("createBatchEmbedFn（v2.8.x 子批次并发限流）", () => {
     expect(urls.every((u) => u === "http://192.168.50.5:9000/v3/embeddings")).toBe(true);
     expect(out).toHaveLength(3);
     expect(out.every((v) => v !== null && v.length === 3)).toBe(true);
+  });
+});
+
+// ── 动态批处理（v2.8.x：条数上限 + 总长度阈值） ──────────────
+// 背景：此前只按条数装箱，32 条 10 字 vs 32 条 800 字的单请求工作量差数十倍，
+// 固定批量超时（120s）时松时紧。maxBatchChars 生效后同时受两个上限约束：
+// 累计字符数 + 下一条 > 阈值 → 当前批次封箱，该条转入下一个子批次
+// （同一次调用内继续提交，不是推迟到未来轮次）。
+
+describe("createBatchEmbedFn（v2.8.x 动态批处理 / maxBatchChars）", () => {
+  const originalFetch = globalThis.fetch;
+  // 模块级 embed LRU 缓存按 baseURL|model 共享，跨用例会互相命中导致装箱断言失真
+  beforeEach(() => clearEmbedCacheAll());
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  /** 记录每次请求的 [条数, 总字符数] */
+  function spyBatchSizes() {
+    const batches: Array<{ count: number; chars: number }> = [];
+    globalThis.fetch = vi.fn(async (_url: unknown, init: any) => {
+      const body = JSON.parse(init.body);
+      batches.push({
+        count: body.input.length,
+        chars: (body.input as string[]).reduce((n, s) => n + s.length, 0),
+      });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ embeddings: body.input.map(() => [0.1, 0.2, 0.3]) }),
+      } as unknown as Response;
+    });
+    return batches;
+  }
+
+  it("累计字符超阈值即封箱：批次不再增加，余下转入下一子批次（全部仍在本轮处理）", async () => {
+    const batches = spyBatchSizes();
+    // 每条 100 字，阈值 250 → 每批最多 2 条（200 字），第 3 条转下一批
+    const batchEmbed = createBatchEmbedFn({
+      baseURL: "http://localhost:11434",
+      model: "test-embed",
+      maxConcurrency: 1,
+      batchSize: 32,
+      maxBatchChars: 250,
+    });
+
+    const texts = Array.from({ length: 5 }, (_, i) => String(i).repeat(100));
+    const out = await batchEmbed(texts);
+
+    expect(batches.map((b) => b.count)).toEqual([2, 2, 1]);
+    expect(batches.map((b) => b.chars)).toEqual([200, 200, 100]);
+    // 关键：仍然全部处理完，没有「丢给下一轮」而留 null
+    expect(out).toHaveLength(5);
+    expect(out.every((v) => v !== null)).toBe(true);
+  });
+
+  it("条数上限仍然生效：长度很短时由 batchSize 先触顶", async () => {
+    const batches = spyBatchSizes();
+    const batchEmbed = createBatchEmbedFn({
+      baseURL: "http://localhost:11434",
+      model: "test-embed",
+      maxConcurrency: 1,
+      batchSize: 3,
+      maxBatchChars: 100_000, // 阈值远大于实际长度 → 条数先触顶
+    });
+
+    const out = await batchEmbed(Array.from({ length: 10 }, (_, i) => `t-${i}`));
+
+    expect(batches.map((b) => b.count)).toEqual([3, 3, 3, 1]);
+    expect(out.every((v) => v !== null)).toBe(true);
+  });
+
+  it("单条文本自身超阈值：独占一个子批次，不饿死、不死循环", async () => {
+    const batches = spyBatchSizes();
+    const batchEmbed = createBatchEmbedFn({
+      baseURL: "http://localhost:11434",
+      model: "test-embed",
+      maxConcurrency: 1,
+      batchSize: 32,
+      maxBatchChars: 50,
+    });
+
+    // 一条 500 字（远超阈值）+ 两条 20 字
+    const texts = ["x".repeat(500), "y".repeat(20), "z".repeat(20)];
+    const out = await batchEmbed(texts);
+
+    expect(batches.map((b) => b.count)).toEqual([1, 2]); // 超长条独占一批，后两条合批
+    expect(out).toHaveLength(3);
+    expect(out.every((v) => v !== null)).toBe(true);
+  });
+
+  it("maxBatchChars 未设置 / 为 0：维持纯条数切分（向后兼容）", async () => {
+    for (const cfg of [{}, { maxBatchChars: 0 }, { maxBatchChars: -1 }]) {
+      clearEmbedCacheAll(); // 每轮独立，避免上一轮写入的缓存命中导致不发请求
+      const batches = spyBatchSizes();
+      const batchEmbed = createBatchEmbedFn({
+        baseURL: "http://localhost:11434",
+        model: "test-embed",
+        maxConcurrency: 1,
+        batchSize: 4,
+        ...cfg,
+      });
+      await batchEmbed(Array.from({ length: 9 }, () => "x".repeat(300)));
+      // 若无长度约束，9 条按 batchSize=4 切分为 [4,4,1]
+      expect(batches.map((b) => b.count)).toEqual([4, 4, 1]);
+    }
+  });
+
+  it("阈值恰等于整批长度时该批可满装（边界不提前封箱）", async () => {
+    const batches = spyBatchSizes();
+    const batchEmbed = createBatchEmbedFn({
+      baseURL: "http://localhost:11434",
+      model: "test-embed",
+      maxConcurrency: 1,
+      batchSize: 32,
+      maxBatchChars: 300,
+    });
+
+    await batchEmbed(Array.from({ length: 3 }, () => "x".repeat(100)));
+    expect(batches.map((b) => b.chars)).toEqual([300]); // 恰好 300 = 阈值，不封箱
+  });
+
+  it("结果按原始下标回填：长度混合时顺序不错位", async () => {
+    globalThis.fetch = vi.fn(async (_url: unknown, init: any) => {
+      const body = JSON.parse(init.body);
+      // 用文本长度构造可区分的向量，验证回填下标正确
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          embeddings: (body.input as string[]).map((s) => [s.length, s.length + 1]),
+        }),
+      } as unknown as Response;
+    });
+
+    const batchEmbed = createBatchEmbedFn({
+      baseURL: "http://localhost:11434",
+      model: "test-embed",
+      maxConcurrency: 1,
+      batchSize: 32,
+      maxBatchChars: 150,
+    });
+
+    const texts = ["a".repeat(100), "b".repeat(100), "c".repeat(30)];
+    const out = await batchEmbed(texts);
+
+    expect(out[0]).toEqual([100, 101]);
+    expect(out[1]).toEqual([100, 101]);
+    expect(out[2]).toEqual([30, 31]);
+  });
+
+  it("命中缓存的文本不占预算：只有未命中项参与装箱", async () => {
+    const batches = spyBatchSizes();
+    const batchEmbed = createBatchEmbedFn({
+      baseURL: "http://localhost:11434",
+      model: "test-embed",
+      maxConcurrency: 1,
+      batchSize: 32,
+      maxBatchChars: 200,
+    });
+
+    // 首次：3 条 100 字 → 阈值 200 → [2,1]
+    const first = Array.from({ length: 3 }, (_, i) => String(i).repeat(100));
+    await batchEmbed(first);
+    expect(batches.map((b) => b.count)).toEqual([2, 1]);
+
+    batches.length = 0;
+    // 二次：同样的文本全部命中缓存 → 不再发请求
+    const out2 = await batchEmbed(first);
+    expect(batches).toHaveLength(0);
+    expect(out2.every((v) => v !== null)).toBe(true);
   });
 });
 

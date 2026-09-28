@@ -1753,6 +1753,7 @@ export default definePluginEntry({
       cacheTtlMs: Type.Optional(Type.Number({ default: 600_000, description: "v2.3.2 阶段二: embed LRU 缓存 TTL ms（默认 10min，0 禁用缓存）" })),
       maxConcurrency: Type.Optional(Type.Number({ default: 3, description: "v2.4.0: embed 最大并发请求数（默认 3 for 本地 Ollama，过高会触发 503 server busy）" })),
       batchSize: Type.Optional(Type.Number({ default: 32, description: "v2.8.x: 批量嵌入单请求最大文本数（默认 32，服务端批处理；本地弱 CPU 可调小降低超时风险）" })),
+      maxBatchChars: Type.Optional(Type.Number({ default: 0, description: "v2.8.x: 动态批处理总长度阈值（单请求累计字符数预算，0=关闭）。开启后条数 ≤ batchSize 且累计字符超阈值即封箱转下一子批次，用于稳定单请求耗时；建议用 scripts/embed-batch-bench.ts 实测取值" })),
       apiFormat: Type.Optional(Type.Union([Type.Literal("ollama"), Type.Literal("openai")], { description: "v2.8.x: 嵌入接口格式。ollama=/api/embed；openai=/embeddings（OVMS 内网服务 /v3、OpenAI /v1 等）。留空自动判定" })),
       options: Type.Optional(Type.Object({}, { additionalProperties: true, default: {} })),
     })),

@@ -27,6 +27,7 @@
     "lint": "eslint src/ index.ts",
     "typecheck": "tsc --noEmit",
     "benchmark": "tsx src/benchmark/cli.ts",
+    "bench:embed-batch": "tsx scripts/embed-batch-bench.ts",
     "download:benchmarks": "bash scripts/download-benchmarks.sh",
     "preprocess:benchmarks": "tsx scripts/preprocess-benchmarks.ts"
   },

@@ -443,12 +443,58 @@ export type BatchEmbedFn = (texts: string[]) => Promise<(number[] | null)[]>;
 // v2.8.x: 改为可配置（embedding.batchSize），默认仍为 32；本地弱 CPU 可调小以降低单请求超时风险。
 const DEFAULT_BATCH_SIZE = 32;
 
+/**
+ * v2.8.x: 子批次切分（条数上限 + 可选总长度预算）。
+ *
+ * 只按条数装箱时，单请求工作量方差极大——32 条 10 字 vs 32 条 800 字相差
+ * 数十倍，固定的批量超时（120s）因而时松时紧，长文本场景易被击穿后触发
+ * 重试风暴。给定 maxBatchChars 后改为「长度感知」装箱：
+ * 累计字符数再加下一条会超预算时，当前子批次封箱，该条进入下一个子批次
+ * （同一次调用内继续提交；不是推迟到未来的调度轮次）。
+ *
+ * 保证：
+ *   - 每个子批次条数 ≤ batchSize，字符数 ≤ maxBatchChars（单条自身超预算时除外）
+ *   - 单条自身超预算时独占一个子批次 → 严格前进，不会死循环/饿死
+ *   - maxBatchChars <= 0 时退化为纯按条数切分，与旧实现逐字节等价
+ *   - 不改变输入顺序（子批次内保序，配合并发限流不影响结果回填）
+ */
+function splitSubBatches(
+  toEmbed: number[],
+  textLen: (index: number) => number,
+  batchSize: number,
+  maxBatchChars: number,
+): number[][] {
+  const useCharBudget = maxBatchChars > 0;
+  const out: number[][] = [];
+  let cur: number[] = [];
+  let curChars = 0;
+  for (const i of toEmbed) {
+    const len = textLen(i);
+    const countFull = cur.length >= batchSize;
+    // cur.length > 0 条件：单条超预算时不无限等待，让它独占一个子批次
+    const charsFull = useCharBudget && cur.length > 0 && curChars + len > maxBatchChars;
+    if ((countFull || charsFull) && cur.length > 0) {
+      out.push(cur);
+      cur = [];
+      curChars = 0;
+    }
+    cur.push(i);
+    curChars += len;
+  }
+  if (cur.length > 0) out.push(cur);
+  return out;
+}
+
 export function createBatchEmbedFn(config: EmbeddingConfig): BatchEmbedFn {
   const c = buildEmbedClient(config);
   // v2.8.x: 批次大小可配——非法/非正值回退默认，避免 0 导致批次切分死循环。
   const batchSize = Number.isFinite(config.batchSize) && (config.batchSize as number) >= 1
     ? Math.floor(config.batchSize as number)
     : DEFAULT_BATCH_SIZE;
+  // v2.8.x: 动态批处理的总长度预算（<= 0 / 非有限值 = 关闭）
+  const maxBatchChars = Number.isFinite(config.maxBatchChars) && (config.maxBatchChars as number) > 0
+    ? Math.floor(config.maxBatchChars as number)
+    : 0;
 
   return async function batchEmbed(texts: string[]): Promise<(number[] | null)[]> {
     const out: (number[] | null)[] = new Array(texts.length).fill(null);
@@ -475,10 +521,8 @@ export function createBatchEmbedFn(config: EmbeddingConfig): BatchEmbedFn {
     // v2.8.x: 子批次并发发送（此前串行 for 循环，未利用 maxConcurrency）。
     // 信号量 acquire 自然限流：并发数 ≤ maxConcurrency（本地 Ollama 默认 8），
     // 每请求携带 ≤ batchSize 文本，GPU 批处理利用率更高。
-    const subBatches: number[][] = [];
-    for (let start = 0; start < toEmbed.length; start += batchSize) {
-      subBatches.push(toEmbed.slice(start, start + batchSize));
-    }
+    // v2.8.x: 装箱同时受 maxBatchChars（总长度预算，可选）约束——见 splitSubBatches。
+    const subBatches = splitSubBatches(toEmbed, (i) => texts[i].length, batchSize, maxBatchChars);
     await Promise.all(
       subBatches.map(async (idxs) => {
         const inputs = idxs.map((i) => texts[i]);
