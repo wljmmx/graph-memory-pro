@@ -322,6 +322,49 @@ function extractMessageText(msg: AgentMessageLike): string {
   return "";
 }
 
+/**
+ * v2.8.x: 把整轮 messages[] 中的 user/assistant 消息落库到 Neo4j :GmMessage。
+ *
+ * 背景：saveMessage 此前只有定义、无任何运行时调用点，导致 :GmMessage 自
+ * 引导导入后再无新增，markMessagesByContent 退化为空操作（MATCH 匹配不到）。
+ * 本函数补上写端，由 agent_end 钩子调用，为增量重建 / 内容标记提供原文落地。
+ *
+ * 幂等：id = gm:<sessionKey>:<turnIndex>:<role>:<hash>，MERGE 语义，重跑不膨胀。
+ * 降级：任何异常只 warn，不阻塞会话（与 autoFeedback 风格一致）。
+ */
+async function persistSessionMessages(
+  driver: Driver,
+  sessionKey: string,
+  messages: AgentMessageLike[],
+): Promise<number> {
+  let saved = 0;
+  try {
+    const { saveMessage } = await import("./src/store/messages.ts");
+    let turnIndex = 0;
+    for (const msg of messages) {
+      if (!msg) continue;
+      const role = msg.role ?? msg.type ?? "";
+      const isUser = /user|human/i.test(role);
+      const isAssistant = /assistant/i.test(role);
+      if (!isUser && !isAssistant) continue;
+      const content = extractMessageText(msg);
+      if (!content || !content.trim()) continue;
+      const roleTag: "user" | "assistant" = isAssistant ? "assistant" : "user";
+      const id = "gm:" + sessionKey + ":" + turnIndex + ":" + roleTag + ":" + simpleHash(content.slice(0, 200));
+      try {
+        await saveMessage(driver, { id, sessionKey, turnIndex, role: roleTag, content, createdAt: Date.now() });
+        saved++;
+      } catch (err) {
+        log.warn("saveMessage failed (id=" + id + "): " + ((err as Error)?.message ?? err));
+      }
+      turnIndex++;
+    }
+  } catch (err) {
+    log.warn("persistSessionMessages failed: " + ((err as Error)?.message ?? err));
+  }
+  return saved;
+}
+
 async function getOrCreateDriver(cfg: GmConfig, logger: LoggerLike): Promise<Driver | null> {
   const uri = cfg.neo4j?.uri ?? "(unknown)";
   try {
@@ -2039,6 +2082,18 @@ export default definePluginEntry({
       // 从 messages[] 提取最后一轮 user query + assistant reply
       const messages: AgentMessageLike[] = Array.isArray(event?.messages) ? (event.messages as AgentMessageLike[]) : [];
       const { userQuery, assistantReply } = extractLastTurn(messages);
+
+      // v2.8.x: 补齐写端——把整轮消息落库到 :GmMessage（此前 saveMessage 无调用点）。
+      // 放在召回缓存判断之前：即使用户本轮没触发召回，也要保证原文落库，
+      // 否则 markMessagesByContent / rebuildSessionMessages 会因 MATCH 不到而空转。
+      try {
+        const savedCount = await persistSessionMessages(_driver, sessionKey, messages);
+        if (process.env.GM_DEBUG) {
+          log.info(`persisted messages: session=${sessionKey}, saved=${savedCount}`);
+        }
+      } catch (err) {
+        log.warn(`persist messages failed: ${(err as Error)?.message ?? err}`);
+      }
       if (!assistantReply || !assistantReply.trim()) return;
 
       try {
