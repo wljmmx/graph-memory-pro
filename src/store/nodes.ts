@@ -15,6 +15,7 @@ import {
   recordToEdge,
 } from "./schema.ts";
 import { createLogger } from "../logger.ts";
+import { bumpGraphRevision } from "./graph-revision.ts";
 
 const log = createLogger("store:nodes");
 
@@ -80,8 +81,15 @@ export async function upsertNode(
 
     let newHistoryJson: string | null = null;
     const row = read.records[0];
+    // v2.8.x: 提升到 if 外 —— 供下面的 updatedAt 判定使用
+    const oldHash = row ? row.get("oldHash") : null;
+    /**
+     * v2.8.x: 内容是否**真的**变了。
+     * 重抽一个内容未变的节点不应推进 updatedAt —— 否则每次抽取都把节点"刷新成新的"，
+     * 而 `dedup.ts` 的胜出平局判据、召回时序项都读 updatedAt，等于让重放改写时间语义。
+     */
+    const contentChanged = oldHash == null || oldHash !== newContentHash;
     if (row) {
-      const oldHash = row.get("oldHash");
       const oldEmbedding = row.get("oldEmbedding");
       const oldModel = row.get("oldModel");
       const oldHistory = row.get("oldHistory");
@@ -112,23 +120,45 @@ export async function upsertNode(
 
     const hasNewHistory = newHistoryJson !== null;
 
+    // v2.8.x: 写集合按「权威归属」分层，修复重抽（re-extract）会改写状态与时间语义的问题。
+    //   此前全部字段都是无条件 SET，导致：抽取路径传 `pagerank:0, validatedCount:0` 且不传
+    //   state/validTo，于是每次重抽都会 ——
+    //     ① 把已被 dedup/conflict 标记 superseded 的节点复活成 current（旧事实重新可召回）
+    //     ② 清空反馈累积的 validatedCount、GDS 算出的 pagerank、维护算出的 staleness/importance
+    //     ③ 把 createdAt/validFrom/recordedAt 刷成本次时间，并清掉 validTo/supersededBy
+    //   分层后：
+    //     ① 创建/来源字段  → ON CREATE SET（写一次）
+    //     ② 内容字段        → 抽取方全权更新（content/description/name/type/status/embeddingModel）
+    //     ③ 派生/状态字段  → 归属维护与反馈路径；抽取仅在「属性缺失」时补初值（COALESCE(n.x, $x)）
+    //   communityId 不在本语句的写集合内 —— 归属由 updateCommunities 独占，重抽不会改变社区归属。
     await session.run(
       `MERGE (n:${label}${extraLabelStr} {id: $id})
+       ON CREATE SET n.createdAt = $createdAt,
+                     n.validFrom = COALESCE($validFrom, $createdAt),
+                     n.recordedAt = COALESCE($recordedAt, $createdAt),
+                     n.source = COALESCE($source, 'experience'),
+                     n.state = COALESCE($state, 'current'),
+                     n.pagerank = COALESCE($pagerank, 0),
+                     n.validatedCount = COALESCE($validatedCount, 0),
+                     n.stalenessScore = COALESCE($stalenessScore, 0.0),
+                     n.importanceScore = COALESCE($importanceScore, 0.0),
+                     n.validTo = $validTo,
+                     n.supersededBy = $supersededBy
        SET n.name = $name,
            n.description = $description,
            n.content = $content,
            n.type = $type,
            n.status = $status,
-           n.pagerank = $pagerank,
-           n.validatedCount = $validatedCount,
-           n.createdAt = $createdAt,
-           n.updatedAt = $updatedAt,
-           n.validFrom = COALESCE($validFrom, $createdAt),
-           n.recordedAt = COALESCE($recordedAt, $createdAt),
-           n.source = COALESCE($source, 'experience'),
-           n.state = COALESCE($state, 'current'),
-           n.stalenessScore = COALESCE($stalenessScore, 0.0),
-           n.importanceScore = COALESCE($importanceScore, 0.0),
+           n.updatedAt = CASE WHEN $contentChanged THEN $updatedAt ELSE COALESCE(n.updatedAt, $updatedAt) END,
+           n.embeddingModel = $embeddingModel,
+           n.validFrom = COALESCE(n.validFrom, $validFrom, $createdAt),
+           n.recordedAt = COALESCE(n.recordedAt, $recordedAt, $createdAt),
+           n.source = COALESCE(n.source, $source, 'experience'),
+           n.pagerank = COALESCE(n.pagerank, $pagerank, 0),
+           n.validatedCount = COALESCE(n.validatedCount, $validatedCount, 0),
+           n.stalenessScore = COALESCE(n.stalenessScore, $stalenessScore, 0.0),
+           n.importanceScore = COALESCE(n.importanceScore, $importanceScore, 0.0),
+           n.state = COALESCE(n.state, $state, 'current'),
            n.embeddingHash = CASE
              WHEN $hasNewHistory THEN null
              ELSE COALESCE($newContentHash, n.embeddingHash)
@@ -140,10 +170,7 @@ export async function upsertNode(
            n.embeddingHistory = CASE
              WHEN $hasNewHistory THEN $newHistoryJson
              ELSE COALESCE(n.embeddingHistory, [])
-           END,
-           n.validTo = $validTo,
-           n.supersededBy = $supersededBy,
-           n.embeddingModel = $embeddingModel`,
+           END`,
       {
         id: node.id,
         name: node.name,
@@ -167,8 +194,13 @@ export async function upsertNode(
         newContentHash,
         newHistoryJson,
         hasNewHistory,
+        // v2.8.x: 内容未变则不推进 updatedAt（避免重抽刷新"新鲜度"，干扰 dedup 平局判据与时序项）
+        contentChanged,
       },
     );
+    // v2.8.x: 只有真正改变图内容（新建或内容变化）时才让召回结果缓存失效；
+    // 纯重复抽取不递增，否则每次抽取都会清空缓存、使缓存形同虚设。
+    if (contentChanged) bumpGraphRevision();
   } finally {
     await session.close();
   }
@@ -222,10 +254,18 @@ export async function batchUpsertNodes(
         importanceScore: n.importanceScore ?? 0.0,
         embeddingModel: n.embeddingModel ?? null,
         embeddingHash: computeEmbeddingHash(n.name, n.description, n.content),
+        // v2.8.x: 由下面的旧 hash 对比填充；决定 updatedAt 是否推进、旧向量是否失效
+        contentChanged: false,
       };
     });
 
-    // P0-2: 读取库中这些 id 的旧 embeddingHash，检测 content 变化（仅日志，不阻塞写）
+    // v2.8.x: 读取库中这些 id 的旧 embeddingHash，判定内容是否真的变了。
+    //   判定结果有两个用途（此前只打一条 warn、不做任何事）：
+    //     ① updatedAt 仅在内容变化时推进（重抽未变内容不应刷新"新鲜度"）
+    //     ② 内容变化时**清空 embedding/embeddingHash**，使 embedNodesMissing / reEmbedNodes
+    //        能重算 —— 旧实现只更新 hash 而保留旧向量，导致「内容已是 B、向量还是 A」
+    //        且所有重嵌入路径只查 `embedding IS NULL`，陈旧向量永不重算。
+    let changed = 0;
     try {
       const ids = rows.map((r) => r.id);
       const oldRes = await session.run(
@@ -240,15 +280,24 @@ export async function batchUpsertNodes(
       }
       for (const r of rows) {
         const oldHash = oldByHash.get(r.id);
-        if (oldHash != null && oldHash !== r.embeddingHash) {
-          log.warn(
-            "Batch upsert: content changed (embedding not archived; see reEmbedNodes)",
-            { id: r.id, label: r.label, oldHash, newHash: r.embeddingHash },
-          );
-        }
+        // 新节点（oldHash 缺失）视为"内容变化"：updatedAt 用新值即可，无旧向量可清
+        const isNew = oldHash == null;
+        r.contentChanged = isNew || oldHash !== r.embeddingHash;
+        if (!isNew && r.contentChanged) changed++;
       }
-    } catch {
-      // 对比检测失败不影响主写入流程
+      if (changed > 0) {
+        log.info(
+          "Batch upsert: content changed — invalidating stale embeddings so they get recomputed",
+          { changed, total: rows.length },
+        );
+      }
+    } catch (err) {
+      // 对比检测失败不影响主写入流程；但此时无法判定内容是否变化，
+      // 保守选择「不推进 updatedAt、不失效向量」（保持旧行为），并留痕以便排查。
+      log.warn(
+        "Batch upsert: change detection failed — updatedAt preserved and stale embeddings NOT invalidated",
+        { error: (err as Error)?.message ?? String(err) },
+      );
     }
 
     // 按 label 分组（UNWIND 无法动态切换 label）
@@ -264,29 +313,41 @@ export async function batchUpsertNodes(
       const result = await session.run(
         `UNWIND $rows AS row
          MERGE (n:${label} {id: row.id})
+         ON CREATE SET n.createdAt = row.createdAt,
+                       n.updatedAt = row.updatedAt,
+                       n.validFrom = row.validFrom,
+                       n.recordedAt = row.recordedAt,
+                       n.source = row.source,
+                       n.state = row.state,
+                       n.pagerank = row.pagerank,
+                       n.validatedCount = row.validatedCount,
+                       n.stalenessScore = row.stalenessScore,
+                       n.importanceScore = row.importanceScore
          SET n.name = row.name,
              n.description = row.description,
              n.content = row.content,
              n.type = row.type,
              n.status = row.status,
-             n.pagerank = row.pagerank,
-             n.validatedCount = row.validatedCount,
-             n.createdAt = row.createdAt,
-             n.updatedAt = row.updatedAt,
-             n.recordedAt = COALESCE(row.recordedAt, row.createdAt),
-             n.validFrom = COALESCE(row.validFrom, row.createdAt),
-             n.source = COALESCE(row.source, 'experience'),
-             n.state = COALESCE(row.state, 'current'),
-             n.stalenessScore = COALESCE(row.stalenessScore, 0.0),
-             n.importanceScore = COALESCE(row.importanceScore, 0.0),
              n.embeddingModel = row.embeddingModel,
-             n.embeddingHash = row.embeddingHash
+             n.updatedAt = CASE WHEN row.contentChanged THEN row.updatedAt ELSE COALESCE(n.updatedAt, row.updatedAt) END,
+             n.validFrom = COALESCE(n.validFrom, row.validFrom),
+             n.recordedAt = COALESCE(n.recordedAt, row.recordedAt),
+             n.source = COALESCE(n.source, row.source),
+             n.state = COALESCE(n.state, row.state),
+             n.pagerank = COALESCE(n.pagerank, row.pagerank),
+             n.validatedCount = COALESCE(n.validatedCount, row.validatedCount),
+             n.stalenessScore = COALESCE(n.stalenessScore, row.stalenessScore),
+             n.importanceScore = COALESCE(n.importanceScore, row.importanceScore),
+             n.embeddingHash = CASE WHEN row.contentChanged THEN null ELSE COALESCE(row.embeddingHash, n.embeddingHash) END,
+             n.embedding = CASE WHEN row.contentChanged THEN null ELSE n.embedding END
          RETURN count(n) AS c`,
         { rows: batch },
       );
       const c = result.records[0]?.get("c");
       totalWritten += (typeof c === "number" ? c : c?.toNumber?.() ?? 0);
     }
+    // v2.8.x: 有任意节点是新建或内容变化 → 召回结果缓存失效
+    if (rows.some((r) => r.contentChanged)) bumpGraphRevision();
     return totalWritten;
   } finally {
     await session.close();

@@ -83,7 +83,12 @@ export async function getDirtyNodeIds(driver: Driver): Promise<string[]> {
     const ids = result.records[0]?.get("ids");
     if (!ids) return [];
     return Array.isArray(ids) ? ids.filter((x: unknown) => typeof x === "string") : [];
-  } catch {
+  } catch (err) {
+    // v2.8.x: 此前静默返回 [] —— 「读取失败」与「确实没有脏节点」完全同形，
+    // 增量维护会静默什么都不做，而日志上看不出任何异常。
+    log.warn("getDirtyNodeIds: query failed — returning empty set (incremental maintenance will no-op)", {
+      error: (err as Error)?.message ?? String(err),
+    });
     return [];
   } finally {
     await session.close();
@@ -298,7 +303,16 @@ async function incrementalConflictResolution(
       const newer = t1 >= t2 ? dirtyId : candidateId;
       const older = t1 >= t2 ? candidateId : dirtyId;
       await session.run(
-        `MATCH (old {id: $older}) SET old.state = 'superseded', old.supersededBy = $newer`,
+        // v2.8.x: 补齐 validTo 与 stalenessScore —— 此前只设 state/supersededBy，
+        // 与 conflict.ts（SET validTo + stalenessScore=1.0）和 edges.ts mergeNodes（SET validTo）
+        // 是同一语义的三种不同写法。缺 validTo 会让 rerank.temporalRecency 无法判定其已过期
+        // （它同时读 validTo 与 state，但其他读取方只看 validTo），缺 stalenessScore 会让
+        // 被取代节点仍留在召回前排。
+        `MATCH (old {id: $older})
+         SET old.state = 'superseded',
+             old.validTo = timestamp(),
+             old.supersededBy = $newer,
+             old.stalenessScore = 1.0`,
         { older, newer },
       );
       superseded++;

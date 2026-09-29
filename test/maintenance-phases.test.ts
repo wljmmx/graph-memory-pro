@@ -263,6 +263,13 @@ describe("resolveConflicts (G-2)", () => {
     expect(calls[1].params.totalValidated).toBe(22);
     expect(calls[1].params.mergedContent).toContain("A");
     expect(calls[1].params.mergedContent).toContain("B");
+    // v2.8.x 回归守卫：合并必须是**软替换**，不得物理删除败者。
+    // 旧实现先 SET loser.state='superseded'/validTo/supersededBy，随后紧跟 `DETACH DELETE loser`
+    // —— 等于把刚写的超替标记立刻销毁（数据不可追溯，且与 dedup/mergeNodes 的软替换语义分叉）。
+    expect(calls[1].query).not.toContain("DETACH DELETE");
+    expect(calls[1].query).toContain("loser.state = 'superseded'");
+    expect(calls[1].query).toContain("loser.validTo = timestamp()");
+    expect(calls[1].query).toContain("loser.stalenessScore = 1.0");
   });
 
   it("类型不同不视为冲突", async () => {

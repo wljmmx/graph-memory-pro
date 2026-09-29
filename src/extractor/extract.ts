@@ -8,6 +8,9 @@
 import type { CompleteFn } from "../engine/llm.ts";
 import type { ExtractResult, NodeType, EdgeType } from "../types.ts";
 import type { Driver } from "neo4j-driver";
+import { createLogger } from "../logger.ts";
+
+const log = createLogger("extractor");
 
 const EXTRACT_SYSTEM_PROMPT = `你是知识图谱三元组提取专家。
 从用户提供的对话内容中提取知识节点和关系。
@@ -66,7 +69,12 @@ export async function extractTriplets(
   try {
     const raw = await llm(EXTRACT_SYSTEM_PROMPT, userPrompt, undefined, "extract");
     return parseExtractResult(raw);
-  } catch {
+  } catch (err) {
+    // v2.8.x: 此前静默返回空结果 —— 调用方无法区分「LLM 不可用/超时」与「本轮确实没有
+    // 可提取内容」，失败被当成 0 节点成功，知识静默丢失（且日志上完全不可见）。
+    log.warn("extractTriplets: LLM call failed — returning empty result (nothing extracted this round)", {
+      error: (err as Error)?.message ?? String(err),
+    });
     return FALLBACK;
   }
 }

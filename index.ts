@@ -1,7 +1,7 @@
 /**
  * graph-memory-pro — Neo4j Knowledge Graph Memory Plugin
  *
- * Version: 2.4.6
+ * Version: 2.4.7
  *
  * 架构定位（A 方案）:
  *   - 不占用 slots（memory/contextEngine）
@@ -264,6 +264,19 @@ function resolveEmbedDimension(cfg: GmConfig): number {
   }
   // 3. 回退 1024
   return 1024;
+}
+
+/**
+ * v2.8.x: 「每条件只告警一次」。
+ *
+ * 用于可能被高频调用的钩子（after_tool_call / llm_output）的**配置态**早退分支：
+ * 既让「某条链路从未生效」在日志上可见，又不至于逐次调用刷屏。
+ */
+const _warnedOnce = new Set<string>();
+function warnOnce(key: string, message: string): void {
+  if (_warnedOnce.has(key)) return;
+  _warnedOnce.add(key);
+  log.warn(message);
 }
 
 /**
@@ -1603,8 +1616,33 @@ autoStartApiServer();
  * SDK 可能不触发 gateway_start 事件，导致 Neo4j driver 永远不初始化。
  * 此函数封装了完整的初始化逻辑，可从 register() 或 gateway_start hook 调用。
  */
+/**
+ * v2.8.x: 核心初始化的「单向门」保护。
+ *
+ * 缺陷背景：`doGatewayInitInner` 体内（`beginCoreInit()` 之后）任一处 throw 都不会调用
+ * `settleCoreInit(false)`；异常被调用方的 `.catch(err => log.error)` 吞掉后：
+ *   - `process-state` 里 `coreOwnerId` 已置为本实例、`coreInitFailed` 仍为 false；
+ *   - 于是 `claimCoreInit()` 对**所有**后续实例永久返回 "reuse"，
+ *   - 其他实例只能 `waitForCoreInit()` 白等到超时，且谁都不会启动 API/MCP。
+ * 一次异常即可让全进程再也起不来，且日志上只看到一条 "direct init ... failed"。
+ *
+ * 修复：包一层 try/catch，失败时务必兑现 `settleCoreInit(false)`，把认领权交还出去
+ * （错误仍向上抛，不改变调用方的失败处理）。
+ */
+async function doGatewayInit(api: unknown, logger: LoggerLike): Promise<void> {
+  try {
+    await doGatewayInitInner(api, logger);
+  } catch (err) {
+    try {
+      settleCoreInit(false); // 交还认领权，允许其他实例/后续重试重新认领
+      log.warn(`core init aborted — released core-init claim so it can be retried: ${(err as Error)?.message ?? err}`);
+    } catch { /* settle 失败不应掩盖原始错误 */ }
+    throw err;
+  }
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function doGatewayInit(api: any, logger: LoggerLike): Promise<void> {
+async function doGatewayInitInner(api: any, logger: LoggerLike): Promise<void> {
   const eventCfg = api.pluginConfig ?? api.config;
   log.info(`config check: neo4j.uri=${eventCfg?.neo4j?.uri ? "present" : "missing"}`);
   if (!eventCfg?.neo4j?.uri) {
@@ -2221,7 +2259,15 @@ export default definePluginEntry({
     // v2.8.x: 改用 api.on（api.registerHook 对 PluginHookName 不会被调用）。
     api.on("after_tool_call", async (event, ctx) => {
       if (_cfg?.autoFeedback?.enabled === false) return;
-      if (!_recaller || _cfg?.associationMatrix?.enabled !== true) return;
+      // v2.8.x: 「M 未启用 / 组件未注入」是配置态而非故障，但静默 return 会让
+      // 「关联矩阵学习长期不生效」在日志上不可见。用 warnOnce 避免逐次工具调用刷屏。
+      if (!_recaller || _cfg?.associationMatrix?.enabled !== true) {
+        warnOnce(
+          "after_tool_call:am-disabled",
+          "after_tool_call 跳过：associationMatrix 未启用或 Recaller 未注入 —— get 展开信号不会被学习（如需启用请设 associationMatrix.enabled=true）",
+        );
+        return;
+      }
       const toolName = event?.toolName ?? "";
       if (!MEMORY_TOOL_NAMES.has(toolName)) return;
 
@@ -2248,7 +2294,15 @@ export default definePluginEntry({
     // ─────────────────────────────────────────────────────────────────
     // v2.8.x: 改用 api.on（api.registerHook 对 PluginHookName 不会被调用）。
     api.on("llm_output", async (event, ctx) => {
-      if (!_driver || !_extractor || !_llm) return;
+      // v2.8.x: 依赖缺失时留痕（warnOnce 防止逐次 LLM 输出刷屏）。
+      // 静默 return 会让「中间轮文本提取从未生效」与「本轮确实没有可提取文本」无法区分。
+      if (!_driver || !_extractor || !_llm) {
+        warnOnce(
+          "llm_output:deps-missing",
+          `llm_output 跳过：组件未就绪（driver=${_driver ? "ok" : "null"}, extractor=${_extractor ? "ok" : "null"}, llm=${_llm ? "ok" : "null"}）—— 中间轮 assistant 文本不会入提取队列`,
+        );
+        return;
+      }
       const texts = Array.isArray(event?.assistantTexts) ? event.assistantTexts : [];
       if (texts.length === 0) return;
 

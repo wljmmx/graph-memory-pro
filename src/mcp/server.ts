@@ -742,6 +742,12 @@ export async function startMcpServer(
     try {
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       await mcpServer.connect(transport);
+      // v2.8.x: 请求结束后关闭 transport。无状态模式下每个请求各建一个 transport，
+      // 且都会 connect 到**同一个单例 mcpServer**；不关闭会在长跑进程里持续累积
+      // （transport/监听器泄漏），与心跳自愈的句柄重建叠加后更明显。
+      res.on("close", () => {
+        void transport.close().catch(() => { /* 连接已结束，关闭失败无需处理 */ });
+      });
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await transport.handleRequest(req as any, res, parsedBody);
     } catch (err: unknown) {

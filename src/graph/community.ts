@@ -89,8 +89,32 @@ export async function detectCommunities(driver: Driver, maxIter = 50): Promise<C
     const sorted = Array.from(rawCommunities.entries())
       .sort((a, b) => b[1].length - a[1].length);
 
-    const renameMap = new Map<string, string>();
-    sorted.forEach(([oldId], i) => renameMap.set(oldId, `c-${i + 1}`));
+    /**
+     * v2.8.x: 社区 id 改为**成员指纹**，不再用排序下标。
+     *
+     * 旧实现 `c-${i+1}` 把「按成员数排序后的下标」当作社区身份 —— 而 GDS labelPropagation
+     * 的原始 id 是运行相关的，且等规模社区之间没有稳定 tiebreaker。图一变动（增删节点、
+     * 算法抖动）同一逻辑社区就会换号，后果有两个：
+     *   ① 旧摘要成孤儿：`getSummarizedCommunityIds` 按 id 判「已有摘要」，换号后同号社区
+     *      可能是另一个社区 → 摘要错配；真社区则被重复调一次 LLM。
+     *   ② 序号复用：`c-3` 从社区甲变成社区乙，摘要却还是甲的 → 召回读到错误摘要。
+     *
+     * 改用「排序后的成员 id 列表」的指纹：成员集合不变 → id 不变（摘要可复用）；
+     * 成员变化 → id 变化（摘要自然失效，需重算）。代价是成员一有增删就重新摘要，
+     * 这是正确性换 LLM 成本的取舍（旧的稳定性本身是错的）。
+     */
+    const cdRenameMap = new Map<string, string>();
+    for (const [oldId, members] of sorted) {
+      const memberKey = [...members].sort().join("\u0000");
+      let h = 0xcbf29ce484222325n;
+      const prime = 0x100000001b3n;
+      for (let i = 0; i < memberKey.length; i++) {
+        h ^= BigInt(memberKey.charCodeAt(i));
+        h = (h * prime) & 0xffffffffffffffffn;
+      }
+      cdRenameMap.set(oldId, `c-${h.toString(16).slice(0, 12)}`);
+    }
+    const renameMap = cdRenameMap;
 
     const finalLabels = new Map<string, string>();
     for (const [nodeId, oldLabel] of rawLabels) {
@@ -109,8 +133,13 @@ export async function detectCommunities(driver: Driver, maxIter = 50): Promise<C
       communities: finalCommunities,
       count: finalCommunities.size,
     };
-  } catch {
-    try { await session.run("CALL gds.graph.drop($graphName)", { graphName }); } catch {}
+  } catch (err) {
+    // v2.8.x: 此前静默返回空结果 —— 维护日志随后会打印 `community: 0`，
+    // 与「图中确实没有社区」完全同形，社区检测长期失效不可观测。
+    log.warn("detectCommunities failed — returning empty result (communities will not be updated)", {
+      error: (err as Error)?.message ?? String(err),
+    });
+    try { await session.run("CALL gds.graph.drop($graphName)", { graphName }); } catch { /* drop 失败无需额外处理 */ }
     return { labels: new Map(), communities: new Map(), count: 0 };
   } finally {
     await session.close();

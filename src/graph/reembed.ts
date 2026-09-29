@@ -149,6 +149,10 @@ export async function reEmbedNodes(
           const embedded = await embedNodeBatch(
             driver, batchEmbedFn, items, cfg,
             (failures) => {
+              // v2.8.x: 失败必须计入 failed —— 此前只 log.warn，未写向量的节点被算进 skipped，
+              // 用户看到 `failed: 0` 而节点其实静默丢失；reembed-task 的"连续 0 成功"止损
+              // 也依赖 failed 才成立。
+              failed += failures.filter((f) => f.failedChunks === f.totalChunks).length;
               const sample = failures.slice(0, 5).map((f) => `id=${f.nodeId} chunks=${f.failedChunks}/${f.totalChunks} reason=${f.reason}`).join("; ");
               log.warn(
                 `reEmbed: ${failures.length}/${items.length} nodes failed batch embed` +

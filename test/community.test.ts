@@ -67,15 +67,34 @@ describe("detectCommunities", () => {
 
     const result = await detectCommunities(driver as any);
 
-    // 按社区规模降序重命名：10(size2)→c-1, 20(size1)→c-2
+    // v2.8.x: 社区 id 不再是「按规模排序的下标」（c-1/c-2），而是**成员集合指纹** ——
+    // 下标身份会在图变动时换号，导致摘要错配（同一 id 落到不同社区）或成孤儿。
+    // 因此这里断言「形状 + 成员归属 + 跨运行稳定」，不再断言字面序号。
     expect(result.count).toBe(2);
     expect(result.labels.size).toBe(3);
-    expect(result.labels.get("n1")).toBe("c-1");
-    expect(result.labels.get("n2")).toBe("c-1");
-    expect(result.labels.get("n3")).toBe("c-2");
+    const cid12 = result.labels.get("n1")!;
+    const cid3 = result.labels.get("n3")!;
+    expect(cid12).toMatch(/^c-[0-9a-f]{12}$/);
+    expect(cid3).toMatch(/^c-[0-9a-f]{12}$/);
+    // n1/n2 同社区；n3 不同社区
+    expect(result.labels.get("n2")).toBe(cid12);
+    expect(cid12).not.toBe(cid3);
     expect(result.communities.size).toBe(2);
-    expect(result.communities.get("c-1")).toEqual(["n1", "n2"]);
-    expect(result.communities.get("c-2")).toEqual(["n3"]);
+    expect([...(result.communities.get(cid12) ?? [])].sort()).toEqual(["n1", "n2"]);
+    expect(result.communities.get(cid3)).toEqual(["n3"]);
+
+    // 稳定性：同样的成员集合 → 同样的 id（摘要可复用）
+    const driver2 = mockDriver();
+    augmentTx(driver2);
+    driver2.queueResults([
+      [{ c: 1 }],
+      [{ t: "MENTIONS" }],
+      [],
+      [{ id: "n1", rawCommunityId: "10" }, { id: "n2", rawCommunityId: "10" }, { id: "n3", rawCommunityId: "20" }],
+    ]);
+    const again = await detectCommunities(driver2 as any);
+    expect(again.labels.get("n1")).toBe(cid12);
+    expect(again.labels.get("n3")).toBe(cid3);
   });
 
   it("Cypher 含 CALL gds.labelPropagation", async () => {
@@ -214,9 +233,12 @@ describe("detectHierarchicalCommunities", () => {
       expect.arrayContaining(["n1", "n2", "n3", "n4"]),
     );
     // Level 3 查询参数 members = 下层社区 id
-    expect(edgeCalls[1].params.members).toEqual(
-      expect.arrayContaining(["c-1", "c-2", "c-3", "c-4"]),
-    );
+    // v2.8.x: 社区 id 已是成员指纹（c-<12位hex>），不再是按规模排序的下标 c-1/c-2/…
+    // 这里断言「数量 + 形状 + 与 Level 1 标签一致」，而不是字面序号。
+    const members = edgeCalls[1].params.members as string[];
+    expect(members).toHaveLength(4);
+    for (const id of members) expect(String(id)).toMatch(/^c-[0-9a-f]{12}$/);
+    expect(new Set(members.map(String)).size).toBe(4);
   });
 
   it("hierarchy map 中每个节点有 level1/level2/level3 字段", async () => {

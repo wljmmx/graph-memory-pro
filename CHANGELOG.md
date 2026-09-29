@@ -4,6 +4,103 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.4.7] - 2026-09-29
+
+**多模块缺陷审计后的整改批次。头条修复：重抽（re-extract）会改写节点状态与时间语义 —— 这是「问修改后的结果却答出旧事实」的直接机制。**
+
+### Fixed — 写入路径按「权威归属」分层（重抽不再复活 superseded 节点）
+
+`upsertNode` / `batchUpsertNodes` 此前对**全部**字段无条件 `SET`，而抽取路径恒定传
+`pagerank: 0, validatedCount: 0` 且不传 `state/validTo`。于是每次重抽都会：
+
+- 把已被 dedup / conflict 正确标记 `superseded` 的节点**复活**成 `current`（`validTo` 被清空）
+  → 旧事实重新可召回。**支撑「超替关系」的前提本身会被下一次抽取抹掉**，所以只修召回过滤是不够的；
+- 清空反馈累积的 `validatedCount`（而 dedup 的胜出判据正是它）、GDS 算出的 `pagerank`、
+  维护算出的 `stalenessScore/importanceScore`；
+- 把 `createdAt/validFrom/recordedAt` 刷成本次时间，销毁真实创建时间。
+
+现按权威归属分层（[src/store/nodes.ts](src/store/nodes.ts)）：
+
+| 层 | 字段 | 规则 |
+|---|---|---|
+| 创建/来源 | `createdAt` `validFrom` `recordedAt` `source` | `ON CREATE SET`，**写一次** |
+| 内容 | `name` `description` `content` `type` `status` `embeddingModel` | 抽取方全权更新 |
+| 派生/状态 | `pagerank` `validatedCount` `stalenessScore` `importanceScore` `state` | `COALESCE(n.x, $x)`，**只在缺失时补初值** |
+| 超替 | `validTo` `supersededBy` | 移出更新 SET，抽取**不得**触碰 |
+| 社区 | `communityId` | 本就只由 `updateCommunities` 写 —— 重抽保留既有社区归属（新增回归守卫） |
+
+`updatedAt` 改为**内容真变化时才推进**（避免重抽刷新"新鲜度"，干扰 dedup 平局判据与时序项）。
+
+### Fixed — 内容变化时失效旧向量
+
+`batchUpsertNodes` 原来只更新 `embeddingHash` 而保留旧 `embedding`，而所有重嵌入路径都只查
+`embedding IS NULL` → 「内容已是 B、向量还是 A」且**永不重算**，向量检索按旧语义命中。
+现在内容变化（或新节点）时清空 `embedding`/`embeddingHash`，交给 `embedNodesMissing` /
+`reEmbedNodes` 重算。检测查询失败时保守不清（并 warn 留痕）。
+
+### Fixed — 核心初始化的「单向门」
+
+`doGatewayInit` 体内任一处抛错都不会调用 `settleCoreInit(false)`，异常被调用方 `.catch` 吞掉后
+`coreInitFailed` 永远为 false → `claimCoreInit()` 对所有后续实例永久返回 `"reuse"`
+→ **全进程再也起不了 API/MCP**。现包一层包装器，失败时务必交还认领权（错误仍向上抛）。
+
+### Fixed — 超替状态收敛为一致写法
+
+同一「节点被取代」语义此前有**三套**实现：
+
+- `conflict.ts` 合并策略：先 `SET loser.state='superseded', validTo, supersededBy`，
+  紧接着 `DETACH DELETE loser` —— **等于把刚写的超替标记立刻物理销毁**（且与 dedup 的软替换语义分叉）。
+  现移除物理删除并补 `stalenessScore = 1.0`，与另一条超替路径对齐。
+- `incremental-maintenance.ts`：只设 `state`/`supersededBy`，**缺 `validTo`**（`temporalRecency`
+  的过期判定与 `filterSupersededInRecall` 都依赖它）。现补齐 `validTo` + `stalenessScore`。
+
+### Fixed — 社区 id 由排序下标改为成员指纹
+
+`c-${i+1}` 把「按成员数排序后的下标」当作社区身份，而 GDS 原始 id 是运行相关的、等规模社区
+没有稳定 tiebreaker。图一变动同一逻辑社区就换号 → 摘要成孤儿、或**同号落到另一社区被
+「已有摘要→跳过」误判**，召回读到错误摘要。现改为「排序后成员 id 列表」的 64-bit 指纹：
+成员集合不变 → id 不变（摘要可复用）；成员变化 → id 变化（摘要自然失效）。
+代价是成员增删会重新摘要，这是正确性换 LLM 成本的取舍。
+
+### Fixed — 召回结果缓存从不失效
+
+`QueryCache` 只在手动 `/api/ops/cache` 时清空（对照：pagerank 投影缓存**有**在边写入后失效），
+导致用户写入/更新记忆后同一 query 最长 30 分钟仍返回旧召回。现引入进程级「图修订号」
+（[src/store/graph-revision.ts](src/store/graph-revision.ts)）：节点/边写入在**真正改变图内容**时递增，
+缓存条目记录写入时的修订号、读取时比对。纯重复抽取不递增（否则缓存形同虚设）。
+同时把缓存键由 32-bit djb2 换为 64-bit FNV-1a —— 旧键会碰撞并返回**另一条 query** 的结果。
+
+### Changed — 可观测性
+
+- `extractor/extract.ts`：LLM 异常不再静默返回空结果（此前无法区分「LLM 不可用」与「确实无可提取内容」）
+- `incremental-maintenance.ts`：脏节点读取失败不再静默返回空集（「读取失败」与「无脏节点」同形）
+- `graph/community.ts`：社区检测顶层吞错不再静默返回空（维护日志的 `community: 0` 与「确无社区」同形）
+- `graph/reembed.ts`：批量嵌入失败计入 `failed`（此前恒为 0，未写向量的节点被算进 `skipped`）
+- `index.ts`：`after_tool_call` / `llm_output` 两处早退补日志（`warnOnce` 防高频刷屏）
+- `mcp/server.ts`：每请求新建的 transport 在响应结束后关闭（长跑进程的累积泄漏）
+
+### 测试
+
+新增 [test/node-write-invariants.test.ts](test/node-write-invariants.test.ts) 12 个不变式用例
+（创建字段写一次、派生字段不可清空、超替字段不可复活、`communityId` 归属保留、向量失效、`contentChanged` 判定）。
+[test/community.test.ts](test/community.test.ts) 由断言字面序号 `c-1` 改为断言「形状 + 成员归属 + 跨运行稳定」。
+[test/maintenance-phases.test.ts](test/maintenance-phases.test.ts) 新增「禁止物理删除」回归守卫。
+
+### Changed — 版本对齐
+
+`src/version.ts`、`package.json`、`openclaw.plugin.json`、`package-lock.json`、
+[index.ts](index.ts) 头部版本注释、[README.md](README.md) 示例、
+[test/version.test.ts](test/version.test.ts) 由 **2.4.6** 对齐至 **2.4.7**。
+
+### 未纳入本批次（需先决策，见审计清单）
+
+以下项已定位但**未改**，因为都涉及行为契约变更，需要先确定阈值/保留策略：
+
+- 无界 handler 加 limit/预算（`/api/nodes-by-type` 无 limit 全表返回、`/api/feedback` 对
+  `recalledNodeIds` 无上限并发查库、`requestTimeout: 0`）
+- 维护类阶段的全量逐条往返（`staleness`/`importance`/`self-heal`）与后台工作预算
+- `crud.ts` 的 `rebuildJobs` Map 永不淘汰
+
 ## [2.4.6] - 2026-09-29
 
 **修复 `agent_end` 写端的三类缺陷：全量重放导致 O(n²) 写入、`createdAt` 被每轮覆盖、位置键在宿主 compaction 后产生重复行；并补齐排查所需的可观测性。**

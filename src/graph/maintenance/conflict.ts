@@ -127,7 +127,8 @@ export async function resolveConflicts(
                      winner.stalenessScore = 0.0,
                      loser.state = 'superseded',
                      loser.validTo = timestamp(),
-                     loser.supersededBy = $winnerId
+                     loser.supersededBy = $winnerId,
+                     loser.stalenessScore = 1.0
                  WITH winner, loser
                  MATCH (loser)-[r]->(related)
                  WHERE NOT type(r) IN ['NEXT_SESSION', 'CONTAINS']
@@ -136,7 +137,7 @@ export async function resolveConflicts(
                        r2.weight = coalesce(r2.weight, 1.0) * 0.5,
                        r2.createdAt = coalesce(r2.createdAt, timestamp()),
                        r2.updatedAt = timestamp()
-                 DETACH DELETE loser`,
+                 RETURN winner.id AS keepId`,
                 {
                   winnerId: mergeWinnerId,
                   loserId: mergeLoserId,

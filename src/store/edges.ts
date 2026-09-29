@@ -10,6 +10,7 @@ import type { GmEdge } from "../types.ts";
 import { getSession } from "./db.ts";
 import { recordToEdge } from "./schema.ts";
 import { invalidateProjectionCache } from "../graph/pagerank.ts";
+import { bumpGraphRevision } from "./graph-revision.ts";
 
 // ─── 边 CRUD ────────────────────────────────────────────────
 
@@ -45,6 +46,8 @@ export async function upsertEdge(
     );
     // v2.3.2 阶段二: 边写入后失效投影缓存，让下次 PPR 重建投影反映新拓扑
     invalidateProjectionCache();
+    // v2.8.x: 边变化会改变 graphWalk 邻域 → 召回结果缓存必须失效
+    bumpGraphRevision();
   } finally {
     await session.close();
   }
@@ -107,7 +110,10 @@ export async function batchUpsertEdges(
       totalWritten += (typeof c === "number" ? c : c?.toNumber?.() ?? 0);
     }
     // v2.3.2 阶段二: 批量边写入后失效投影缓存
-    if (totalWritten > 0) invalidateProjectionCache();
+    if (totalWritten > 0) {
+      invalidateProjectionCache();
+      bumpGraphRevision(); // v2.8.x: 同上，边变化使召回缓存失效
+    }
     return totalWritten;
   } finally {
     await session.close();

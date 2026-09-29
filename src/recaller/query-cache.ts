@@ -9,6 +9,7 @@
  */
 
 import type { RecallResult } from "../types.ts";
+import { getGraphRevision } from "../store/graph-revision.ts";
 
 interface CacheEntry {
   queryHash: string;
@@ -16,6 +17,8 @@ interface CacheEntry {
   result: RecallResult;
   timestamp: number;
   hitCount: number;
+  /** 条目写入时的图修订号；读取时与当前值比对，不一致即视为失效 */
+  graphRevision: number;
 }
 
 export interface QueryCacheConfig {
@@ -56,15 +59,21 @@ export class QueryCache {
     this.cfg = { ...DEFAULT_QUERY_CACHE_CONFIG, ...cfg };
   }
 
-  /** 计算查询的哈希键 */
+  /**
+   * 计算查询的哈希键。
+   *
+   * v2.8.x: 由 32-bit djb2 换为 64-bit FNV-1a。旧实现只有 32 位，且把长度拼进键里
+   * 作为"防碰撞"补偿；两条不同 query 只要 32 位哈希与长度同时相同就会碰撞，
+   * 命中后直接返回**另一条 query** 的召回结果。
+   */
   private hashQuery(query: string): string {
-    // 简单 hash，避免每次都跑 crypto
-    let h = 0;
+    let h = 0xcbf29ce484222325n;
+    const prime = 0x100000001b3n;
     for (let i = 0; i < query.length; i++) {
-      h = ((h << 5) - h) + query.charCodeAt(i);
-      h |= 0;
+      h ^= BigInt(query.charCodeAt(i));
+      h = (h * prime) & 0xffffffffffffffffn;
     }
-    return `q_${h.toString(36)}_${query.length}`;
+    return `q_${h.toString(16)}_${query.length}`;
   }
 
   /** 精确匹配查询 */
@@ -78,6 +87,13 @@ export class QueryCache {
     }
     // TTL 检查
     if (Date.now() - entry.timestamp > this.cfg.ttlMs) {
+      this.cache.delete(key);
+      this.misses++;
+      return null;
+    }
+    // v2.8.x: 图内容在条目写入后发生了变化 → 该结果不再可信，视为 miss 并清除。
+    // 此前只有手动 /api/ops/cache 才能清空，导致写入后同 query 最长 30min 返回旧召回。
+    if (entry.graphRevision !== getGraphRevision()) {
       this.cache.delete(key);
       this.misses++;
       return null;
@@ -99,6 +115,7 @@ export class QueryCache {
   getSimilar(queryEmbedding: number[]): { result: RecallResult; similarity: number } | null {
     if (!this.cfg.enabled || queryEmbedding.length === 0) return null;
     const threshold = this.cfg.similarityThreshold;
+    const currentRevision = getGraphRevision();
     let bestMatch: { result: RecallResult; similarity: number } | null = null;
 
     // v2.3.1: 倒序扫描最近 N 条（Map 末尾为 LRU 最新）
@@ -108,6 +125,8 @@ export class QueryCache {
       const entry = entries[i];
       if (!entry.queryEmbedding) continue;
       if (Date.now() - entry.timestamp > this.cfg.ttlMs) continue;
+      // v2.8.x: 图已变化 → 相似复用同样不可信
+      if (entry.graphRevision !== currentRevision) continue;
 
       const sim = cosineSimilarity(queryEmbedding, entry.queryEmbedding);
       if (sim >= threshold && (!bestMatch || sim > bestMatch.similarity)) {
@@ -145,6 +164,7 @@ export class QueryCache {
       result,
       timestamp: Date.now(),
       hitCount: 0,
+      graphRevision: getGraphRevision(),
     });
   }
 
