@@ -273,7 +273,7 @@ const { result } = await res.json();
 
 ```json
 {
-  "version": "2.4.5",
+  "version": "2.4.6",
   "timestamp": "2026-08-07T10:00:00.000Z",
   "total": { "calls": 12, "promptTokens": 1234, "completionTokens": 567, "totalTokens": 1801 },
   "byProvider": { "config-llm": { "calls": 8, "totalTokens": 1200 }, "runtime-ollama": { "calls": 4, "totalTokens": 601 } },

@@ -4,6 +4,81 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.4.6] - 2026-09-29
+
+**修复 `agent_end` 写端的三类缺陷：全量重放导致 O(n²) 写入、`createdAt` 被每轮覆盖、位置键在宿主 compaction 后产生重复行；并补齐排查所需的可观测性。**
+
+### Fixed — 稳定消息键（不再把「数组下标」写进身份）
+
+旧 id = `gm:<sessionKey>:<turnIndex>:<role>:<hash(content 前 200 字)>`，把位置分量当作消息身份。
+宿主存在 compaction（`before_compaction` / `after_compaction` 钩子可观测且不可 veto），会改写历史数组；
+数组位移后同一逻辑消息算出新 id → 插入重复行。
+
+- 新 id = `gm:<sessionKey>:<role>:<全文 64-bit 指纹>:<同内容出现序号>`（[src/store/messages.ts](src/store/messages.ts) `buildMessageId`）
+- 内容指纹由 32-bit djb2 + **仅前 200 字** 改为 **64-bit FNV-1a 全文**（`messageContentHash`）——
+  旧实现对「前 200 字相同的不同消息」会算出同一 id，MERGE 直接相互覆盖（真丢数据）
+- 同内容重复消息（如连发两次「继续」）用 `seq` 区分，不再互相覆盖
+
+### Fixed — `createdAt` 只在新建时写
+
+`saveMessage` 原为 `MERGE {id} SET … m.createdAt = $createdAt`（无条件覆盖）。每轮 `agent_end`
+全量重放会把整段历史的时间戳刷成本轮时间：
+
+- 真实时间戳被摧毁（不可恢复）
+- `markMessagesByContent` 依赖 `u.createdAt < a.createdAt` **严格小于**配对；重放时同一毫秒内的
+  user/assistant 会静默失配 → 该对话对永远标不上 `rebuildProcessedAt` → 每轮重复提取
+
+改为 `MERGE … ON CREATE SET m.createdAt = $createdAt`，其余字段仍幂等 `SET`。
+
+### Changed — 增量写入替代全量重放
+
+原先每轮遍历**整个** `messages` 数组并逐条 `saveMessage`（每条各开/关一个 session），
+会话生命周期内写入量 ≈ N²/2。现按 `(role, 内容指纹)` 与库中已有份数对账，只写「库里还没有的第 N 份」：
+
+- 每轮写入量从 O(历史长度) 降到 O(本轮新增)
+- 键方案切换时**不会把历史重插一遍**（台账与 id 方案无关，旧位置键写入的行同样被识别为已在库）
+- 纯逻辑抽为 `planMessagePersist`（[src/store/messages.ts](src/store/messages.ts)），
+  index 与单测共用同一实现
+
+### Fixed — 单次钩子的工作预算
+
+宿主对 `agent_end` 有 **30s per-handler 硬超时**，且超时**不取消**插件自有的网络 I/O
+（openclaw 2026.9.6：`docs/plugins/hooks/reference.md`、`docs/plugins/hooks/prompt-and-session.md`）。
+新增长会话下写不完会被截断，且可能与下一轮重叠。现设 20s 软预算主动收尾，未写完的条目由下一轮
+重放补齐（稳定键保证重放安全）。
+
+### Changed — 可观测性（排查「写入中断」不再是黑盒）
+
+- `agent_end` 的两处静默 `return`（`driver`/`recaller` 未就绪、`sessionKey` 取不到）改为显式 warn，
+  并区分「组件未就绪」与「写入逻辑失败」
+- `persisted messages:` 日志去掉 `GM_DEBUG` 门控，并同时输出 `total` 与 `saved` ——
+  `saved` 长期 ≪ `total` 之外仍持平即为「全量重放回归」的信号
+- 收到空 `messages` 时提示核验宿主授权：非捆绑插件读会话内容需要
+  `plugins.entries["graph-memory-pro"].hooks.allowConversationAccess: true`
+
+### Added — 审计与去重工具
+
+[scripts/gm-message-audit.ts](scripts/gm-message-audit.ts)（`npm run audit:messages`）：
+只读量化重复行、`createdAt` 塌缩程度、id 方案分布；`--dedup --apply` 可清理完全重复行。
+**刻意不做 id 迁移** —— `:GmMessage.id` 被持久化引用在磁盘队列（`{user, assistant, sessionKey?, id?|msgIds?}`，
+由外部插件写入，本插件读 `msgIds` 回传 `markMessagesProcessed`），就地改写 id 会留下孤儿引用。
+
+### Fixed — 清单 `contracts.tools` 同步
+
+`contracts` 是工具归属（ownership）快照，2.4.5 新增的 `gm_embed_bench` 漏登记，现补齐。
+
+### Changed — 版本对齐
+
+`src/version.ts`、`package.json`、`openclaw.plugin.json`、`package-lock.json`、
+[index.ts](index.ts) 头部版本注释、[README.md](README.md) 示例、
+[test/version.test.ts](test/version.test.ts) 由 **2.4.5** 对齐至 **2.4.6**。
+
+### 测试
+
+[test/session-message-persist.test.ts](test/session-message-persist.test.ts) 由「镜像副本」改为
+直接覆盖真实纯函数（原先把实现复制一份在测试里断言，真实实现改了也照样通过），
+新增 compaction 位移、同内容重复、旧键台账对账、指纹碰撞等 13 个用例。
+
 ## [2.4.5] - 2026-09-29
 
 **修复「:GmMessage 原文写端长期零新增」——插件在真实宿主中加载正常、召回与提取链路均可跑通，唯独消息原文从不落库。**

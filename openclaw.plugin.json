@@ -1,7 +1,7 @@
 {
   "id": "graph-memory-pro",
   "name": "Graph Memory Pro",
-  "version": "2.4.5",
+  "version": "2.4.6",
   "description": "Neo4j 知识图谱记忆引擎：三元组提取 + GDS 图算法 + 向量索引 + 双路径召回。无槽位插件，通过 registerMemoryCorpusSupplement 暴露给 memory-core，工具 + 后台服务模式运行。",
   "author": "Ananas <Wywelljob@gmail.com>",
   "license": "MIT",
@@ -13,7 +13,8 @@
       "gm_feedback",
       "gm_bootstrap",
       "gm_benchmark",
-      "gm_tune"
+      "gm_tune",
+      "gm_embed_bench"
     ]
   },
   "doctorContract": {
@@ -160,8 +161,14 @@
           },
           "keepAlive": {
             "oneOf": [
-              { "type": "string", "default": "" },
-              { "type": "number", "default": -1 }
+              {
+                "type": "string",
+                "default": ""
+              },
+              {
+                "type": "number",
+                "default": -1
+              }
             ],
             "default": "",
             "description": "Ollama keep_alive 参数（仅 Ollama 识别，OpenAI 会忽略）。-1 永久驻留，5m/1h 等字符串表示 ttl"
@@ -199,8 +206,14 @@
           },
           "keepAlive": {
             "oneOf": [
-              { "type": "string", "default": "" },
-              { "type": "number", "default": -1 }
+              {
+                "type": "string",
+                "default": ""
+              },
+              {
+                "type": "number",
+                "default": -1
+              }
             ],
             "default": ""
           },
@@ -244,7 +257,10 @@
           },
           "apiFormat": {
             "type": "string",
-            "enum": ["ollama", "openai"],
+            "enum": [
+              "ollama",
+              "openai"
+            ],
             "description": "v2.8.x: 嵌入接口格式。ollama=POST {baseURL}/api/embed；openai=POST {baseURL}/embeddings（OVMS 内网服务 /v3/embeddings、OpenAI /v1/embeddings 等）。留空自动判定：命中 11434 端口→ollama；含 /v1、/v3 等版本路径→openai；否则 ollama"
           },
           "options": {
@@ -370,7 +386,11 @@
           },
           "defaultSource": {
             "type": "string",
-            "enum": ["experience", "knowledge", "imported"],
+            "enum": [
+              "experience",
+              "knowledge",
+              "imported"
+            ],
             "default": "experience"
           }
         }
@@ -405,7 +425,10 @@
           },
           "mode": {
             "type": "string",
-            "enum": ["heuristic", "llm"],
+            "enum": [
+              "heuristic",
+              "llm"
+            ],
             "default": "heuristic"
           }
         }
@@ -512,12 +535,20 @@
           },
           "heuristicMatch": {
             "type": "string",
-            "enum": ["id", "name", "both"],
+            "enum": [
+              "id",
+              "name",
+              "both"
+            ],
             "default": "both"
           },
           "tier": {
             "type": "integer",
-            "enum": [1, 2, 3],
+            "enum": [
+              1,
+              2,
+              3
+            ],
             "default": 1,
             "description": "v2.2.1：1=启发式 / 2=LLM 裁判 / 3=自定义策略"
           },
@@ -645,7 +676,7 @@
           },
           "minImprovement": {
             "type": "number",
-            "default": 0.0
+            "default": 0
           }
         }
       },
@@ -724,7 +755,11 @@
           },
           "depth": {
             "type": "integer",
-            "enum": [1, 2, 3],
+            "enum": [
+              1,
+              2,
+              3
+            ],
             "default": 3
           }
         }
@@ -777,7 +812,7 @@
           },
           "maxWeight": {
             "type": "number",
-            "default": 5.0,
+            "default": 5,
             "minimum": 1
           }
         }
@@ -945,7 +980,7 @@
           },
           "confidenceFactor": {
             "type": "number",
-            "default": 1.0,
+            "default": 1,
             "minimum": 0.1,
             "description": "补边权重 = 相似度 × 该系数（默认 1.0）"
           },
@@ -986,7 +1021,10 @@
           },
           "enabledTools": {
             "type": "array",
-            "items": { "type": "string", "default": "" },
+            "items": {
+              "type": "string",
+              "default": ""
+            },
             "default": [],
             "description": "启用的 MCP 工具白名单（空数组 = 全部启用）。可选值：gm_status / gm_stats / gm_health / gm_get_node / gm_search / gm_top / gm_nodes_by_type / gm_embed_bench（read）与 gm_record / gm_maintain / gm_reembed / gm_feedback / gm_benchmark / gm_tune（write，gm_tune 另需 autoTuner.enabled）。dashboard 的维护面板即通过 MCP 枚举/调用这些工具。"
           }

@@ -1,7 +1,7 @@
 /**
  * graph-memory-pro — Neo4j Knowledge Graph Memory Plugin
  *
- * Version: 2.4.5
+ * Version: 2.4.6
  *
  * 架构定位（A 方案）:
  *   - 不占用 slots（memory/contextEngine）
@@ -27,6 +27,8 @@ import type { EmbedFn, BatchEmbedFn } from "./src/engine/embed.ts";
 import { createCompleteFn, createRuntimeCompleteFn, type AgentModelContext } from "./src/engine/llm.ts";
 import { createEmbedFn, createBatchEmbedFn } from "./src/engine/embed.ts";
 import { initDriver, closeDriver, verifyWithRetry, verifyConnectivity, getDriver, setDriver as setDbDriver } from "./src/store/db.ts";
+// v2.8.x: 消息取文本/过滤/稳定键的纯逻辑统一放在 store 层，index 与单测共用同一实现
+import { extractMessageText, type AgentMessageLike } from "./src/store/messages.ts";
 import { ensureSchema, getNodeCount, getEdgeCount, searchNodes, upsertNode, upsertEdge, findById, getNodesByTimeRange as getNodesByTimeRangeInternal } from "./src/store/store.ts";
 import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
@@ -75,18 +77,8 @@ interface LoggerLike {
   debug?: (msg: string) => void;
 }
 
-interface AgentMessageContentBlock {
-  type?: string;
-  text?: string;
-}
-
-interface AgentMessageLike {
-  role?: string;
-  type?: string;
-  content?: string | Array<AgentMessageContentBlock | string>;
-  text?: string;
-  body?: string;
-}
+// v2.8.x: AgentMessageLike / AgentMessageContentBlock / extractMessageText 已迁至
+// ./src/store/messages.ts（纯逻辑集中一处，单测直接覆盖真实实现，不再是镜像副本）。
 
 // v2.5.4: 触发 after_tool_call 即时反馈的 memory 相关工具名。
 // 这些工具调用后可能产生 get()/search() 展开信号，需即时更新 M。
@@ -309,19 +301,6 @@ function extractLastTurn(messages: AgentMessageLike[]): { userQuery: string; ass
   return { userQuery, assistantReply };
 }
 
-function extractMessageText(msg: AgentMessageLike): string {
-  if (!msg) return "";
-  const content = msg.content ?? msg.text ?? msg.body ?? "";
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .filter((b) => b && (typeof b === "string" || b?.type === "text"))
-      .map((b) => (typeof b === "string" ? b : b.text ?? ""))
-      .join("\n");
-  }
-  return "";
-}
-
 /**
  * v2.8.x: 把整轮 messages[] 中的 user/assistant 消息落库到 Neo4j :GmMessage。
  *
@@ -329,7 +308,15 @@ function extractMessageText(msg: AgentMessageLike): string {
  * 引导导入后再无新增，markMessagesByContent 退化为空操作（MATCH 匹配不到）。
  * 本函数补上写端，由 agent_end 钩子调用，为增量重建 / 内容标记提供原文落地。
  *
- * 幂等：id = gm:<sessionKey>:<turnIndex>:<role>:<hash>，MERGE 语义，重跑不膨胀。
+ * v2.8.x 修正（三处）：
+ *   1. **稳定键**：id 不再含 `turnIndex` 位置分量（宿主 compaction 会改写历史数组，
+ *      位置位移会让同一消息换 id → 重复行）。改为 sessionKey + role + 全文指纹 + seq。
+ *   2. **增量**：先按 (role, 内容指纹) 与库中已有份数对账，只写「库里还没有的第 N 份」——
+ *      既不会在键方案切换时把历史重插一遍，也把每轮写入量从 O(历史长度) 降到 O(新增)。
+ *   3. **工作预算**：宿主对 `agent_end` 有 30s 硬超时且不会取消插件自有 I/O，
+ *      故设软预算主动收尾；未写完的下一轮重放会补齐（稳定键保证重放安全）。
+ *
+ * 幂等：同输入重放算出同一 id，MERGE 命中已有节点；`createdAt` 只在新建时写。
  * 降级：任何异常只 warn，不阻塞会话（与 autoFeedback 风格一致）。
  */
 async function persistSessionMessages(
@@ -339,30 +326,98 @@ async function persistSessionMessages(
 ): Promise<number> {
   let saved = 0;
   try {
-    const { saveMessage } = await import("./src/store/messages.ts");
-    let turnIndex = 0;
-    for (const msg of messages) {
-      if (!msg) continue;
-      const role = msg.role ?? msg.type ?? "";
-      const isUser = /user|human/i.test(role);
-      const isAssistant = /assistant/i.test(role);
-      if (!isUser && !isAssistant) continue;
-      const content = extractMessageText(msg);
-      if (!content || !content.trim()) continue;
-      const roleTag: "user" | "assistant" = isAssistant ? "assistant" : "user";
-      const id = "gm:" + sessionKey + ":" + turnIndex + ":" + roleTag + ":" + simpleHash(content.slice(0, 200));
+    const { saveMessage, planMessagePersist } = await import("./src/store/messages.ts");
+
+    // 会话级对账基线（进程内缓存；首次触达该会话时查一次库）
+    const baseline = await getPersistBaseline(driver, sessionKey);
+
+    // 过滤 + 稳定键 + 对账全部走纯函数 planMessagePersist（与单测同一实现）
+    const plan = planMessagePersist(messages, sessionKey, baseline.byGroup, baseline.truncated);
+
+    const deadline = Date.now() + PERSIST_BUDGET_MS;
+    let deferred = 0;
+
+    for (const item of plan) {
+      if (item.alreadyPresent) continue; // 已在库（含旧位置键写入的历史）→ 不重插
+      if (Date.now() > deadline) {
+        deferred++;
+        continue;
+      }
       try {
-        await saveMessage(driver, { id, sessionKey, turnIndex, role: roleTag, content, createdAt: Date.now() });
+        await saveMessage(driver, {
+          id: item.id,
+          sessionKey,
+          turnIndex: item.turnIndex,
+          role: item.role,
+          content: item.content,
+          createdAt: Date.now(),
+        });
+        // 记入基线，避免同轮后续同名份数重复写（group 由 planner 给出，无需在此重算指纹）
+        baseline.byGroup.set(item.group, (baseline.byGroup.get(item.group) ?? 0) + 1);
         saved++;
       } catch (err) {
-        log.warn("saveMessage failed (id=" + id + "): " + ((err as Error)?.message ?? err));
+        log.warn("saveMessage failed (id=" + item.id + "): " + ((err as Error)?.message ?? err));
       }
-      turnIndex++;
+    }
+
+    if (deferred > 0) {
+      log.warn(
+        `persistSessionMessages: 超过 ${PERSIST_BUDGET_MS}ms 工作预算，${deferred} 条留待下一轮补齐（session=${sessionKey}）`,
+      );
     }
   } catch (err) {
     log.warn("persistSessionMessages failed: " + ((err as Error)?.message ?? err));
   }
   return saved;
+}
+
+/**
+ * v2.8.x: 会话级写入对账基线（进程内缓存）。
+ *
+ * 首次触达某会话时查一次 (role, 内容指纹) 分组计数，之后复用并随写入自增。
+ * 超出 PERSIST_BASELINE_MAX_SESSIONS 后按最旧淘汰；被淘汰的会话下次触达会重查一次，
+ * 正确性不受影响（仅多一次查询）。
+ */
+const PERSIST_BASELINE_MAX_SESSIONS = 100;
+
+/**
+ * v2.8.x: 单次 agent_end 写入的**软预算**。
+ *
+ * 宿主对 agent_end 有 30s per-handler 硬超时，且超时**不会**取消插件自有的网络 I/O
+ * （见 openclaw 2026.9.6：docs/plugins/hooks/reference.md、hooks/prompt-and-session.md）。
+ * 因此设一个明显小于 30s 的软预算主动收尾，避免「钩子已判超时而写还在跑」的重叠。
+ * 未写完的条目在下一轮 agent_end 由稳定键重放补齐，故提前收尾是安全的。
+ */
+const PERSIST_BUDGET_MS = 20_000;
+
+const _persistBaselines = new Map<string, { byGroup: Map<string, number>; truncated: boolean }>();
+
+async function getPersistBaseline(
+  driver: Driver,
+  sessionKey: string,
+): Promise<{ byGroup: Map<string, number>; truncated: boolean }> {
+  const cached = _persistBaselines.get(sessionKey);
+  if (cached) return cached;
+  let baseline: { byGroup: Map<string, number>; truncated: boolean };
+  try {
+    const { getSessionMessageGroupCounts } = await import("./src/store/messages.ts");
+    baseline = await getSessionMessageGroupCounts(driver, sessionKey);
+  } catch (err) {
+    // 查询失败 → 退化为「不跳过」，只保证幂等（稳定键 + createdAt 只建不改，重放无害）
+    log.warn("persist baseline query failed (falling back to idempotent replay): " + ((err as Error)?.message ?? err));
+    baseline = { byGroup: new Map(), truncated: true };
+  }
+  if (_persistBaselines.size >= PERSIST_BASELINE_MAX_SESSIONS) {
+    const oldest = _persistBaselines.keys().next().value;
+    if (oldest !== undefined) _persistBaselines.delete(oldest);
+  }
+  _persistBaselines.set(sessionKey, baseline);
+  return baseline;
+}
+
+/** 供测试/诊断重置写入对账缓存 */
+export function __resetPersistBaselines(): void {
+  _persistBaselines.clear();
 }
 
 async function getOrCreateDriver(cfg: GmConfig, logger: LoggerLike): Promise<Driver | null> {
@@ -2069,14 +2124,38 @@ export default definePluginEntry({
     //   与宿主 ctx.sessionKey 同源，故此处用 ctx.sessionKey 消费，_lastSessionKey 兜底。
     api.on("agent_end", async (event, ctx) => {
       // 功能开关
-      if (_cfg?.autoFeedback?.enabled === false) return;
-      if (!_driver || !_recaller) return;
+      if (_cfg?.autoFeedback?.enabled === false) {
+        log.info("agent_end 跳过：autoFeedback.enabled === false");
+        return;
+      }
+      // v2.8.x: 早退必须留痕。此前这里静默 return，导致「Neo4j 未连上 → 写入停止」
+      // 与「写入逻辑坏了」在日志上不可区分（排查 8-13 之后消息中断时即卡在此处）。
+      if (!_driver || !_recaller) {
+        log.warn(
+          `agent_end 跳过：组件未就绪（driver=${_driver ? "ok" : "null"}, recaller=${_recaller ? "ok" : "null"}）——` +
+            "本轮消息不会落库；若持续出现请检查 Neo4j 连接与启动日志",
+        );
+        return;
+      }
 
       const sessionKey: string | undefined = ctx?.sessionKey ?? ctx?.sessionId ?? _lastSessionKey;
-      if (!sessionKey) return;
+      if (!sessionKey) {
+        log.warn("agent_end 跳过：无法取得 sessionKey（ctx.sessionKey / ctx.sessionId / _lastSessionKey 均为空）");
+        return;
+      }
 
       // 从 messages[] 提取最后一轮 user query + assistant reply
       const messages: AgentMessageLike[] = Array.isArray(event?.messages) ? (event.messages as AgentMessageLike[]) : [];
+      // v2.8.x: 非捆绑插件读会话内容需要宿主显式授权
+      // `plugins.entries.<id>.hooks.allowConversationAccess: true`；未授权时钩子可能被阻断或拿不到 messages。
+      // 这里给出可执行的排查指引，避免把它误判为插件写端 bug。
+      if (messages.length === 0) {
+        log.warn(
+          "agent_end 收到空 messages：若本插件为非捆绑安装，请确认 openclaw.json 中 " +
+            'plugins.entries["graph-memory-pro"].hooks.allowConversationAccess = true' +
+            "（可用 `openclaw plugins inspect graph-memory-pro --runtime --json` 核验）",
+        );
+      }
 
       // v2.8.x: 补齐写端——把整轮消息落库到 :GmMessage（此前 saveMessage 无调用点）。
       // 【必须在召回缓存判断之前】：即使用户本轮没触发召回（recallRecord 为空）也要落库，
@@ -2085,9 +2164,9 @@ export default definePluginEntry({
       // 表现为 :GmMessage 长期零新增（召回缓存空 -> 提前 return -> 写端永不执行）。
       try {
         const savedCount = await persistSessionMessages(_driver, sessionKey, messages);
-        if (process.env.GM_DEBUG) {
-          log.info(`persisted messages: session=${sessionKey}, saved=${savedCount}`);
-        }
+        // v2.8.x: 不再用 GM_DEBUG 门控 —— 写入量是判断「全量重放是否回归」与
+        // 「是否有新增」的关键信号，生产必须可见（写入量长期 ≫ 新增量即为回归信号）。
+        log.info(`persisted messages: session=${sessionKey}, total=${messages.length}, saved=${savedCount}`);
       } catch (err) {
         log.warn(`persist messages failed: ${(err as Error)?.message ?? err}`);
       }
