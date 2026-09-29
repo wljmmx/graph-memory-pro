@@ -28,6 +28,7 @@
     "typecheck": "tsc --noEmit",
     "benchmark": "tsx src/benchmark/cli.ts",
     "bench:embed-batch": "tsx scripts/embed-batch-bench.ts",
+    "audit:messages": "tsx scripts/gm-message-audit.ts",
     "download:benchmarks": "bash scripts/download-benchmarks.sh",
     "preprocess:benchmarks": "tsx scripts/preprocess-benchmarks.ts"
   },
