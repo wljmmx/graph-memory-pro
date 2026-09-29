@@ -2075,17 +2075,14 @@ export default definePluginEntry({
       const sessionKey: string | undefined = ctx?.sessionKey ?? ctx?.sessionId ?? _lastSessionKey;
       if (!sessionKey) return;
 
-      // 消费该 session 的召回缓存（取完即清，避免重复采集）
-      const recallRecord = getSessionRecallCache().consume(sessionKey);
-      if (!recallRecord || recallRecord.nodeIds.length === 0) return;
-
       // 从 messages[] 提取最后一轮 user query + assistant reply
       const messages: AgentMessageLike[] = Array.isArray(event?.messages) ? (event.messages as AgentMessageLike[]) : [];
-      const { userQuery, assistantReply } = extractLastTurn(messages);
 
       // v2.8.x: 补齐写端——把整轮消息落库到 :GmMessage（此前 saveMessage 无调用点）。
-      // 放在召回缓存判断之前：即使用户本轮没触发召回，也要保证原文落库，
+      // 【必须在召回缓存判断之前】：即使用户本轮没触发召回（recallRecord 为空）也要落库，
       // 否则 markMessagesByContent / rebuildSessionMessages 会因 MATCH 不到而空转。
+      // 历史 bug：本块曾被误置于 `consume()+return` 之后，导致仅在“本轮发生过召回”时才写库，
+      // 表现为 :GmMessage 长期零新增（召回缓存空 -> 提前 return -> 写端永不执行）。
       try {
         const savedCount = await persistSessionMessages(_driver, sessionKey, messages);
         if (process.env.GM_DEBUG) {
@@ -2094,6 +2091,12 @@ export default definePluginEntry({
       } catch (err) {
         log.warn(`persist messages failed: ${(err as Error)?.message ?? err}`);
       }
+
+      // 消费该 session 的召回缓存（取完即清，避免重复采集）
+      const recallRecord = getSessionRecallCache().consume(sessionKey);
+      if (!recallRecord || recallRecord.nodeIds.length === 0) return;
+
+      const { userQuery, assistantReply } = extractLastTurn(messages);
       if (!assistantReply || !assistantReply.trim()) return;
 
       try {
