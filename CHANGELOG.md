@@ -4,6 +4,34 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.4.5] - 2026-09-29
+
+**修复「:GmMessage 原文写端长期零新增」——插件在真实宿主中加载正常、召回与提取链路均可跑通，唯独消息原文从不落库。**
+
+### Fixed — agent_end 写端被提前 return 跳过
+
+`agent_end` 钩子中，`persistSessionMessages(...)` 原先排在
+`getSessionRecallCache().consume(sessionKey)` + `if (!recallRecord) return` **之后**。
+因此只有当本轮对话恰好触发过召回检索（召回缓存里有 nodeIds）时才会执行写库；
+常规回合召回缓存为空，钩子在 consume 处提前 return，**写端永不执行**。
+
+连带后果（均已观测到）：
+
+- `:GmMessage` 长期零新增 —— 生产环境最新 `createdAt` 停滞在 2026-08-13 11:07:58；
+- `extract-queue.jsonl` 长期 0 字节（不是积压，是根本未入队）；
+- `markMessagesByContent` / `rebuildSessionMessages` 因 MATCH 不到消息而空转。
+
+修复：把「messages 提取 + persistSessionMessages 调用」整块上移到 `sessionKey` 判空之后、
+`consume()` 之前，使原文落库不再依赖本轮是否发生召回，与函数自身注释（明确要求放在召回缓存
+判断之前）及 `MERGE` 幂等语义一致。`userQuery` / `assistantReply` 的提取因依赖 `messages`
+一并上移，`assistantReply` 空判仍留在 `consume()` 之后不变。
+
+### Changed — 版本对齐
+
+`src/version.ts`、`package.json`、`openclaw.plugin.json`、`package-lock.json`、
+[index.ts](index.ts) 头部版本注释、[README.md](README.md) 示例、
+[test/version.test.ts](test/version.test.ts) 由 **2.4.4** 对齐至 **2.4.5**。
+
 ## [2.4.4] — 2026-09-26
 
 本轮集中修复「插件在真实宿主中加载失败 / 永久降级」的三类问题：构建产物不自包含、同进程多模块实例资源竞争、清单假声明迁移义务。
