@@ -255,6 +255,12 @@
             "minimum": 0,
             "description": "v2.8.x: 动态批处理的总长度阈值（单请求累计字符数预算，0=关闭）。开启后装箱同时受两个上限约束：条数 ≤ batchSize，且累计字符数超阈值时当前批次封箱、该条转入下一个子批次（同一次调用内继续提交，不丢给未来轮次）。用途：条数相同但长度差异极大时（32×短句 vs 32×800 字）稳定单请求耗时，避免击穿批量超时。取值请实测：调用插件工具 gm_embed_bench（按 short/mixed/long 三画像实测并按真实 batchSize 推导档位；传 apply:true 热生效、persist:true 自动写回本文件，写前自动备份且仅在能定位到既有 embedding 段时才写），或用 CLI npm run bench:embed-batch。"
           },
+          "requestIntervalMs": {
+            "type": "integer",
+            "default": 0,
+            "minimum": 0,
+            "description": "v2.8.x: 相邻两次嵌入请求的最小间隔（毫秒，0=不节流）。maxConcurrency 只限制同时在飞的请求数，释放许可后下一个子批次会立即补位，正常路径零间隔。部分后端（实测 OVMS 的 MediaPipe 图在背靠背连续请求流下）会间歇返回 404 graph definition with requested name is not found。现象特征：插件并发仅 2 却失败、而手动 8~16 并发压测全部成功、加上间隔后不再报错 —— 即触发点是持续速率而非并发上限。建议仅在出现该间歇失败时设置，从 50~200 起试；代价是吞吐下降（上限约 1000/N 次/秒）。"
+          },
           "apiFormat": {
             "type": "string",
             "enum": [

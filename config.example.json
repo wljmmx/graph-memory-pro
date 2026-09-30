@@ -30,7 +30,9 @@
     "$comment_batchSize": "v2.8.x: 批量嵌入单请求最大文本数（默认 32）。Ollama /api/embed 由服务端批处理，调大减少请求往返；弱 CPU 下建议调小（如 8-16）以避免单请求超时",
     "batchSize": 32,
     "$comment_maxBatchChars": "v2.8.x: 动态批处理总长度阈值（单请求累计字符数预算，0=关闭）。batchSize 只管条数、管不住长度——32 条短句与 32 条 800 字的单请求工作量差数十倍，会让固定批量超时（120s）时松时紧。设为 >0 后装箱同受两个上限约束：超阈值即封箱，余下转下一子批次（同一次调用内继续提交，不会留待未来轮次）。⚠ 取值必须在本机实测（取决于硬件/模型/文本分布），不要照抄：让 Agent 调用插件工具 gm_embed_bench（会按 short/mixed/long 三画像实测，并用本文件的 batchSize 推导档位）。落盘方式二选一：① 工具传 apply:true 热生效（即时、重启即失效）；② 工具传 persist:true 自动写回本文件（写入 plugins.entries[\"graph-memory-pro\"].config.embedding，写前自动备份为 openclaw.json.bak-<时间戳>，仅在能定位到既有 embedding 段时才写，绝不新建结构）。两个参数可同时传。若结论为 0，说明条数上限本身已足够，保持关闭即可。",
-    "maxBatchChars": 0
+    "maxBatchChars": 0,
+    "$comment_requestIntervalMs": "v2.8.x: 相邻两次嵌入请求的最小间隔 ms（0=不节流，默认保持零间隔）。maxConcurrency 只管同时在飞数量，释放许可后下一子批次立即补位——正常路径是**零间隔连续流**。部分后端（实测 OVMS 的 MediaPipe 图）在这种背靠背请求流下会间歇返回 404 graph definition with requested name is not found。判据：插件并发仅 2 却失败、而手动 8~16 并发压测全部成功、或加上间隔后不再报错 → 触发点是持续速率而非并发上限，此时设置本项（从 50~200 起试）。代价是吞吐下降，上限约 1000/N 次/秒。",
+    "requestIntervalMs": 0
   },
   "recallMaxNodes": 6,
   "recallMaxDepth": 2,

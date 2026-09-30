@@ -73,6 +73,40 @@ function getSemaphore(baseURL: string, model: string, maxConcurrency: number): S
   return sem;
 }
 
+/**
+ * v2.8.x: 每端点一个「下一次允许发送」时间游标 —— 请求发送节流（pacing）。
+ *
+ * 动因：`Promise.all` 会把全部子批次一次性排队，信号量只限制**同时在飞**的数量
+ * （默认 2），但释放许可后下一个**立即补位**，正常路径零间隔。现场证据表明
+ * OVMS 在**背靠背连续请求流**下会间歇返回
+ * `404 Mediapipe graph definition with requested name is not found`，而
+ *   - 插件并发仅 2，却失败
+ *   - 用户手动压测 8~16 并发全部 200
+ *   - 用户「增加间隔后不再报错」
+ * ⇒ 触发点是**持续速率/无间隔**，不是并发上限。故提供可配间隔。
+ *
+ * 与信号量的关系：信号量管"同时在飞 ≤ maxConcurrency"，本游标管"发送间隔 ≥ intervalMs"。
+ * 两者叠加：并发不超过上限，且相邻两次发送至少间隔 intervalMs。
+ *
+ * 默认 0 = 完全保持原有行为（不引入任何延迟）。
+ */
+const _pacingGates = new Map<string, { nextAt: number }>();
+
+async function waitForPacing(key: string, intervalMs: number): Promise<void> {
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) return;
+  let gate = _pacingGates.get(key);
+  if (!gate) {
+    gate = { nextAt: 0 };
+    _pacingGates.set(key, gate);
+  }
+  const now = Date.now();
+  const at = Math.max(now, gate.nextAt);
+  // 同步推进游标（JS 单线程，await 之前不会被打断 → 天然无竞态）
+  gate.nextAt = at + intervalMs;
+  const wait = at - now;
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+}
+
 // v2.3.2 阶段二: 简易 LRU 缓存（无外部依赖，基于 Map 插入顺序）
 // 避免相同 text 跨 tick 重复 embed（如 associationMatrix 对同一 query 再次 embed、doctor 探测固定文本）
 interface LruCacheEntry {
@@ -571,6 +605,11 @@ export function createBatchEmbedFn(config: EmbeddingConfig): BatchEmbedFn {
   const maxBatchChars = Number.isFinite(config.maxBatchChars) && (config.maxBatchChars as number) > 0
     ? Math.floor(config.maxBatchChars as number)
     : 0;
+  // v2.8.x: 请求发送间隔（<= 0 / 非有限值 = 关闭，保持原有零间隔行为）
+  const requestIntervalMs = Number.isFinite(config.requestIntervalMs) && (config.requestIntervalMs as number) > 0
+    ? (config.requestIntervalMs as number)
+    : 0;
+  const pacingKey = `${c.baseURL}|${c.model}`;
 
   return async function batchEmbed(texts: string[]): Promise<(number[] | null)[]> {
     const out: (number[] | null)[] = new Array(texts.length).fill(null);
@@ -604,6 +643,8 @@ export function createBatchEmbedFn(config: EmbeddingConfig): BatchEmbedFn {
         const inputs = idxs.map((i) => texts[i]);
         const release = await c.semaphore.acquire();
         try {
+          // v2.8.x: 发送节流 —— 信号量只管并发上限，这里补上"相邻发送至少间隔 N ms"
+          await waitForPacing(pacingKey, requestIntervalMs);
           const vecs = await performEmbedRequest(
             c, inputs,
             // v2.8.x: 批量请求放宽到 120s（输入多为 32 段文本，弱 CPU 下 30s 易误超时）
@@ -646,6 +687,9 @@ export function createBatchEmbedFn(config: EmbeddingConfig): BatchEmbedFn {
             for (const i of idxs) {
               if (consecutiveFails >= 2) break; // 系统性故障，放弃剩余
               try {
+                // v2.8.x: 降级路径同样受节流约束 —— 否则"批量失败后的逐条重发"
+                // 会在后端已经吃紧时再打出一串零间隔请求，反而加重故障
+                await waitForPacing(pacingKey, requestIntervalMs);
                 const vecs = await performEmbedRequest(
                   c, [texts[i]],
                   120_000,

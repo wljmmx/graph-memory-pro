@@ -144,3 +144,91 @@ describe("批量嵌入失败韧性（v2.8.x）", () => {
     expect(calls.length).toBe(1);
   });
 });
+
+/**
+ * v2.8.x — 发送节奏（pacing）
+ *
+ * 回答的问题：n 个子批次是**带间隔**发送，还是**一次性全部排队发起**？
+ *   → 后者：`Promise.all` 把全部子批次一次性排队，信号量只限制「同时在飞 ≤ maxConcurrency」，
+ *     释放许可后下一个**立即补位**，正常路径**零间隔**。
+ *
+ * 现场证据（OVMS）表明触发点是这种「背靠背连续请求流」，而非并发上限：
+ * 插件并发仅 2 却失败，而手动 8~16 并发压测全部成功、加间隔后不再报错。
+ */
+describe("嵌入请求发送节奏（v2.8.x）", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("默认（requestIntervalMs 未设置）→ 零间隔连发，子批次同一波次全部发出", async () => {
+    const t0 = Date.now();
+    const times: number[] = [];
+    installFetchMock(() => {
+      times.push(Date.now() - t0);
+      return { status: 200, json: okVec(1) };
+    });
+
+    const batchEmbed = createBatchEmbedFn({
+      baseURL: uniqueBase(),
+      model: "qwen-embedding",
+      batchSize: 1,        // 8 条 → 8 个子批次
+      maxConcurrency: 8,   // 放开并发，观察是否一次性全发
+    } as never);
+
+    await batchEmbed(Array.from({ length: 8 }, (_, i) => `t${i}`));
+
+    expect(times.length).toBe(8);
+    // 全部几乎同时发出（同一波次）——间隔远小于任何人为节流
+    expect(Math.max(...times) - Math.min(...times)).toBeLessThan(50);
+  });
+
+  it("设置 requestIntervalMs → 相邻发送被拉开到设定的最小间隔", async () => {
+    const t0 = Date.now();
+    const times: number[] = [];
+    installFetchMock(() => {
+      times.push(Date.now() - t0);
+      return { status: 200, json: okVec(1) };
+    });
+
+    const batchEmbed = createBatchEmbedFn({
+      baseURL: uniqueBase(),
+      model: "qwen-embedding",
+      batchSize: 1,
+      maxConcurrency: 4,
+      requestIntervalMs: 60,
+    } as never);
+
+    await batchEmbed(Array.from({ length: 4 }, (_, i) => `t${i}`));
+
+    expect(times.length).toBe(4);
+    const sorted = [...times].sort((a, b) => a - b);
+    // 第 1 次立即发送，之后每两次之间 ≥ 约 intervalMs（留出调度容差）
+    for (let i = 1; i < sorted.length; i++) {
+      expect(sorted[i] - sorted[i - 1]).toBeGreaterThanOrEqual(45);
+    }
+    // 总跨度应接近 3 × 60ms
+    expect(sorted[sorted.length - 1] - sorted[0]).toBeGreaterThanOrEqual(150);
+  });
+
+  it("requestIntervalMs: 0 / 负数 / 非有限值 → 不引入任何延迟（保持原行为）", async () => {
+    for (const v of [0, -5, NaN, Infinity]) {
+      const t0 = Date.now();
+      const times: number[] = [];
+      installFetchMock(() => {
+        times.push(Date.now() - t0);
+        return { status: 200, json: okVec(1) };
+      });
+      const batchEmbed = createBatchEmbedFn({
+        baseURL: uniqueBase(),
+        model: "qwen-embedding",
+        batchSize: 1,
+        maxConcurrency: 4,
+        requestIntervalMs: v,
+      } as never);
+      await batchEmbed(["a", "b", "c", "d"]);
+      expect(times.length).toBe(4);
+      expect(Math.max(...times) - Math.min(...times)).toBeLessThan(50);
+    }
+  });
+});

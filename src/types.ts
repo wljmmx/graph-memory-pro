@@ -78,6 +78,19 @@ export interface EmbeddingConfig {
    */
   maxBatchChars?: number;
   /**
+   * v2.8.x: 相邻两次嵌入请求的最小间隔（毫秒），默认 0 = 不节流（保持原有零间隔行为）。
+   *
+   * 用途：`maxConcurrency` 只限制**同时在飞**的请求数，释放许可后下一个子批次会
+   * **立即补位**，正常路径零间隔。部分后端（实测 OVMS 的 MediaPipe 图在背靠背连续
+   * 请求流下）会间歇返回 404 `graph definition with requested name is not found`。
+   * 现象特征：插件并发仅 2 却失败，而手动 8~16 并发压测全部成功、加上间隔后不再报错
+   * —— 即触发点是"持续速率"而非"并发上限"。
+   *
+   * 建议：仅在出现上述间歇失败时设置，从 50~200 起试。代价是吞吐线性下降
+   * （间隔 N ms → 上限约 1000/N 次/秒，与 maxConcurrency 取较小者）。
+   */
+  requestIntervalMs?: number;
+  /**
    * v2.8.x: 嵌入接口格式。
    * - "ollama"：Ollama 原生 POST {baseURL}/api/embed（body: input/keep_alive/options）
    * - "openai"：OpenAI 兼容 POST {baseURL}/embeddings（body: input），

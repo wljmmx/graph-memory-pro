@@ -70,6 +70,31 @@
 缓存条目记录写入时的修订号、读取时比对。纯重复抽取不递增（否则缓存形同虚设）。
 同时把缓存键由 32-bit djb2 换为 64-bit FNV-1a —— 旧键会碰撞并返回**另一条 query** 的结果。
 
+### Added — `embedding.requestIntervalMs`：请求发送节流（pacing）
+
+**回答「n 个子批次是否有间隔发送」：没有间隔。** `Promise.all` 把全部子批次**一次性排队**，
+信号量只限制「同时在飞 ≤ `maxConcurrency`」（默认 2），释放许可后下一个**立即补位**，
+正常路径**零间隔**（`embed.ts` 中唯一的 `setTimeout` 在重试退避路径）。
+
+现场证据表明触发点是这种**背靠背连续请求流**，而**不是并发上限**：
+
+| | 并发数 | 结果 |
+|---|---|---|
+| 手动压测 | 8~16 | 全部 200 |
+| 插件实际 | 2 | 间歇 404 |
+
+插件并发更低反而失败 → 排除并发上限；再叠加「手动加间隔后不再报错」→ 指向持续速率。
+
+新增 `embedding.requestIntervalMs`（默认 **0 = 不节流**，完全保持原有行为）：
+保证相邻两次发送至少间隔 N ms，与信号量叠加（并发不超上限 **且** 发送间距 ≥ N）。
+**逐条降级路径同样受节流约束** —— 否则「批量失败后的逐条重发」会在后端已经吃紧时
+再打出一串零间隔请求，反而加重故障。
+
+登记于 [types.ts](src/types.ts)、[index.ts](index.ts) TypeBox schema、
+[openclaw.plugin.json](openclaw.plugin.json) JSON schema、[config.example.json](config.example.json)。
+
+新增 3 个节奏用例（默认零间隔连发 / 设定间隔被拉平 / 0·负数·NaN·Infinity 不引入延迟）。
+
 ### Fixed — 批量嵌入的失败韧性（OVMS 间歇 404 导致节点静默丢失）
 
 现场证据（OVMS `/v3/embeddings`，模型 `qwen-embedding`，`192.168.50.89:11412`）：
