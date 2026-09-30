@@ -37,28 +37,45 @@ export function computeEmbeddingHash(name: string, description: string, content:
  *   - `efSearch`：**检索阶段**参数，只写在 `db.index.vector.queryNodes` 里，
  *     建索引时不可配置 —— 见 ./vector-query.ts
  */
-const VECTOR_PROVIDER_2_0 = "vector-2.0";
+/**
+ * v2.8.x: 向量索引建索引策略。
+ *
+ * **首选「不指定 `indexProvider`」** —— 让服务器用该版本自带的默认 provider。
+ *
+ * 为什么这是正解（已核实）：
+ *   - 官方 Cypher Manual 明确写着「在建索引的 OPTIONS 里显式指定 index provider 已废弃，
+ *     请使用默认 provider」，并说明 vector 索引的 provider 已由 `vector-1.0` → `vector-2.0`；
+ *   - 但 2026.07+ 实际把 provider 改成了**版本化命名**（实测注册名为 `vector-2026.07`），
+ *     文档尚未同步 —— 即**任何硬编码的名字都会随版本过期**。
+ *   - 不指定 provider 时，5.x / 2026 早期 / 2026.07+ 各自都会用自己正确的默认值，
+ *     这正是「按最新版本号建立」想要的效果，且不需要跟着版本改代码。
+ *
+ * 因此显式候选（含 2026.07 版本化名）只作为**回落**，不写入首选路径。
+ */
+const VECTOR_PROVIDER_CANDIDATES = ["vector-2026.07", "vector-2.0"] as const;
 const HNSW_M = 16;
 const HNSW_EF_CONSTRUCTION = 96;
 const SEARCH_EXPANSION_FACTOR = 2.0;
 
-/** 向量索引配置是否与该 Provider 期望一致（用于校验已有索引） */
+/** 向量索引校验结果（用于确认实际 provider / state） */
 export interface VectorIndexReport {
   name: string;
   state?: string;
   indexProvider?: string;
-  /** 是否已是 2026.x 的 vector-2.0 Provider */
-  isModernProvider: boolean;
+  /** 是否仍是被官方标记为废弃的 `vector-1.0` provider */
+  isDeprecatedProvider: boolean;
 }
 
 /**
- * v2.8.x: 创建向量索引 —— 三级回落，优先 2026.x 新语法。
+ * v2.8.x: 创建向量索引 —— 多级回落，**首选不指定 provider**。
  *
- *   ① `indexProvider: 'vector-2.0'` + `vectorConfig`（2026.x，参数集中在此）
- *   ② 旧式 `indexConfig` + 反引号 `vector.*` 键（5.x ~ 2026 早期）
- *   ③ 过程化 `db.index.vector.createNodeIndex`（更老版本）
+ *   ① `indexConfig` 且**不带 `indexProvider`**（官方文档写法 + 版本无关，首选）
+ *   ② `vectorConfig` 且不带 `indexProvider`（较新的参数容器写法）
+ *   ③ `indexProvider: 'vector-2026.07' | 'vector-2.0'` + `vectorConfig`
+ *   ④ 显式 provider + `indexConfig`
+ *   ⑤ 过程化 `db.index.vector.createNodeIndex`（老版本）
  *
- * 返回实际生效的那一级，便于日志里确认用户环境到底用了哪种语法。
+ * 返回实际生效的那一级，便于日志确认环境到底接受了哪种写法。
  */
 async function createVectorIndexBestEffort(
   session: { run: (q: string, p?: Record<string, unknown>) => Promise<unknown> },
@@ -67,48 +84,50 @@ async function createVectorIndexBestEffort(
   prop: string,
   dimension: number,
   isEnterprise: boolean,
-): Promise<"vector-2.0" | "indexConfig" | "procedural" | "failed"> {
-  // ① 2026.x：参数全部写入 vectorConfig
-  const vectorConfigAttempts = isEnterprise
-    ? [
-        `{ indexProvider: '${VECTOR_PROVIDER_2_0}', vectorConfig: { dimensions: ${dimension}, similarityFunction: 'cosine', quantizationType: 'SCALAR', hnsw: { m: ${HNSW_M}, efConstruction: ${HNSW_EF_CONSTRUCTION} }, searchExpansionFactor: ${SEARCH_EXPANSION_FACTOR} } }`,
-        // Community 或字段名不被接受时：去掉量化与 HNSW 调优，仅保留维度/相似度
-        `{ indexProvider: '${VECTOR_PROVIDER_2_0}', vectorConfig: { dimensions: ${dimension}, similarityFunction: 'cosine' } }`,
-      ]
-    : [
-        `{ indexProvider: '${VECTOR_PROVIDER_2_0}', vectorConfig: { dimensions: ${dimension}, similarityFunction: 'cosine' } }`,
-      ];
-  for (const options of vectorConfigAttempts) {
+): Promise<string> {
+  /** 索引参数的两种容器写法（HNSW/量化只在 Enterprise 下发） */
+  const configs: Record<"indexConfig" | "vectorConfig", string> = {
+    // 官方文档写法：反引号 vector.* 键
+    indexConfig: `{
+        \`vector.dimensions\`: ${dimension},
+        \`vector.similarity_function\`: 'cosine'${isEnterprise ? `,
+        \`vector.quantization.type\`: 'SCALAR',
+        \`vector.default_search_expansion_factor\`: ${SEARCH_EXPANSION_FACTOR},
+        \`vector.hnsw.m\`: ${HNSW_M},
+        \`vector.hnsw.ef_construction\`: ${HNSW_EF_CONSTRUCTION}` : ""}
+      }`,
+    // 2026.x 参数容器写法（未指定 provider，由服务器决定）
+    vectorConfig: isEnterprise
+      ? `{ dimensions: ${dimension}, similarityFunction: 'cosine', quantizationType: 'SCALAR', hnsw: { m: ${HNSW_M}, efConstruction: ${HNSW_EF_CONSTRUCTION} }, searchExpansionFactor: ${SEARCH_EXPANSION_FACTOR} }`
+      : `{ dimensions: ${dimension}, similarityFunction: 'cosine' }`,
+  };
+
+  const attempts: Array<{ label: string; options: string }> = [
+    // ① 首选：官方写法，且不指定 provider（版本无关）
+    { label: "indexConfig(默认provider)", options: `{ indexConfig: ${configs.indexConfig} }` },
+    // ② 新参数容器，同样不指定 provider
+    { label: "vectorConfig(默认provider)", options: `{ vectorConfig: ${configs.vectorConfig} }` },
+  ];
+  // ③④ 只有①②都被拒（部分构建要求显式 provider）时才尝试硬编码候选
+  for (const provider of VECTOR_PROVIDER_CANDIDATES) {
+    attempts.push({ label: `${provider}+vectorConfig`, options: `{ indexProvider: '${provider}', vectorConfig: ${configs.vectorConfig} }` });
+    attempts.push({ label: `${provider}+indexConfig`, options: `{ indexProvider: '${provider}', indexConfig: ${configs.indexConfig} }` });
+  }
+  // ⑤ 极简 vectorConfig（可用参数集更窄的构建）
+  attempts.push({ label: "vectorConfig(仅维度)", options: `{ vectorConfig: { dimensions: ${dimension} } }` });
+
+  for (const a of attempts) {
     try {
       await session.run(`
         CREATE VECTOR INDEX ${indexName} IF NOT EXISTS
         FOR (n:${labelPattern}) ON n.${prop}
-        OPTIONS ${options}
+        OPTIONS ${a.options}
       `);
-      return "vector-2.0";
+      return a.label;
     } catch { /* 试下一种写法 */ }
   }
 
-  // ② 旧式 indexConfig（保留以兼容 5.x ~ 2026 早期）
-  try {
-    await session.run(`
-      CREATE VECTOR INDEX ${indexName} IF NOT EXISTS
-      FOR (n:${labelPattern}) ON n.${prop}
-      OPTIONS {
-        indexConfig: {
-          \`vector.dimensions\`: ${dimension},
-          \`vector.similarity_function\`: 'cosine'${isEnterprise ? `,
-          \`vector.quantization.type\`: 'SCALAR',
-          \`vector.default_search_expansion_factor\`: 1.5,
-          \`vector.hnsw.m\`: ${HNSW_M},
-          \`vector.hnsw.ef_construction\`: ${HNSW_EF_CONSTRUCTION}` : ""}
-        }
-      }
-    `);
-    return "indexConfig";
-  } catch { /* 试过程化 API */ }
-
-  // ③ 过程化 API（Neo4j 2026.x 已移除该过程）
+  // ⑤ 过程化 API（Neo4j 2026.x 已移除该过程）
   try {
     const labels = labelPattern.split("|").map((l) => `'${l.trim()}'`).join(", ");
     await session.run(
@@ -246,16 +265,16 @@ export async function ensureSchema(driver: Driver, dimension: number = 1024): Pr
           `vector index NOT created: ${t.name} — 所有语法均被拒绝，该索引相关召回会失效`,
           { labels: t.labels, dimension },
         );
-      } else if (m !== "vector-2.0") {
+      } else if (m.startsWith("vector-") || m === "procedural") {
         log.warn(
-          `vector index ${t.name} created via legacy syntax (${m}) — 该环境未启用 2026.x 的 vector-2.0/vectorConfig，HNSW 参数可能未生效`,
+          `vector index ${t.name} created via fallback syntax (${m}) — 首选写法（不指定 provider 的 indexConfig）被拒；若该级为硬编码 provider，注意它会随 Neo4j 版本过期`,
           { labels: t.labels },
         );
       }
     }
     log.info("vector indexes ensured", { edition, methods });
 
-    // 校验已有索引的实际 Provider（新建的也一并看，确认 vector-2.0 是否真的生效）
+    // 校验已有索引的实际 Provider（新建的也一并看，确认到底用了哪个 provider）
     try {
       const show = await session.run(
         "SHOW VECTOR INDEXES YIELD name, indexProvider, state RETURN name, indexProvider, state",
@@ -266,27 +285,29 @@ export async function ensureSchema(driver: Driver, dimension: number = 1024): Pr
           name: String(r.get("name")),
           indexProvider: provider,
           state: r.get("state") ?? undefined,
-          isModernProvider: provider === VECTOR_PROVIDER_2_0,
+          // 官方已把 vector-1.0 标记为废弃；版本化名字（如 vector-2026.07）与 vector-2.0 都算当前
+          isDeprecatedProvider: provider === "vector-1.0",
         };
       });
       const ours = reports.filter((r) => indexTargets.some((t) => t.name === r.name));
       log.info("vector index status", {
         indexes: ours.map((r) => `${r.name}[${r.indexProvider ?? "?"}/${r.state ?? "?"}]`).join(", "),
       });
-      // 需要重建的：仍是旧 Provider 的索引（IF NOT EXISTS 不会升级已存在的索引）
-      const needRebuild = ours.filter((r) => !r.isModernProvider);
+      // 需要重建的：仍是被废弃的旧 Provider（IF NOT EXISTS 不会升级已存在的索引）
+      const needRebuild = ours.filter((r) => r.isDeprecatedProvider);
       if (needRebuild.length > 0) {
         log.warn(
-          "部分向量索引仍使用旧 Provider —— IF NOT EXISTS 不会升级已存在的索引，需先 DROP 再 CREATE。" +
-            "大向量库重建为后台异步（state: POPULATING），耗时可能很长，故此处不自动执行。" +
-            "请按需手动执行（把维度换成你的实际值）：",
+          "部分向量索引仍在废弃的 vector-1.0 provider 上 —— IF NOT EXISTS 不会升级已存在的索引，需先 DROP 再 CREATE。" +
+            "注意：重建为后台异步，大数据量下 state 会长时间处于 POPULATING，期间查询会失败或退化，故此处不自动执行。" +
+            "下面语句刻意**不指定 indexProvider**，由服务器选用该版本正确的默认 provider（已核实：显式指定 provider 已被官方废弃，" +
+            "且 2026.07+ 改用了版本化命名 vector-2026.07，硬编码会随版本过期）。请按需手动执行：",
           {
             indexes: needRebuild.map((r) => r.name).join(", "),
             fix: needRebuild
               .map((r) => {
                 const t = indexTargets.find((x) => x.name === r.name)!;
                 return `DROP VECTOR INDEX \`${r.name}\` IF EXISTS; CREATE VECTOR INDEX \`${r.name}\` FOR (n:${t.labels}) ON (n.${t.prop}) ` +
-                  `OPTIONS { indexProvider: '${VECTOR_PROVIDER_2_0}', vectorConfig: { dimensions: ${dimension}, quantizationType: 'SCALAR', hnsw: { m: ${HNSW_M}, efConstruction: ${HNSW_EF_CONSTRUCTION} }, searchExpansionFactor: ${SEARCH_EXPANSION_FACTOR} } };`;
+                  `OPTIONS { indexConfig: { \`vector.dimensions\`: ${dimension}, \`vector.similarity_function\`: 'cosine' } };`;
               })
               .join(" "),
           },

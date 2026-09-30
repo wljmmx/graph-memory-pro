@@ -265,7 +265,7 @@
             "type": "integer",
             "default": 48,
             "minimum": 0,
-            "description": "v2.8.x: 向量检索 efSearch（默认 48）。属于**检索阶段**参数，只传给 db.index.vector.queryNodes；Neo4j 2026.x 建索引阶段的 HNSW 参数写在 vectorConfig 里（indexProvider: 'vector-2.0'，hnsw.m / hnsw.efConstruction / quantizationType / searchExpansionFactor），efSearch 不属建索引参数。越大召回越高、检索越慢。旧版本 Neo4j 不认识该参数时自动去掉重试。"
+            "description": "v2.8.x: 向量检索 efSearch（默认 48）。属于**检索阶段**参数，只传给 db.index.vector.queryNodes；已核实：官方把「建索引时显式指定 indexProvider」标记为废弃，请用默认 provider；且 2026.07+ 改用版本化命名（实测 vector-2026.07），硬编码任何 provider 名都会随版本过期。故插件建索引时**不指定 provider**，只用 indexConfig 下发维度/相似度/HNSW 参数（HNSW/量化仅 Enterprise）。越大召回越高、检索越慢。旧版本 Neo4j 不认识该参数时自动去掉重试。"
           },
           "apiFormat": {
             "type": "string",

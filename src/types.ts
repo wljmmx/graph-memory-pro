@@ -93,7 +93,9 @@ export interface EmbeddingConfig {
   /**
    * v2.8.x: 向量检索的 efSearch（**检索阶段**参数，非索引存储参数）。
    *
-   * 规格（Neo4j 2026.x）：建索引只配 `hnsw.efConstruction`；`efSearch` 只能在
+   * 规格（Neo4j 2026.x，已核实）：建索引只配 `hnsw.efConstruction`（HNSW/量化参数写在建索引
+ * 参数里，不再走全局 dbms.index.vector.default.*；且**不指定 indexProvider** —— 官方已废弃显式
+ * provider，2026.07+ 又改为版本化命名如 vector-2026.07，硬编码会随版本过期）；`efSearch` 只能在
    * `db.index.vector.queryNodes(..., { efSearch: N })` 里传。默认 48。
    * 越大召回越高、检索越慢。旧版本 Neo4j 不认识该参数时会自动回落（不带它重试）。
    */

@@ -114,8 +114,8 @@ describe("ensureSchema：向量索引优先 vector-2.0 + vectorConfig（v2.8.x�
     return { driver, queries };
   }
 
-  it("建索引语句使用 indexProvider: 'vector-2.0' 与 vectorConfig（含 HNSW 参数）", async () => {
-    setCachedEdition("Enterprise"); // HNSW/量化参数仅 Enterprise 下发
+  it("首选建索引语句**不指定 indexProvider**（版本无关），且 HNSW 参数随 Enterprise 下发", async () => {
+    setCachedEdition("Enterprise");
     const { driver, queries } = fakeDriver();
     await ensureSchema(driver, 1024);
 
@@ -123,13 +123,17 @@ describe("ensureSchema：向量索引优先 vector-2.0 + vectorConfig（v2.8.x�
     expect(createStmts.length).toBeGreaterThan(0);
 
     const primary = createStmts.find((q) => q.includes("gm_node_embedding"))!;
-    expect(primary).toContain("vector-2.0");
-    expect(primary).toContain("vectorConfig");
-    // HNSW / 量化参数必须在 vectorConfig 内（2026.x：不再走全局环境变量）
-    expect(primary).toMatch(/vectorConfig:\s*\{[^}]*dimensions:\s*1024/);
-    expect(primary).toContain("efConstruction");
-    expect(primary).toContain("quantizationType");
-    expect(primary).not.toContain("`vector.dimensions`");
+    // 核心：不硬编码 provider（官方已把「显式指定 provider」标为废弃；
+    // 且 2026.07+ 改用版本化命名 vector-2026.07 —— 硬编码会随版本过期）
+    expect(primary).not.toContain("indexProvider");
+    expect(primary).not.toContain("vector-2.0");
+    expect(primary).not.toContain("vector-2026.07");
+    // 参数走官方 indexConfig（反引号 vector.* 键）
+    expect(primary).toContain("`vector.dimensions`");
+    expect(primary).toContain("`vector.hnsw.ef_construction`");
+    expect(primary).toContain("`vector.hnsw.m`");
+    expect(primary).toContain("`vector.quantization.type`");
+    expect(primary).toMatch(/`vector\.dimensions`:\s*1024/);
     // efSearch 属检索参数，绝不能出现在建索引语句里
     expect(primary).not.toContain("efSearch");
   });
@@ -140,9 +144,9 @@ describe("ensureSchema：向量索引优先 vector-2.0 + vectorConfig（v2.8.x�
     await ensureSchema(driver, 1024);
 
     const primary = queries.filter((q) => q.includes("CREATE VECTOR INDEX") && q.includes("gm_node_embedding"))[0];
-    expect(primary).toContain("vector-2.0");
-    expect(primary).toContain("vectorConfig");
-    expect(primary).not.toContain("quantizationType");
+    expect(primary).not.toContain("indexProvider"); // 同样不硬编码 provider
+    expect(primary).toContain("`vector.dimensions`");
+    expect(primary).not.toContain("`vector.quantization.type`"); // Community 不量化
     expect(primary).not.toContain("efSearch");
   });
 
@@ -152,9 +156,9 @@ describe("ensureSchema：向量索引优先 vector-2.0 + vectorConfig（v2.8.x�
     const session = {
       async run(q: string) {
         queries.push(q);
-        // 拒绝一切带 vector-2.0 的写法 → 应回落到 indexConfig
-        if (q.includes("vector-2.0")) {
-          const e = new Error("Invalid input 'indexProvider'") as Error & { code?: string };
+        // 拒绝一切**不指定 provider** 与 vectorConfig 的写法 → 应落到硬编码 provider 候选
+        if (q.includes("CREATE VECTOR INDEX") && !q.includes("indexProvider")) {
+          const e = new Error("No index provider specified") as Error & { code?: string };
           e.code = "Neo.ClientError.Statement.SyntaxError";
           throw e;
         }
@@ -166,9 +170,9 @@ describe("ensureSchema：向量索引优先 vector-2.0 + vectorConfig（v2.8.x�
     await ensureSchema({ session: () => session } as any, 1024);
 
     const createStmts = queries.filter((q) => q.includes("CREATE VECTOR INDEX"));
-    // 回落到旧式 indexConfig（反引号 vector.* 键）——这是该分支的判别标志；
-    // HNSW 键仅在 Enterprise 下才追加，故不能拿它当回落判据
-    expect(createStmts.some((q) => q.includes("`vector.dimensions`"))).toBe(true);
-    expect(createStmts.some((q) => q.includes("vector-2.0"))).toBe(true); // 确实先试过新语法
+    // 先试过「不指定 provider」的首选（这条会失败）
+    expect(createStmts.some((q) => !q.includes("indexProvider"))).toBe(true);
+    // 再落到硬编码版本化候选（vector-2026.07 优先于 vector-2.0）
+    expect(createStmts.some((q) => q.includes("vector-2026.07"))).toBe(true);
   });
 });

@@ -127,12 +127,14 @@ describe("ensureSchema 向量索引企业版条件参数", () => {
     const calls = driver.getAllRunCalls();
     const vectorCall = calls.find((c: any) => c.query.includes("CREATE VECTOR INDEX"));
     expect(vectorCall).toBeTruthy();
-    // v2.8.x: 2026.x 规格 —— Provider 与 HNSW/量化参数集中在 OPTIONS.vectorConfig，
-    // 不再使用旧的 indexConfig + 反引号 `vector.*` 键，也不再有全局环境变量。
-    expect(vectorCall.query).toContain("vector-2.0");
-    expect(vectorCall.query).toContain("vectorConfig");
-    expect(vectorCall.query).toContain("quantizationType");
-    expect(vectorCall.query).toContain("efConstruction");
+    // v2.8.x（已核实）: 首选**不指定 indexProvider** —— 官方已把「显式指定 provider」标记为废弃，
+    // 且 2026.07+ 改用版本化命名（实测 vector-2026.07），硬编码任何名字都会随版本过期。
+    // 参数走官方 indexConfig（反引号 vector.* 键）；HNSW/量化仅 Enterprise 下发。
+    expect(vectorCall.query).not.toContain("indexProvider");
+    expect(vectorCall.query).toContain("`vector.dimensions`");
+    expect(vectorCall.query).toContain("`vector.hnsw.m`");
+    expect(vectorCall.query).toContain("`vector.hnsw.ef_construction`");
+    expect(vectorCall.query).toContain("`vector.quantization.type`");
     // efSearch 是**检索参数**，建索引阶段不得出现（含 ef_search / efConstruction 混淆）
     expect(vectorCall.query).not.toContain("efSearch");
     expect(vectorCall.query).not.toContain("ef_search");
@@ -145,11 +147,11 @@ describe("ensureSchema 向量索引企业版条件参数", () => {
     const calls = driver.getAllRunCalls();
     const vectorCall = calls.find((c: any) => c.query.includes("CREATE VECTOR INDEX"));
     expect(vectorCall).toBeTruthy();
-    // 仍走 2026.x 的 vectorConfig，但不含量化/HNSW 调优
-    expect(vectorCall.query).toContain("vector-2.0");
-    expect(vectorCall.query).toContain("vectorConfig");
-    expect(vectorCall.query).not.toContain("quantizationType");
-    expect(vectorCall.query).not.toContain("efConstruction");
+    // 同样不指定 provider；Community 不含量化/HNSW 调优
+    expect(vectorCall.query).not.toContain("indexProvider");
+    expect(vectorCall.query).toContain("`vector.dimensions`");
+    expect(vectorCall.query).not.toContain("`vector.quantization.type`");
+    expect(vectorCall.query).not.toContain("ef_construction");
   });
 
   it("12. 未知 edition 使用基础参数（保守）", async () => {
@@ -159,6 +161,6 @@ describe("ensureSchema 向量索引企业版条件参数", () => {
     const calls = driver.getAllRunCalls();
     const vectorCall = calls.find((c: any) => c.query.includes("CREATE VECTOR INDEX"));
     expect(vectorCall).toBeTruthy();
-    expect(vectorCall.query).not.toContain("quantizationType");
+    expect(vectorCall.query).not.toContain("`vector.quantization.type`");
   });
 });
