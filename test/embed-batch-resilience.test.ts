@@ -31,6 +31,7 @@ function installFetchMock(handler: (body: { input: string[] }) => { status: numb
     return {
       ok: r.status >= 200 && r.status < 300,
       status: r.status,
+      headers: { get: (k: string) => (k.toLowerCase() === "server" ? "mock-ovms/1.0" : null) },
       json: async () => r.json ?? {},
       text: async () => r.text ?? "",
     } as unknown as Response;
@@ -141,6 +142,33 @@ describe("批量嵌入失败韧性（v2.8.x）", () => {
     const out = await batchEmbed(["only"]);
     expect(out[0]).toBeNull();
     // batchSize=1 → 不触发逐条降级；400 不重试 → 恰好 1 次请求
+    expect(calls.length).toBe(1);
+  });
+
+  it("响应对象缺少 headers 时，诊断块不得破坏状态码分类（400 仍只发 1 次）", async () => {
+    // 回归守卫：诊断块若抛错会被外层 catch 吞掉，使错误消息不再含 `Embedding API NNN`
+    // → status 解析为 0 → 真正的 4xx 被重试到底（曾实际发生：1 次变 4 次）
+    const calls: number[] = [];
+    const mock = vi.fn(async () => {
+      calls.push(1);
+      return {
+        ok: false,
+        status: 400,
+        // 故意不给 headers
+        json: async () => ({}),
+        text: async () => '{"error":"invalid input type"}',
+      } as unknown as Response;
+    });
+    vi.stubGlobal("fetch", mock);
+
+    const batchEmbed = createBatchEmbedFn({
+      baseURL: uniqueBase(),
+      model: "qwen-embedding",
+      batchSize: 1,
+    } as never);
+
+    const out = await batchEmbed(["only"]);
+    expect(out[0]).toBeNull();
     expect(calls.length).toBe(1);
   });
 });

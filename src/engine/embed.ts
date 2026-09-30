@@ -369,6 +369,27 @@ async function performEmbedRequest(
         if (response.status === 400 && body.includes('invalid input type')) {
           hint = '. 提示：请检查 embedding.model 配置是否为支持 embedding 的模型（如 nomic-embed-text、bge-large-zh），聊天模型（如 qwen3.6）不支持 embedding';
         }
+        // v2.8.x: 412 / 400 这类「请求体层面」错误，连服务端 JSON 解析都过不去时，
+        // 只给 body 片段不足以定位 —— 附上「完整请求体 + server 头 + 长度」，
+        // 便于和 curl 的请求逐项比对（实测 412 Cannot parse JSON body 就是这么暴露的：
+        // 同一 URL/body curl 200、插件被拒，差异只能出在传输层）。
+        //
+        // 注意：本块必须自身防御 —— 它抛出的任何异常都会被外层 catch 捕获，
+        // 使错误消息里不再含 `Embedding API NNN`，从而**破坏下面的状态码分类**，
+        // 导致本该立即失败的 4xx 被重试到底（曾因 headers 缺失触发出此问题）。
+        if (response.status === 412 || response.status === 400) {
+          try {
+            const reqBody = JSON.stringify(buildEmbedRequestBody(client, inputs));
+            log.warn(`embedding request rejected at transport level`, {
+              url, status: response.status,
+              serverHeader: response.headers?.get?.("server") ?? "(unavailable)",
+              responseBytes: body.length,
+              requestBody: reqBody.slice(0, 400),
+              requestBodyBytes: reqBody.length,
+              model, inputCount: inputs.length,
+            });
+          } catch { /* 诊断失败不得影响错误分类 */ }
+        }
         throw new Error(`Embedding API ${response.status}: ${body.slice(0, 200)}${hint}`);
       }
 

@@ -70,6 +70,33 @@
 缓存条目记录写入时的修订号、读取时比对。纯重复抽取不递增（否则缓存形同虚设）。
 同时把缓存键由 32-bit djb2 换为 64-bit FNV-1a —— 旧键会碰撞并返回**另一条 query** 的结果。
 
+### Added — 嵌入请求的诊断与连接复用探测（412 / transport 层错误）
+
+现场出现**第二个**、语义完全不同的症状（同一 URL/模型，curl 200、插件被拒）：
+
+```
+Embedding API 412: {"error":"The file is not valid json - Cannot parse JSON body"}
+```
+
+412 不是模型/载荷问题，而是**请求级**问题。两次报错（404 graph not found / 412 cannot
+parse JSON body）的共同点是「服务端认为插件发来的请求本身有问题」→ 指向**传输层**。
+
+- `embed.ts`：412 / 400 时记录 `url / status / server 头 / 请求体原文与字节数 / inputCount`，
+  可直接与 curl 逐项比对。该诊断块**自身防御**（曾被测试抓出：`response.headers` 缺失时
+  它抛错会被外层 catch 吞掉，使错误消息不再含 `Embedding API NNN` → 状态码分类失效 →
+  本该立即失败的 400 被重试 4 次）。
+- [diag-ovms-embed.py](scripts/diag-ovms-embed.py) 新增**阶段 E：单连接复用 N 次**，
+  与阶段 D（每次新建连接）唯一差别就是「是否复用 TCP 连接」。已用「同连接第 2 次请求即 412」
+  的模拟服务验证过它能精确区分。另各阶段均记录 `Server` 头以识别中间件。
+
+**为何怀疑连接复用**：curl 每次都新建连接（20/20 成功），而 Node 的 `fetch`（undici）
+**复用 keep-alive 连接池** —— 实测 5 次请求只开 2 条 TCP；且 `Connection: close` 在
+undici 下**不可靠**（5 次仍用 3 条），`Keep-Alive` 头直接被 undici 拒绝
+（`UND_ERR_INVALID_ARG`）。这也解释了「加间隔后不再报错」（空闲使连接池重建连接）。
+
+**尚未改动传输实现** —— 先由阶段 E 确认；确认后再决定改为每请求新建连接（`node:http` +
+`agent: false`），避免在未证实前重写一条正在工作的链路。
+
 ### Fixed — dedup 余弦查询对 Neo4j 原生 VECTOR 类型不兼容
 
 现场报错（maintenance Phase 1）：

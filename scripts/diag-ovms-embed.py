@@ -22,13 +22,16 @@ name is not found`）是**部分性**的 —— 同一 URL/模型有成功有失
     仅 C 失败            → 后端对长输入/大载荷敏感 → 调小 batchSize / maxBatchChars
     仅 B、C 失败          → 后端不接受批量 input 数组 → 需按单条发送
     D 有非 200           → 间歇性资源问题 → 依赖插件侧的 404 重试 + 逐条降级（2.4.7 已加）
+    D 正常但 E 失败       → **连接复用**是触发器（curl 每次都新建连接，插件复用 undici 连接池）
     全部 200             → 你无法在此端点复现，故障必与更长的输入或更高并发相关
 """
 import argparse
+import http.client
 import json
 import statistics
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
@@ -44,7 +47,12 @@ def build_payload(texts: list[str], model: str) -> bytes:
 
 
 def call(url: str, texts: list[str], model: str, timeout: float) -> dict:
-    """返回 {status, elapsed, n, dim, error_body}"""
+    """返回 {status, elapsed, n, dim, server, error_body}
+
+    注意：urllib **不复用连接**（每次新建 TCP）。这与插件行为不同 ——
+    插件用 Node 的 fetch（undici 连接池）会复用 keep-alive 连接。
+    复用形态由 keepalive_probe() 单独覆盖。
+    """
     req = urllib.request.Request(
         url, data=build_payload(texts, model),
         headers={"Content-Type": "application/json"}, method="POST",
@@ -63,12 +71,54 @@ def call(url: str, texts: list[str], model: str, timeout: float) -> dict:
                     dim = len(arr[0]["embedding"])
             except Exception:
                 pass
-            return {"status": resp.status, "elapsed": elapsed, "n": n, "dim": dim, "error_body": None}
+            return {"status": resp.status, "elapsed": elapsed, "n": n, "dim": dim,
+                    "server": resp.headers.get("Server"), "error_body": None}
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", "replace")[:300]
-        return {"status": e.code, "elapsed": time.time() - t0, "n": None, "dim": None, "error_body": body}
+        return {"status": e.code, "elapsed": time.time() - t0, "n": None, "dim": None,
+                "server": e.headers.get("Server") if e.headers else None, "error_body": body}
     except Exception as e:  # 连接/超时
-        return {"status": -1, "elapsed": time.time() - t0, "n": None, "dim": None, "error_body": str(e)[:300]}
+        return {"status": -1, "elapsed": time.time() - t0, "n": None, "dim": None,
+                "server": None, "error_body": str(e)[:300]}
+
+
+def keepalive_probe(url: str, texts: list[str], model: str, rounds: int, timeout: float) -> list[dict]:
+    """**单条 TCP 连接复用** N 次 —— 精确模拟插件（undici 连接池）的形态。
+
+    与阶段 D 的唯一差别是「是否复用连接」。若本相失败而 D 正常，
+    则触发器是连接复用（而非速率/载荷/并发），插件侧需改为每请求新建连接。
+    """
+    u = urllib.parse.urlparse(url)
+    out: list[dict] = []
+    conn = http.client.HTTPConnection(u.hostname, u.port, timeout=timeout)
+    payload = build_payload(texts, model)
+    try:
+        for _ in range(rounds):
+            t0 = time.time()
+            conn.request("POST", u.path, body=payload,
+                         headers={"Content-Type": "application/json"})
+            resp = conn.getresponse()
+            raw = resp.read()
+            n = dim = None
+            try:
+                data = json.loads(raw)
+                arr = data.get("data") or []
+                n = len(arr)
+                if arr and isinstance(arr[0].get("embedding"), list):
+                    dim = len(arr[0]["embedding"])
+            except Exception:
+                pass
+            out.append({
+                "status": resp.status, "elapsed": time.time() - t0, "n": n, "dim": dim,
+                "server": resp.getheader("Server"),
+                "error_body": None if resp.status == 200 else raw.decode("utf-8", "replace")[:300],
+            })
+    except Exception as e:
+        out.append({"status": -1, "elapsed": 0.0, "n": None, "dim": None,
+                    "server": None, "error_body": f"connection died mid-run: {e}"[:300]})
+    finally:
+        conn.close()
+    return out
 
 
 def report(name: str, results: list[dict], expect_n: int, expect_dim: int) -> None:
@@ -81,6 +131,10 @@ def report(name: str, results: list[dict], expect_n: int, expect_dim: int) -> No
     print(f"  请求数 {len(results)}   HTTP 200 {len(ok)}   非200 {len(bad)}   形态不符 {len(shape_bad)}")
     if lat:
         print(f"  延迟 中位 {statistics.median(lat)*1000:.0f}ms  最大 {max(lat)*1000:.0f}ms")
+    servers = {r.get("server") for r in results if r.get("server")}
+    if servers:
+        # 仅如实记录，不臆断：若与预期后端不符（如 nginx/envoy），说明链路上另有中间件
+        print(f"  Server 头: {', '.join(sorted(servers))}（与预期后端不符则链路上有中间件）")
     if shape_bad:
         s = shape_bad[0]
         print(f"  ⚠ 返回值形态不符：期望 {expect_n} 条 × {expect_dim or '?'} 维，实际 {s['n']} 条 × {s['dim'] or '?'} 维")
@@ -121,10 +175,19 @@ def main() -> None:
         results.append(call(args.url, texts, args.model, args.timeout))
     report(f"D 顺序长跑 {args.rounds} 轮（每轮内容变化）", results, args.batch, args.dim)
 
+    # E 单连接复用 —— 与 D 的唯一差别是「复用 TCP 连接」（= 插件的 undici 连接池形态）
+    print("\n（E 阶段与 D 阶段唯一差别：E 复用同一条 TCP 连接，D 每次新建）")
+    ka = keepalive_probe(args.url, long_batch, args.model, args.rounds, args.timeout)
+    report(f"E 单连接复用 {args.rounds} 次（模拟插件的连接池）", ka, args.batch, args.dim)
+
     # 附：并发形态（插件的 maxConcurrency 默认 2）
     with ThreadPoolExecutor(max_workers=2) as ex:
         conc = list(ex.map(lambda i: call(args.url, long_batch, args.model, args.timeout), range(10)))
     report("附 并发 2 × 10 次（插件的 maxConcurrency 默认 2）", conc, args.batch, args.dim)
+
+    print("\n── 判读 ──")
+    print("  D 正常 + E 失败  → 触发器是**连接复用**：插件需改为每请求新建连接")
+    print("  D、E 均失败      → 与连接无关：看 Server 头是否有代理，并把非 200 错误体发回")
 
 
 if __name__ == "__main__":
