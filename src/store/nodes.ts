@@ -14,7 +14,7 @@ import {
   recordToNode,
   recordToEdge,
 } from "./schema.ts";
-import { createLogger } from "../logger.ts";
+import { createLogger, describeError } from "../logger.ts";
 import { bumpGraphRevision } from "./graph-revision.ts";
 
 const log = createLogger("store:nodes");
@@ -593,8 +593,36 @@ export async function getNodeCount(driver: Driver): Promise<number> {
 export async function clearAllNodes(driver: Driver): Promise<number> {
   const session = getSession(driver);
   try {
-    const result = await session.run("MATCH (n) DETACH DELETE n RETURN count(n) AS c");
-    return result.records[0]?.get("c")?.toNumber?.() ?? 0;
+    /**
+     * v2.8.x: 改用 Neo4j 官方推荐的分批删除，并保留单语句回落。
+     *
+     * 缺陷背景：`MATCH (n) DETACH DELETE n` 是**单个事务**删除全库。图规模上万节点时，
+     * 事务状态会撑爆事务内存（`dbms.memory.transaction.total.max` → `OutOfMemoryError`），
+     * 且长时间占用锁。Neo4j 官方文档明确建议大删除用 `CALL { … } IN TRANSACTIONS OF n ROWS`
+     * 分批提交。
+     *
+     * 语义不变：仍是全库删除、仍返回删除总数；差别只在提交粒度。
+     * 回落：老版本不支持 `IN TRANSACTIONS` 时退回单语句（行为与旧实现一致）。
+     */
+    const BATCH_ROWS = 10_000;
+    try {
+      const batched = await session.run(
+        `CALL {
+           MATCH (n) DETACH DELETE n
+           RETURN count(n) AS c
+         } IN TRANSACTIONS OF ${BATCH_ROWS} ROWS
+         RETURN sum(c) AS c`,
+      );
+      return batched.records[0]?.get("c")?.toNumber?.() ?? 0;
+    } catch (err) {
+      log.warn(
+        "clearAllNodes: batched delete unavailable — falling back to single-transaction delete " +
+          "(大图下可能耗尽事务内存)",
+        { error: describeError(err), batchRows: BATCH_ROWS },
+      );
+      const result = await session.run("MATCH (n) DETACH DELETE n RETURN count(n) AS c");
+      return result.records[0]?.get("c")?.toNumber?.() ?? 0;
+    }
   } finally {
     await session.close();
   }

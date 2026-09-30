@@ -17,6 +17,7 @@
 
 import type { EmbeddingConfig } from "../types.ts";
 import { createLogger } from "../logger.ts";
+import { stripLoneSurrogates } from "../recaller/chunk.ts";
 
 const log = createLogger("embed");
 
@@ -321,14 +322,26 @@ export function buildEmbedRequestBody(
   endpoint: Pick<EmbedEndpoint, "apiFormat" | "model" | "keepAlive" | "options">,
   inputs: string[],
 ): Record<string, unknown> {
+  /**
+   * v2.8.x: 出站前净化 —— 这里是**唯一收口**，批量与单条路径都经过。
+   *
+   * 缺陷背景：JS 的 `slice` 按 UTF-16 码元切割，截断落在代理对中间会产生**孤立代理项**；
+   * `JSON.stringify` 会把它输出成未配对代理转义（如 `\ud83d`），部分严格 JSON 解析器
+   * 直接拒绝 → `Cannot parse JSON body`（412）。纯中文/ASCII 的 curl 测试复现不到。
+   * 库里的**存量内容**也可能已含早前截断的产物，故必须在发送侧净化，不能只修截断逻辑。
+   *
+   * 另外注意：openai 格式**绝不**携带 Ollama 专有字段（keep_alive / options）——
+   * OVMS 等 OpenAI 兼容端点会因未知字段报错。
+   */
+  const clean = inputs.map((t) => (typeof t === "string" ? stripLoneSurrogates(t) : ""));
   return endpoint.apiFormat === "ollama"
     ? {
         model: endpoint.model,
-        input: inputs,
+        input: clean,
         keep_alive: endpoint.keepAlive,
         ...(endpoint.options ? { options: endpoint.options } : {}),
       }
-    : { model: endpoint.model, input: inputs };
+    : { model: endpoint.model, input: clean };
 }
 
 /** 构造嵌入请求头（含可选 Bearer 鉴权） */

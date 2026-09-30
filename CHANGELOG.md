@@ -70,6 +70,44 @@
 缓存条目记录写入时的修订号、读取时比对。纯重复抽取不递增（否则缓存形同虚设）。
 同时把缓存键由 32-bit djb2 换为 64-bit FNV-1a —— 旧键会碰撞并返回**另一条 query** 的结果。
 
+### Fixed — 孤立代理项导致请求体被严格 JSON 解析器拒绝（`Cannot parse JSON body`）
+
+**这是 `412 Cannot parse JSON body` 的可复现机制，且 curl 永远测不到。**
+
+[JS 的 `String.prototype.slice` 按 **UTF-16 码元**切割](src/recaller/chunk.ts)。截断点落在
+代理对（emoji / CJK 扩展字）中间会切出**孤立代理项**：
+
+```js
+"abcdefg👍hijklmn".slice(0, 8)          // → 末尾是孤立高代理 \uD83D
+JSON.stringify({ input: [该串] })        // → {"input":["abcdefg\ud83d"]}  ← 未配对代理转义
+```
+
+未配对代理转义在部分**严格 JSON 解析器**（serde_json、部分 C++/Go 严格模式）中会被**直接拒绝**。
+纯中文/ASCII 的 curl 测试不含代理对 → 永远复现不到 → 这正是"curl 200、插件被拒"的来源。
+
+修复两处（缺一不可）：
+
+- `chunk.ts`：新增 `safeSlice()`，截断不切开代理对（宁可少取 1 个码元）；
+  `buildEmbedTexts` 的三处 `slice` 全部替换。
+- `chunk.ts`：新增 `stripLoneSurrogates()`，剔除孤立代理与 NUL、保留合法代理对；
+  在 [buildEmbedRequestBody](src/engine/embed.ts)（**批量与单条的唯一收口**）出站前净化。
+  仅修截断逻辑救不回**存量数据** —— 库里可能已存有早前截断的产物，必须在发送侧净化。
+
+### Fixed — `clearAllNodes` 改用分批提交（单个超大事务会耗尽事务内存）
+
+回答「清空库是否逐条处理」：**本来就是单条 Cypher 全量批量**，不是逐条 ——
+`MATCH (n) DETACH DELETE n`；模型迁移清空向量也是单条 `SET n.embedding = null`。
+
+但「一条语句」= **单个超大事务**：上万节点会撑爆事务内存
+（`dbms.memory.transaction.total.max` → `OutOfMemoryError`）。现改为官方推荐的
+`CALL { … } IN TRANSACTIONS OF 10000 ROWS`（语义不变、仍返回删除总数），
+并保留单语句回落（老版本 Neo4j）。
+
+新增测试：[test/embed-json-safety.test.ts](test/embed-json-safety.test.ts) 8 个用例
+（openai 格式不含 Ollama 专有字段、safeSlice 不切代理对且不误伤、净化保留合法代理对、
+800 字符真实切片点端到端）；
+[test/clear-all-nodes.test.ts](test/clear-all-nodes.test.ts) 2 个用例（分批优先 + 回落）。
+
 ### Added — 嵌入请求的诊断与连接复用探测（412 / transport 层错误）
 
 现场出现**第二个**、语义完全不同的症状（同一 URL/模型，curl 200、插件被拒）：

@@ -120,6 +120,57 @@ export function chunkText(text: string, opts: Partial<ChunkOptions> = {}): strin
 }
 
 /**
+ * v2.8.x: **代理对安全**的截断。
+ *
+ * 缺陷背景：JS 的 `String.prototype.slice` 按 **UTF-16 码元**切割。若切点落在
+ * 代理对（emoji / CJK 扩展字 / 部分符号）中间，会切出**孤立代理项**
+ * （如 `"👍".slice(0,1)` → `"\uD83D"`）。后果有两层：
+ *   ① 语义损坏：送到嵌入模型的文本在字符中间断掉；
+ *   ② 传输层面：`JSON.stringify` 会把它输出为**未配对代理转义** `\ud83d`，
+ *      而部分严格 JSON 解析器（serde_json、部分 C++/Go 严格模式）会**直接拒绝**，
+ *      表现为 `Cannot parse JSON body` —— 纯中文/ASCII 的 curl 测试永远复现不到。
+ *
+ * 规则：若 `max` 处恰好把一对高/低代理拆开，则少取一位（宁可短 1 个码元）。
+ */
+export function safeSlice(text: string, max: number): string {
+  if (text.length <= max) return text;
+  if (max <= 0) return "";
+  const prev = text.charCodeAt(max - 1);
+  const next = text.charCodeAt(max);
+  const splitPair =
+    prev >= 0xd800 && prev <= 0xdbff && // 高代理
+    next >= 0xdc00 && next <= 0xdfff; // 低代理
+  return text.slice(0, splitPair ? max - 1 : max);
+}
+
+/**
+ * v2.8.x: 移除字符串中的**孤立代理项**（保留合法的代理对），并剔除 NUL。
+ *
+ * 用途：出站前净化。库里的历史内容可能**已经**含有早前截断产生的孤立代理
+ * （旧版本 `slice` 的产物）—— 仅修截断逻辑救不回存量数据，必须在发送前净化，
+ * 否则这些节点会持续失败，且看起来像"服务端问题"。
+ */
+export function stripLoneSurrogates(text: string): string {
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      // 高代理：必须紧跟低代理才保留
+      const n = i + 1 < text.length ? text.charCodeAt(i + 1) : 0;
+      if (n >= 0xdc00 && n <= 0xdfff) {
+        out += text[i] + text[i + 1];
+        i++;
+      } // 否则丢弃（孤立高代理）
+      continue;
+    }
+    if (c >= 0xdc00 && c <= 0xdfff) continue; // 孤立低代理 → 丢弃
+    if (c === 0x0000) continue; // NUL → 丢弃（对嵌入无语义价值，且是解析器常见拒收项）
+    out += text[i];
+  }
+  return out;
+}
+
+/**
  * 构造用于嵌入的文本：`name: description\ncontent`
  *
  * 点2：记忆切片长度由 memorySliceChars 控制（覆盖旧版硬编码 500）。
@@ -142,7 +193,7 @@ export function buildEmbedTexts(params: {
 
   const chunkingEnabled = params.chunking?.enabled ?? false;
   if (!chunkingEnabled) {
-    return { texts: [full.slice(0, sliceChars)], chunked: false };
+    return { texts: [safeSlice(full, sliceChars)], chunked: false };
   }
 
   const chunking = params.chunking;
@@ -151,8 +202,8 @@ export function buildEmbedTexts(params: {
     chunkOverlap: chunking?.chunkOverlap,
   });
   if (chunks.length <= 1) {
-    return { texts: [full.slice(0, sliceChars)], chunked: false };
+    return { texts: [safeSlice(full, sliceChars)], chunked: false };
   }
   // 分块模式下每段再按 memorySliceChars 兜底截断（防止单段仍过长）
-  return { texts: chunks.map((c) => c.slice(0, sliceChars)), chunked: true };
+  return { texts: chunks.map((c) => safeSlice(c, sliceChars)), chunked: true };
 }
