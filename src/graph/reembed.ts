@@ -157,7 +157,9 @@ export async function reEmbedNodes(
               log.warn(
                 `reEmbed: ${failures.length}/${items.length} nodes failed batch embed` +
                   (emptyTextCount > 0 ? ` (${emptyTextCount} empty-text nodes skipped)` : "") +
-                  `. Check embedding model "${embeddingModel ?? ""}" is pulled in Ollama, baseURL reachable, and dimensions match index (embed.ts expects ${cfg?.embedding?.dimensions ?? "configured dim"})`,
+                  `. 排查：确认端点可达且模型名正确 —— 注意提示要按实际 apiFormat 判断，` +
+                  `不要默认 Ollama（OVMS/OpenAI 兼容端点走 /embeddings，模型名通常是 OVMS 里的模型目录名）。` +
+                  `期望维度 ${cfg?.embedding?.dimensions ?? "configured dim"}`,
                 { sample },
               );
             },
@@ -168,7 +170,7 @@ export async function reEmbedNodes(
           // v2.8.x: 整批 0 成功且确实发起了嵌入 → 记录提示（子批次错误被 batchEmbedFn 吞掉，
           // 需要日志/诊断才能定位，如 Ollama 模型 404、baseURL 不可达）
           if (embedded === 0 && items.length > 0 && !lastError) {
-            lastError = `batch embed returned 0/${items.length} vectors (check embedding model "${embeddingModel ?? ""}" is pulled in Ollama, baseURL and Ollama logs)`;
+            lastError = `batch embed returned 0/${items.length} vectors (model="${embeddingModel ?? ""}"; 检查端点可达性、apiFormat 是否与后端匹配、以及模型名 —— 详见同批的 "batch sub-batch failed" 日志中的 url/error)`;
             log.warn(`reEmbed: ${lastError}`);
           }
           await new Promise((r) => setTimeout(r, 200));

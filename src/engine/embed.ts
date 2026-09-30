@@ -606,7 +606,11 @@ export function createBatchEmbedFn(config: EmbeddingConfig): BatchEmbedFn {
           // v2.8.x: 记录错误到日志——此前完全静默，Ollama 模型 404 / baseURL 不可达时
           // 会表现为"全部嵌入失败"且无任何线索（如 gm_reembed failed=37319）。
           // 带 baseURL + 首个文本前缀，便于快速定位是连接/模型/输入问题。
-          log.warn(`batch sub-batch failed (${idxs.length} texts)`, { model: c.model, baseURL: c.baseURL, error: (err as Error)?.message ?? String(err) });
+          log.warn(`batch sub-batch failed (${idxs.length} texts)`, {
+            url: c.url, apiFormat: c.apiFormat, model: c.model, baseURL: c.baseURL,
+            expectedDim: c.expectedDim,
+            error: (err as Error)?.message ?? String(err),
+          });
         } finally {
           release();
         }

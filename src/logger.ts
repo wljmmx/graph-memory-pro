@@ -101,6 +101,16 @@ export function getTraceId(): string | null {
 
 // ── Logger 实现 ──────────────────────────────────────────
 
+/**
+ * v2.8.x: 外发日志中 fields 的最大字符数。
+ * 截断而非丢弃：宁可看到被截断的 HTTP 错误体，也不要只看到一句无信息量的摘要。
+ */
+const MAX_EXTERNAL_FIELDS_CHARS = 1000;
+
+function truncateForLog(s: string, max: number): string {
+  return s.length <= max ? s : `${s.slice(0, max)}…(truncated ${s.length - max} chars)`;
+}
+
 class StructuredLogger implements Logger {
   private readonly namespace: string;
 
@@ -151,7 +161,19 @@ class StructuredLogger implements Logger {
 
     // 外部 logger 优先（SDK 集成）
     if (_externalLogger) {
-      const formatted = `[graph-memory-pro:${this.namespace}] ${msg}`;
+      /**
+       * v2.8.x: fields 必须**拼进 msg**。
+       *
+       * 宿主的插件 logger 只渲染第一个参数（实测：[graph-memory-pro:embed]
+       * "batch sub-batch failed (8 texts)" 后原本应跟随的 { model, baseURL, error } 整段消失），
+       * 于是所有结构化上下文在生产日志里都不可见 —— 嵌入全失败时看不到真正的 HTTP 错误体，
+       * 只能看到一句无信息量的摘要。这里把 fields 内联并按长度截断，保证关键诊断可见。
+       * 第二个参数仍照传，兼容会渲染结构化 metadata 的宿主。
+       */
+      const fieldsStr = fields && Object.keys(fields).length > 0
+        ? " " + truncateForLog(JSON.stringify(fields), MAX_EXTERNAL_FIELDS_CHARS)
+        : "";
+      const formatted = `[graph-memory-pro:${this.namespace}] ${msg}${fieldsStr}`;
       const fn = _externalLogger[level];
       if (typeof fn === "function") {
         try {

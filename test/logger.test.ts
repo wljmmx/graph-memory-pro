@@ -143,6 +143,40 @@ describe("StructuredLogger", () => {
     expect(call[0]).toContain("forwarded");
   });
 
+  it("v2.8.x: 转发到外部 logger 时 fields 必须内联进 msg（宿主只渲染第一个参数）", () => {
+    // 回归背景：宿主的插件 logger 只渲染第一个参数，此前 fields 只作为第二个参数传出，
+    // 导致生产日志里只剩 "batch sub-batch failed (8 texts)"，真正的 HTTP 错误体整段丢失。
+    const externalLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    setExternalLogger(externalLog);
+    const log = createLogger("embed");
+    log.warn("batch sub-batch failed (8 texts)", {
+      url: "http://ovms:9000/v3/embeddings",
+      apiFormat: "openai",
+      model: "qwen-embedding",
+      error: "Embedding API 400: {\"error\":\"input must be a string\"}",
+    });
+
+    const msg = externalLog.warn.mock.calls[0][0] as string;
+    expect(msg).toContain("batch sub-batch failed (8 texts)");
+    // 关键上下文必须可见
+    expect(msg).toContain("http://ovms:9000/v3/embeddings");
+    expect(msg).toContain("openai");
+    expect(msg).toContain("qwen-embedding");
+    expect(msg).toContain("Embedding API 400");
+    // 第二个参数仍照传（兼容会渲染结构化 metadata 的宿主）
+    expect(externalLog.warn.mock.calls[0][1]).toMatchObject({ apiFormat: "openai" });
+  });
+
+  it("v2.8.x: 超长 fields 截断而非丢弃", () => {
+    const externalLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    setExternalLogger(externalLog);
+    const log = createLogger("embed");
+    log.warn("big", { error: "x".repeat(5000) });
+    const msg = externalLog.warn.mock.calls[0][0] as string;
+    expect(msg).toContain("truncated");
+    expect(msg.length).toBeLessThan(1400);
+  });
+
   it("外部 logger 抛错时 fallback 到 stdout", () => {
     const failingExternal = {
       info: () => { throw new Error("external logger broken"); },

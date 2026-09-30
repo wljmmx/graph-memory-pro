@@ -72,6 +72,14 @@
 
 ### Changed — 可观测性
 
+- **`logger.ts`：接入宿主 logger 时把 `fields` 内联进 `msg`（超长截断）**。
+  宿主插件 logger 只渲染第一个参数，此前 `fields` 仅作为第二个参数传出 → 生产日志里
+  `batch sub-batch failed (8 texts)` 之后本应跟随的 `{ url, apiFormat, model, error }`
+  整段消失，嵌入全失败时看不到真正的 HTTP 响应体。这是**全局性**的：所有模块的结构化
+  上下文在宿主日志中都不可见。
+- `embed.ts`：批量子批次失败日志补 `url` / `apiFormat` / `expectedDim`（此前只有 `baseURL`）
+- `graph/reembed.ts`：失败提示不再硬编码「is pulled in Ollama」—— 非 Ollama 后端
+  （OVMS / OpenAI 兼容）会被误导到错误方向；改为后端无关的排查指引
 - `extractor/extract.ts`：LLM 异常不再静默返回空结果（此前无法区分「LLM 不可用」与「确实无可提取内容」）
 - `incremental-maintenance.ts`：脏节点读取失败不再静默返回空集（「读取失败」与「无脏节点」同形）
 - `graph/community.ts`：社区检测顶层吞错不再静默返回空（维护日志的 `community: 0` 与「确无社区」同形）
