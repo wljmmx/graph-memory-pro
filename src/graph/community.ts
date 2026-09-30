@@ -15,7 +15,7 @@ import { updateCommunities, upsertCommunitySummary, pruneCommunitySummaries } fr
 import { getSummarizedCommunityIds } from "../store/community.ts";
 import { ALL_REL_TYPES } from "../utils.ts";
 import { getCircuitBreaker } from "../engine/circuit-breaker.ts";
-import { createLogger } from "../logger.ts";
+import { createLogger, describeError } from "../logger.ts";
 
 const log = createLogger("community");
 
@@ -137,7 +137,7 @@ export async function detectCommunities(driver: Driver, maxIter = 50): Promise<C
     // v2.8.x: 此前静默返回空结果 —— 维护日志随后会打印 `community: 0`，
     // 与「图中确实没有社区」完全同形，社区检测长期失效不可观测。
     log.warn("detectCommunities failed — returning empty result (communities will not be updated)", {
-      error: (err as Error)?.message ?? String(err),
+      error: (err as Error)?.message ?? describeError(err),
     });
     try { await session.run("CALL gds.graph.drop($graphName)", { graphName }); } catch { /* drop 失败无需额外处理 */ }
     return { labels: new Map(), communities: new Map(), count: 0 };
@@ -613,7 +613,7 @@ export async function summarizeCommunities(
           const embedText = `${cleanedSummary}\n${members.map(m => m.name).join(", ")}`;
           embedding = await embedFn(embedText);
         } catch (err) {
-          log.warn("community embedding failed", { communityId, error: String(err) });
+          log.warn("community embedding failed", { communityId, error: describeError(err) });
         }
       }
 
@@ -625,11 +625,11 @@ export async function summarizeCommunities(
       // 不再继续 fallback 兜底，避免和 lossless-claw compaction 抢队列。
       if (isOverloadedError(err)) {
         overloadedHit = true;
-        log.warn("community summary hit LLM overload — abort remaining communities, retry on next maintenance", { communityId, error: String(err) });
+        log.warn("community summary hit LLM overload — abort remaining communities, retry on next maintenance", { communityId, error: describeError(err) });
         break;
       }
       // 非过载错误（超时/截断/网络等）→ 沿用原 fallback 兜底逻辑
-      log.warn("community summary failed — fallback to member-based summary", { communityId, error: String(err) });
+      log.warn("community summary failed — fallback to member-based summary", { communityId, error: describeError(err) });
       const fallback = buildFallbackSummary(communityId, members);
       let embedding: number[] | undefined;
       if (embedFn) {

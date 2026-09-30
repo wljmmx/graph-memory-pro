@@ -28,7 +28,7 @@ import { getSession } from "../store/db.ts";
 import {
   dedup, type DedupResult,
 } from "./dedup.ts";
-import { createLogger } from "../logger.ts";
+import { createLogger, describeError } from "../logger.ts";
 
 const log = createLogger("incremental-maintenance");
 
@@ -87,7 +87,7 @@ export async function getDirtyNodeIds(driver: Driver): Promise<string[]> {
     // v2.8.x: 此前静默返回 [] —— 「读取失败」与「确实没有脏节点」完全同形，
     // 增量维护会静默什么都不做，而日志上看不出任何异常。
     log.warn("getDirtyNodeIds: query failed — returning empty set (incremental maintenance will no-op)", {
-      error: (err as Error)?.message ?? String(err),
+      error: (err as Error)?.message ?? describeError(err),
     });
     return [];
   } finally {
@@ -434,7 +434,7 @@ export async function runIncrementalMaintenance(
       dedupResult = await dedup(driver, cfg);
       phasesRun.push("dedup");
     } catch (err) {
-      log.warn("incremental dedup failed", { error: String(err) });
+      log.warn("incremental dedup failed", { error: describeError(err) });
     }
 
     // Phase 5 局部 staleness
@@ -444,7 +444,7 @@ export async function runIncrementalMaintenance(
         stalenessResult = await incrementalStaleness(driver, dirtyNodeIds);
         phasesRun.push("staleness");
       } catch (err) {
-        log.warn("incremental staleness failed", { error: String(err) });
+        log.warn("incremental staleness failed", { error: describeError(err) });
       }
     }
 
@@ -454,7 +454,7 @@ export async function runIncrementalMaintenance(
       importanceResult = await incrementalImportance(driver, cfg, dirtyNodeIds);
       if (importanceResult) phasesRun.push("importance");
     } catch (err) {
-      log.warn("incremental importance failed", { error: String(err) });
+      log.warn("incremental importance failed", { error: describeError(err) });
     }
 
     // Phase 8 局部冲突消解
@@ -463,7 +463,7 @@ export async function runIncrementalMaintenance(
       conflictResult = await incrementalConflictResolution(driver, cfg, dirtyNodeIds);
       if (conflictResult) phasesRun.push("conflictResolution");
     } catch (err) {
-      log.warn("incremental conflict resolution failed", { error: String(err) });
+      log.warn("incremental conflict resolution failed", { error: describeError(err) });
     }
 
     // Phase 9 局部边权重
@@ -472,7 +472,7 @@ export async function runIncrementalMaintenance(
       edgeWeightsResult = await incrementalEdgeWeights(driver, cfg, dirtyNodeIds);
       if (edgeWeightsResult) phasesRun.push("edgeWeights");
     } catch (err) {
-      log.warn("incremental edge weights failed", { error: String(err) });
+      log.warn("incremental edge weights failed", { error: describeError(err) });
     }
 
     // 清除脏节点标记

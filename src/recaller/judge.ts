@@ -20,7 +20,7 @@
 
 import type { GmNode } from "../types.ts";
 import type { CompleteFn } from "../engine/llm.ts";
-import { createLogger } from "../logger.ts";
+import { createLogger, describeError } from "../logger.ts";
 import { withTimeoutSignal } from "../utils.ts";
 
 const log = createLogger("judge");
@@ -232,7 +232,7 @@ export class LlmJudgeStrategy implements JudgeStrategy {
       };
     } catch (err) {
       // LLM 失败 / 超时 / 解析失败 → fallback 到 Tier 1 启发式
-      log.warn("Tier 2 LLM judge failed, fallback to Tier 1", { error: String(err) });
+      log.warn("Tier 2 LLM judge failed, fallback to Tier 1", { error: describeError(err) });
       const result = await this.fallback.judge(nodes, reply);
       return { ...result, effectiveTier: 1 };
     }
@@ -473,7 +473,7 @@ export class JudgeManager {
     // 异步模式（默认）：fire-and-forget，但内部仍会执行 onFeedback
     if (this.cfg.asyncMode && !forceSync) {
       this.processTurnAsync(query, recalledNodes, assistantReply, sessionId, onFeedback)
-        .catch(err => log.warn("judge async failed", { error: String(err) }));
+        .catch(err => log.warn("judge async failed", { error: describeError(err) }));
       return null;
     }
 
@@ -502,7 +502,7 @@ export class JudgeManager {
       try {
         await onFeedback(feedback);
       } catch (err) {
-        log.warn("feedback handler failed", { error: String(err) });
+        log.warn("feedback handler failed", { error: describeError(err) });
       }
     }
     return feedback;

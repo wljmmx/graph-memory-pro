@@ -9,6 +9,9 @@ import type { Driver } from "neo4j-driver";
 import type { GmConfig } from "../types.ts";
 import { getSession } from "../store/db.ts";
 import { findById, mergeNodes } from "../store/store.ts";
+import { createLogger, describeError } from "../logger.ts";
+
+const log = createLogger("dedup");
 
 export interface DuplicatePair {
   nodeA: string;
@@ -32,39 +35,87 @@ export interface DedupResult {
 export async function detectDuplicates(driver: Driver, cfg: GmConfig): Promise<DuplicatePair[]> {
   const session = getSession(driver);
   try {
-    const result = await session.run(
-      `MATCH (a:Task|Skill|Event {status: 'active'})
+    /**
+     * v2.8.x: 优先用内建 `vector.similarity.cosine()`，失败才回落到「列表下标」版。
+     *
+     * 动因：旧实现用
+     *   `reduce(dot = 0.0, i IN range(0, size(va) - 1) | dot + va[i] * vb[i])`
+     * 这是对 `LIST<FLOAT>` 的**下标索引**。而 Neo4j 2025+ 引入原生 VECTOR 类型后，
+     * 被向量索引索引的属性可能以 VECTOR 物化（驱动侧表现为 `Float64Vector`），
+     * 此时 `size()` / `va[i]` 都不成立 —— 现场报错正是
+     * `Neo4jError: Float64Vector[...]`（Neo4j 把该值塞进错误消息，长达 4 万字符，
+     * 把真正的错误码彻底淹没），dedup 阶段整段失败。
+     *
+     * `vector.similarity.cosine()` 对 VECTOR 与 LIST<FLOAT> 都成立，且是官方推荐用法；
+     * 维度不一致时返回 null（被 `cosineSimilarity IS NOT NULL` 过滤掉），不必再手写
+     * sqrt/norm。老版本 Neo4j 没有该函数 → 回落到下标版，行为与旧实现一致。
+     */
+    const pairs = await (async () => {
+      try {
+        return await runCosineQuery(session, cfg, "vector");
+      } catch (err) {
+        log.warn(
+          "dedup: vector.similarity.cosine path failed — falling back to list-index cosine " +
+            "(若两条路径都失败，说明 embedding 既不是 VECTOR 也不能下标索引)",
+          { error: describeError(err) },
+        );
+        return await runCosineQuery(session, cfg, "listIndex");
+      }
+    })();
+
+    return pairs;
+  } finally {
+    await session.close();
+  }
+}
+
+/**
+ * 执行余弦相似度配对查询。
+ *
+ * @param mode "vector" 用内建 vector.similarity.cosine（兼容 VECTOR 与 LIST<FLOAT>）；
+ *             "listIndex" 用 reduce + 下标（仅适用于 LIST<FLOAT>，老版本 Neo4j 回落路径）
+ */
+async function runCosineQuery(
+  session: ReturnType<typeof getSession>,
+  cfg: GmConfig,
+  mode: "vector" | "listIndex",
+): Promise<DuplicatePair[]> {
+  const similarityExpr = mode === "vector"
+    ? `vector.similarity.cosine(a.embedding, b.embedding) AS cosineSimilarity`
+    : `reduce(dot = 0.0, i IN range(0, size(va) - 1) | dot + va[i] * vb[i]) AS dotProduct,
+         sqrt(reduce(sq = 0.0, i IN range(0, size(va) - 1) | sq + va[i] * va[i])) AS normA,
+         sqrt(reduce(sq = 0.0, i IN range(0, size(vb) - 1) | sq + vb[i] * vb[i])) AS normB`;
+
+  const midClause = mode === "vector"
+    ? `WITH a, b, ${similarityExpr}
+       WHERE cosineSimilarity IS NOT NULL AND cosineSimilarity >= $threshold`
+    : `WITH a, b, a.embedding AS va, b.embedding AS vb
+       WITH a, b, va, vb, ${similarityExpr}
+       WHERE size(va) = size(vb) AND normA > 0 AND normB > 0
+       WITH a, b, dotProduct / (normA * normB) AS cosineSimilarity
+       WHERE cosineSimilarity >= $threshold`;
+
+  const result = await session.run(
+    `MATCH (a:Task|Skill|Event {status: 'active'})
        WHERE a.embedding IS NOT NULL
        WITH a
        MATCH (b:Task|Skill|Event {status: 'active'})
        WHERE b.embedding IS NOT NULL
          AND a.id < b.id
          AND a.type = b.type
-       WITH a, b,
-         a.embedding AS va,
-         b.embedding AS vb
-       WITH a, b, va, vb,
-         reduce(dot = 0.0, i IN range(0, size(va) - 1) | dot + va[i] * vb[i]) AS dotProduct,
-         sqrt(reduce(sq = 0.0, i IN range(0, size(va) - 1) | sq + va[i] * va[i])) AS normA,
-         sqrt(reduce(sq = 0.0, i IN range(0, size(vb) - 1) | sq + vb[i] * vb[i])) AS normB
-       WHERE size(va) = size(vb) AND normA > 0 AND normB > 0
-       WITH a, b, dotProduct / (normA * normB) AS cosineSimilarity
-       WHERE cosineSimilarity >= $threshold
+       ${midClause}
        RETURN a.id AS nodeA, a.name AS nameA, b.id AS nodeB, b.name AS nameB, cosineSimilarity AS score
        ORDER BY score DESC`,
-      { threshold: cfg.dedupThreshold },
-    );
+    { threshold: cfg.dedupThreshold },
+  );
 
-    return result.records.map((r) => ({
-      nodeA: r.get("nodeA"),
-      nodeB: r.get("nodeB"),
-      nameA: r.get("nameA"),
-      nameB: r.get("nameB"),
-      similarity: r.get("score"),
-    }));
-  } finally {
-    await session.close();
-  }
+  return result.records.map((r) => ({
+    nodeA: r.get("nodeA"),
+    nodeB: r.get("nodeB"),
+    nameA: r.get("nameA"),
+    nameB: r.get("nameB"),
+    similarity: r.get("score"),
+  }));
 }
 
 export async function dedup(driver: Driver, cfg: GmConfig): Promise<DedupResult> {

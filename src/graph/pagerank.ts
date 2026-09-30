@@ -8,7 +8,7 @@ import type { Driver, Session } from "neo4j-driver";
 import type { GmConfig } from "../types.ts";
 import { getSession } from "../store/db.ts";
 import { logPhase } from "../timing.ts";
-import { createLogger } from "../logger.ts";
+import { createLogger, describeError } from "../logger.ts";
 import { ALL_REL_TYPES } from "../utils.ts";
 
 const log = createLogger("pagerank");
@@ -377,7 +377,7 @@ export async function computeGlobalPageRank(driver: Driver, cfg: GmConfig): Prom
   } catch (err) {
     // 不在 catch 路径中复用原 session（可能已 closed，session.run 会抛
     // "You cannot run more transactions on a closed session" 二次错误，掩盖原始错误）。
-    log.warn("computeGlobalPageRank failed", { error: String(err) });
+    log.warn("computeGlobalPageRank failed", { error: describeError(err) });
     _cachedRelTypeHash = null;
     _cachedTimestamp = 0;
     return { scores: new Map(), topK: [] };

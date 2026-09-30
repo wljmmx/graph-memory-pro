@@ -26,7 +26,7 @@ import { createEmbedFn, createBatchEmbedFn } from "../engine/embed.ts";
 import { runBenchmark, formatAggregateReport } from "./runner.ts";
 import { resolveBenchmarkDataDir } from "./dataDir.ts";
 import type { GmConfig } from "../types.ts";
-import { createLogger } from "../logger.ts";
+import { createLogger, describeError } from "../logger.ts";
 
 const log = createLogger("benchmark-cli");
 
@@ -78,7 +78,7 @@ function readConfigFromOpenclaw(): GmConfig | null {
       pagerankIterations: cfg.pagerankIterations ?? 20,
     };
   } catch (err) {
-    log.warn("[benchmark] 读取 openclaw.json 失败", { error: (err as Error)?.message ?? String(err) });
+    log.warn("[benchmark] 读取 openclaw.json 失败", { error: (err as Error)?.message ?? describeError(err) });
     return null;
   }
 }
@@ -182,7 +182,7 @@ async function main(): Promise<void> {
     setCachedEdition(edition);
     log.info(`Neo4j edition: ${edition ?? "(unknown)"} (multi-database isolation: ${edition === "Enterprise" ? "enabled" : "not available — falling back to logical isolation"})`);
   } catch (err) {
-    log.warn("Neo4j edition detection failed (multi-db isolation disabled, logical isolation fallback)", { error: String(err) });
+    log.warn("Neo4j edition detection failed (multi-db isolation disabled, logical isolation fallback)", { error: describeError(err) });
   }
 
   // 2. 初始化 schema
@@ -200,7 +200,7 @@ async function main(): Promise<void> {
     await ensureDatabase(driver, benchDatabase);
     await withDatabase(benchDatabase, () => ensureSchema(driver, embedDim));
   } catch (err) {
-    log.warn("Schema init failed", { error: String(err) });
+    log.warn("Schema init failed", { error: describeError(err) });
   }
 
   // 3. 初始化 LLM / Embed
@@ -241,6 +241,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  log.error(String(err));
+  log.error(describeError(err));
   process.exit(1);
 });

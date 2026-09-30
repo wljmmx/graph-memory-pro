@@ -17,7 +17,7 @@ import { embedNodesMissing } from "../store/embed-helper.ts";
 import { getCircuitBreaker } from "../engine/circuit-breaker.ts";
 import { getSessionMessages, getSessionMessagesPageTolerant, listAllSessionKeys, markMessagesProcessed } from "../store/messages.ts";
 import { heuristicExtract } from "../extractor/extract.ts";
-import { createLogger } from "../logger.ts";
+import { createLogger, describeError } from "../logger.ts";
 
 const log = createLogger("extract");
 
@@ -225,7 +225,7 @@ export async function extractInterimTexts(
       }
     } catch (err) {
       llmBreaker.recordFailure();
-      log.debug("extract interim text failed", { error: String(err) });
+      log.debug("extract interim text failed", { error: describeError(err) });
     }
   }
   return extracted;

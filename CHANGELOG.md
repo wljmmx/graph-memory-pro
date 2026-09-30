@@ -70,6 +70,39 @@
 缓存条目记录写入时的修订号、读取时比对。纯重复抽取不递增（否则缓存形同虚设）。
 同时把缓存键由 32-bit djb2 换为 64-bit FNV-1a —— 旧键会碰撞并返回**另一条 query** 的结果。
 
+### Fixed — dedup 余弦查询对 Neo4j 原生 VECTOR 类型不兼容
+
+现场报错（maintenance Phase 1）：
+
+```
+dedup failed {"error":"Neo4jError: Float64Vector[0.0384…（截断 40008 字符）"}
+```
+
+`detectDuplicates` 的余弦计算是对 `LIST<FLOAT>` 做**下标索引**：
+
+```cypher
+reduce(dot = 0.0, i IN range(0, size(va) - 1) | dot + va[i] * vb[i])
+```
+
+Neo4j 2025+ 引入原生 **VECTOR** 类型后，被向量索引索引的属性可能以 VECTOR 物化
+（驱动侧即 `Float64Vector`），此时 `size()` / `va[i]` 都不成立 → dedup 阶段**整段失败**，
+且 Neo4j 把该值塞进错误消息（4 万字符），真正的错误码被彻底淹没。
+
+现改为优先用内建 `vector.similarity.cosine()`（对 VECTOR 与 LIST<FLOAT> **都成立**，
+且是官方推荐用法；维度不一致返回 null，无需手写 sqrt/norm），
+失败才回落到原下标版（保证老版本 Neo4j 行为不回归）。两条路径都失败才向上抛。
+
+### Fixed — 错误日志改用 `describeError`（不再 `String(err)` 全量倾泻）
+
+`String(err)` 会原样打出整个 `message`。上面的 4 万字符向量就是这么灌进日志的，
+**错误码被埋在中间**。新增 [describeError()](src/logger.ts)：优先 `code`
+（`Neo.ClientError.Statement.TypeError` 等），message 截断到 400 字符。
+**全仓 34 处 `error: String(err)` 已统一替换**（maintenance / incremental-maintenance /
+community / dedup / recall / judge / pagerank / extract-service / benchmark-cli）。
+
+新增 [test/dedup-vector-type.test.ts](test/dedup-vector-type.test.ts) 6 个用例
+（vector 路径不做下标索引、回落路径保持下标实现、双路失败才抛、describeError 摘要与截断）。
+
 ### Added — `embedding.requestIntervalMs`：请求发送节流（pacing）
 
 **回答「n 个子批次是否有间隔发送」：没有间隔。** `Promise.all` 把全部子批次**一次性排队**，

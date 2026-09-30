@@ -21,7 +21,7 @@ import { QueryCache } from "./query-cache.ts";
 import { JudgeManager } from "./judge.ts";
 import { AssociationMatrix } from "./association-matrix.ts";
 import { temporalRecency, combineScore, computeChunkSimilarities } from "./rerank.ts";
-import { createLogger } from "../logger.ts";
+import { createLogger, describeError } from "../logger.ts";
 
 const log = createLogger("recaller");
 
@@ -263,7 +263,7 @@ export class Recaller {
             try {
               await this.updateAssociationMatrix(query, fb.usedNodeIds, fb.unusedNodeIds);
             } catch (err) {
-              log.warn("M update failed", { error: String(err) });
+              log.warn("M update failed", { error: describeError(err) });
             }
           }
 
@@ -277,7 +277,7 @@ export class Recaller {
       // feedback 在同步模式下有值（已通过回调处理），异步模式下为 null（回调已在后台执行）
       void feedback;
     } catch (err) {
-      log.warn("feedback persistence failed", { error: String(err) });
+      log.warn("feedback persistence failed", { error: describeError(err) });
     }
   }
 
@@ -322,7 +322,7 @@ export class Recaller {
       queryVec = await this.embed(query);
     } catch (err) {
       // v2.8.x: embed 失败（Ollama 超时/排队/熔断）——记录根因，不再静默吞掉
-      log.warn("M update skipped: query embed failed", { error: String(err) });
+      log.warn("M update skipped: query embed failed", { error: describeError(err) });
       this.associationMatrix.recordLearningSample(fbCount, true, "embed-failed");
       return;
     }
@@ -396,7 +396,7 @@ export class Recaller {
         matchedBy: "get-signal",
       });
     } catch (err) {
-      log.warn("get-based feedback persistence failed", { error: String(err) });
+      log.warn("get-based feedback persistence failed", { error: describeError(err) });
     }
 
     // 累计反馈计数（用于冷启动判断）
@@ -407,7 +407,7 @@ export class Recaller {
       await this.updateAssociationMatrix(query, finalUsed, unusedNodeIds);
       log.debug("get-based M update", { used: finalUsed.length, unused: unusedNodeIds.length });
     } catch (err) {
-      log.warn("get-based M update failed", { error: String(err) });
+      log.warn("get-based M update failed", { error: describeError(err) });
     }
   }
 

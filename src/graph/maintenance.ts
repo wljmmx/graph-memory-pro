@@ -18,7 +18,7 @@ import { computeGlobalPageRank, type GlobalPageRankResult } from "./pagerank.ts"
 import { detectCommunities, detectHierarchicalCommunities, summarizeCommunities, type CommunityResult } from "./community.ts";
 import { dedup, type DedupResult } from "./dedup.ts";
 import { getSession } from "../store/db.ts";
-import { createLogger } from "../logger.ts";
+import { createLogger, describeError } from "../logger.ts";
 
 const log = createLogger("maintenance");
 
@@ -215,7 +215,7 @@ export async function runMaintenance(
       const edgeResult = await deriveRelatesFromMentions(driver);
       log.info("repair edges: created", { created: edgeResult.relatesToCreated });
     } catch (err) {
-      log.warn("repair edges failed", { error: String(err) });
+      log.warn("repair edges failed", { error: describeError(err) });
     }
     _lockTimestamp = Date.now(); // refresh lock
 
@@ -225,7 +225,7 @@ export async function runMaintenance(
       dedupResult = await dedup(driver, cfg);
       log.info("dedup: merged", { merged: dedupResult.merged, pairs: dedupResult.pairs.length });
     } catch (err) {
-      log.warn("dedup failed", { error: String(err) });
+      log.warn("dedup failed", { error: describeError(err) });
     }
     _lockTimestamp = Date.now(); // refresh lock
 
@@ -235,7 +235,7 @@ export async function runMaintenance(
       pagerankResult = await computeGlobalPageRank(driver, cfg);
       log.info("pagerank: topK", { topK: pagerankResult.topK.length });
     } catch (err) {
-      log.warn("pagerank failed", { error: String(err) });
+      log.warn("pagerank failed", { error: describeError(err) });
     }
     _lockTimestamp = Date.now(); // refresh lock
 
@@ -267,7 +267,7 @@ export async function runMaintenance(
         log.info("community: communities", { communities: communityResult.count });
       }
     } catch (err) {
-      log.warn("community failed", { error: String(err) });
+      log.warn("community failed", { error: describeError(err) });
     }
     _lockTimestamp = Date.now(); // refresh lock
 
@@ -279,7 +279,7 @@ export async function runMaintenance(
         communitySummaries = await summarizeCommunities(driver, communityResult.communities, llm, embedFn, false, cfg);
         log.info("community summaries", { count: communitySummaries });
       } catch (err) {
-        log.warn("community summaries failed", { error: String(err) });
+        log.warn("community summaries failed", { error: describeError(err) });
       }
     }
 
@@ -291,7 +291,7 @@ export async function runMaintenance(
         timestampBackfillResult = await backfillTimestamps(driver);
         log.info("timestamp backfill", { scanned: timestampBackfillResult.scanned, backfilled: timestampBackfillResult.backfilled });
       } catch (err) {
-        log.warn("timestamp backfill failed", { error: String(err) });
+        log.warn("timestamp backfill failed", { error: describeError(err) });
       }
     }
     _lockTimestamp = Date.now(); // refresh lock
@@ -305,7 +305,7 @@ export async function runMaintenance(
           threshold: cfg?.staleness?.threshold ?? 0.7,
         });
       } catch (err) {
-        log.warn("staleness compute failed", { error: String(err) });
+        log.warn("staleness compute failed", { error: describeError(err) });
       }
     }
     _lockTimestamp = Date.now(); // refresh lock
@@ -331,7 +331,7 @@ export async function runMaintenance(
           }
         }
       } catch (err) {
-        log.warn("health check failed", { error: String(err) });
+        log.warn("health check failed", { error: describeError(err) });
       }
     }
     _lockTimestamp = Date.now(); // refresh lock
@@ -351,7 +351,7 @@ export async function runMaintenance(
           },
         );
       } catch (err) {
-        log.warn("importance compute failed", { error: String(err) });
+        log.warn("importance compute failed", { error: describeError(err) });
       }
     }
     _lockTimestamp = Date.now(); // refresh lock
@@ -372,7 +372,7 @@ export async function runMaintenance(
           },
         );
       } catch (err) {
-        log.warn("conflict resolution failed", { error: String(err) });
+        log.warn("conflict resolution failed", { error: describeError(err) });
       }
     }
     _lockTimestamp = Date.now();
@@ -394,7 +394,7 @@ export async function runMaintenance(
           );
         }
       } catch (err) {
-        log.warn("edge weight adjustment failed", { error: String(err) });
+        log.warn("edge weight adjustment failed", { error: describeError(err) });
       }
     }
     _lockTimestamp = Date.now();
@@ -416,7 +416,7 @@ export async function runMaintenance(
           );
         }
       } catch (err) {
-        log.warn("reverse memory failed", { error: String(err) });
+        log.warn("reverse memory failed", { error: describeError(err) });
       }
     }
     _lockTimestamp = Date.now();
@@ -446,7 +446,7 @@ export async function runMaintenance(
           migrated: migrationResult.needsMigration,
         };
       } catch (err) {
-        log.warn("embedding migration failed", { error: String(err) });
+        log.warn("embedding migration failed", { error: describeError(err) });
       }
     }
     _lockTimestamp = Date.now();
@@ -487,7 +487,7 @@ export async function runMaintenance(
           }
         }
       } catch (err) {
-        log.warn("self-heal failed", { error: String(err) });
+        log.warn("self-heal failed", { error: describeError(err) });
       }
     }
 

@@ -102,6 +102,30 @@ export function getTraceId(): string | null {
 // ── Logger 实现 ──────────────────────────────────────────
 
 /**
+ * v2.8.x: 从任意 error 提取**可观测摘要**，而不是 `String(err)`。
+ *
+ * 动因：`String(err)` 会把整个 `message` 原样打出。生产里出现过 message 就是
+ * 一个 4 万字符 `Float64Vector[...]` 字面量的情况（Neo4j 把向量对象当错误消息返回），
+ * 真正的错误码被彻底埋掉。统一规则：
+ *   1. 优先 `code`（Neo4j 的 `Neo.DatabaseError.*` / HTTP 的 `EADDRINUSE` 等）
+ *   2. 无 code → message 只取前 N 字符 + 省略标记
+ */
+const MAX_ERR_MESSAGE_CHARS = 400;
+
+export function describeError(err: unknown): string {
+  if (err == null) return "null";
+  if (typeof err === "string") return err.length > MAX_ERR_MESSAGE_CHARS ? `${err.slice(0, MAX_ERR_MESSAGE_CHARS)}…(truncated ${err.length - MAX_ERR_MESSAGE_CHARS} chars)` : err;
+  const e = err as { code?: unknown; message?: unknown };
+  const code = e.code != null ? String(e.code) : "";
+  const msg = e.message != null ? String(e.message) : "";
+  const core = code ? `${code}: ${msg}` : msg;
+  if (core.length > MAX_ERR_MESSAGE_CHARS) {
+    return `${core.slice(0, MAX_ERR_MESSAGE_CHARS)}…(truncated ${core.length - MAX_ERR_MESSAGE_CHARS} chars)`;
+  }
+  return core;
+}
+
+/**
  * v2.8.x: 外发日志中 fields 的最大字符数。
  * 截断而非丢弃：宁可看到被截断的 HTTP 错误体，也不要只看到一句无信息量的摘要。
  */
