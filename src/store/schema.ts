@@ -8,6 +8,9 @@ import type { Driver, Node, Relationship } from "neo4j-driver";
 import { createHash } from "crypto";
 import type { GmNode, GmEdge, EdgeType } from "../types.ts";
 import { getSession, getCachedEdition } from "./db.ts";
+import { createLogger, describeError } from "../logger.ts";
+
+const log = createLogger("store:schema");
 
 // ─── 共享工具 ───────────────────────────────────────────────
 
@@ -21,6 +24,101 @@ export function computeEmbeddingHash(name: string, description: string, content:
 }
 
 // ─── Schema 初始化 ──────────────────────────────────────────
+
+/**
+ * v2.8.x: Neo4j 2026.x 向量 Provider 与 HNSW / 量化参数。
+ *
+ * 规格来源（用户提供）：Neo4j 2026.x **不再支持全局默认 HNSW 环境变量**
+ * （`dbms.index.vector.default.*`），所有 HNSW / 量化参数必须写在建索引的
+ * `vectorConfig` 里，Provider 名为 `vector-2.0`。
+ *
+ * 另外区分两个 ef：
+ *   - `hnsw.efConstruction`：**建索引阶段**参数（越大构建越慢、召回越高）
+ *   - `efSearch`：**检索阶段**参数，只写在 `db.index.vector.queryNodes` 里，
+ *     建索引时不可配置 —— 见 ./vector-query.ts
+ */
+const VECTOR_PROVIDER_2_0 = "vector-2.0";
+const HNSW_M = 16;
+const HNSW_EF_CONSTRUCTION = 96;
+const SEARCH_EXPANSION_FACTOR = 2.0;
+
+/** 向量索引配置是否与该 Provider 期望一致（用于校验已有索引） */
+export interface VectorIndexReport {
+  name: string;
+  state?: string;
+  indexProvider?: string;
+  /** 是否已是 2026.x 的 vector-2.0 Provider */
+  isModernProvider: boolean;
+}
+
+/**
+ * v2.8.x: 创建向量索引 —— 三级回落，优先 2026.x 新语法。
+ *
+ *   ① `indexProvider: 'vector-2.0'` + `vectorConfig`（2026.x，参数集中在此）
+ *   ② 旧式 `indexConfig` + 反引号 `vector.*` 键（5.x ~ 2026 早期）
+ *   ③ 过程化 `db.index.vector.createNodeIndex`（更老版本）
+ *
+ * 返回实际生效的那一级，便于日志里确认用户环境到底用了哪种语法。
+ */
+async function createVectorIndexBestEffort(
+  session: { run: (q: string, p?: Record<string, unknown>) => Promise<unknown> },
+  indexName: string,
+  labelPattern: string,
+  prop: string,
+  dimension: number,
+  isEnterprise: boolean,
+): Promise<"vector-2.0" | "indexConfig" | "procedural" | "failed"> {
+  // ① 2026.x：参数全部写入 vectorConfig
+  const vectorConfigAttempts = isEnterprise
+    ? [
+        `{ indexProvider: '${VECTOR_PROVIDER_2_0}', vectorConfig: { dimensions: ${dimension}, similarityFunction: 'cosine', quantizationType: 'SCALAR', hnsw: { m: ${HNSW_M}, efConstruction: ${HNSW_EF_CONSTRUCTION} }, searchExpansionFactor: ${SEARCH_EXPANSION_FACTOR} } }`,
+        // Community 或字段名不被接受时：去掉量化与 HNSW 调优，仅保留维度/相似度
+        `{ indexProvider: '${VECTOR_PROVIDER_2_0}', vectorConfig: { dimensions: ${dimension}, similarityFunction: 'cosine' } }`,
+      ]
+    : [
+        `{ indexProvider: '${VECTOR_PROVIDER_2_0}', vectorConfig: { dimensions: ${dimension}, similarityFunction: 'cosine' } }`,
+      ];
+  for (const options of vectorConfigAttempts) {
+    try {
+      await session.run(`
+        CREATE VECTOR INDEX ${indexName} IF NOT EXISTS
+        FOR (n:${labelPattern}) ON n.${prop}
+        OPTIONS ${options}
+      `);
+      return "vector-2.0";
+    } catch { /* 试下一种写法 */ }
+  }
+
+  // ② 旧式 indexConfig（保留以兼容 5.x ~ 2026 早期）
+  try {
+    await session.run(`
+      CREATE VECTOR INDEX ${indexName} IF NOT EXISTS
+      FOR (n:${labelPattern}) ON n.${prop}
+      OPTIONS {
+        indexConfig: {
+          \`vector.dimensions\`: ${dimension},
+          \`vector.similarity_function\`: 'cosine'${isEnterprise ? `,
+          \`vector.quantization.type\`: 'SCALAR',
+          \`vector.default_search_expansion_factor\`: 1.5,
+          \`vector.hnsw.m\`: ${HNSW_M},
+          \`vector.hnsw.ef_construction\`: ${HNSW_EF_CONSTRUCTION}` : ""}
+        }
+      }
+    `);
+    return "indexConfig";
+  } catch { /* 试过程化 API */ }
+
+  // ③ 过程化 API（Neo4j 2026.x 已移除该过程）
+  try {
+    const labels = labelPattern.split("|").map((l) => `'${l.trim()}'`).join(", ");
+    await session.run(
+      `CALL db.index.vector.createNodeIndex('${indexName}', [${labels}], '${prop}', ${dimension}, 'cosine')`,
+    );
+    return "procedural";
+  } catch {
+    return "failed";
+  }
+}
 
 // v2.6.x: 最近一次 ensureSchema 使用的向量维度。供社区向量索引缺失时自愈复用
 // （community.ts triggerCommunityIndexHeal 无需再次解析配置，直接用本值重建索引）。
@@ -115,118 +213,88 @@ export async function ensureSchema(driver: Driver, dimension: number = 1024): Pr
     //          避免破坏旧环境；查询层优先用合并索引，旧索引仅向后兼容。
     const edition = getCachedEdition();
     const isEnterprise = edition === "Enterprise";
-    try {
-      // Neo4j 2026.07+ 推荐语法：CREATE VECTOR INDEX 语法支持精细化 OPTIONS.indexConfig
-      // 由于参数是字面量（options 不接受参数），对 dimension 参数内联拼接
-      // 注意键名用下划线 ef_construction / ef_search（点号写法非 Neo4j 键名，会被忽略）
-      if (isEnterprise) {
-        // Enterprise：启用精细 HNSW + 量化参数
-        await session.run(`
-          CREATE VECTOR INDEX gm_node_embedding IF NOT EXISTS
-          FOR (n:Task|Skill|Event) ON n.embedding
-          OPTIONS {
-            indexConfig: {
-              \`vector.dimensions\`: ${dimension},
-              \`vector.similarity_function\`: 'cosine',
-              \`vector.quantization.type\`: 'SCALAR',
-              \`vector.default_search_expansion_factor\`: 1.5,
-              \`vector.hnsw.m\`: 16,
-              \`vector.hnsw.ef_construction\`: 128
-            }
-          }
-        `);
-      } else {
-        // Community/未知：基础多 label 向量索引（不启用量化/HNSW 精细选项）
-        await session.run(`
-          CREATE VECTOR INDEX gm_node_embedding IF NOT EXISTS
-          FOR (n:Task|Skill|Event) ON n.embedding
-          OPTIONS {
-            indexConfig: {
-              \`vector.dimensions\`: ${dimension},
-              \`vector.similarity_function\`: 'cosine'
-            }
-          }
-        `);
-      }
-    } catch {
-      // 兼容老版本 Neo4j（不支持 CREATE VECTOR INDEX 语法或多 label 选项）回落过程化调用
-      try {
-        await session.run(`
-          CALL db.index.vector.createNodeIndex(
-            'gm_node_embedding', ['Task', 'Skill', 'Event'], 'embedding', ${dimension}, 'cosine'
-          )
-        `);
-      } catch { /* may exist or version < 5.11 multi-label index */ }
-    }
-    try {
-      await session.run(`
-        CALL db.index.vector.createNodeIndex(
-          'gm_node_embedding_task', ['Task'], 'embedding', ${dimension}, 'cosine'
-        )
-      `);
-    } catch { /* may exist */ }
-    try {
-      await session.run(`
-        CALL db.index.vector.createNodeIndex(
-          'gm_node_embedding_skill', ['Skill'], 'embedding', ${dimension}, 'cosine'
-        )
-      `);
-    } catch { /* may exist */ }
-    try {
-      await session.run(`
-        CALL db.index.vector.createNodeIndex(
-          'gm_node_embedding_event', ['Event'], 'embedding', ${dimension}, 'cosine'
-        )
-      `);
-    } catch { /* may exist */ }
 
-    // 社区摘要向量索引（v2.6.x: 迁移到新式 CREATE VECTOR INDEX 语法）。
-    //
-    // 根因修复（recall-generalized failed × N）：
-    //   旧实现用 CALL db.index.vector.createNodeIndex 过程化 API 创建该索引，外层 catch {}
-    //   静默吞掉错误。在 Neo4j 2026.x 上该过程已被移除 → 创建必然失败 → 索引永远不存在 →
-    //   召回时 communityVectorSearchWithReps 报 "There is no such vector schema index:
-    //   gm_community_embedding"，导致 generalized 召回 100% 失效。
-    // 现与节点索引（gm_node_embedding）对齐：Enterprise 启用量化/HNSW 精细参数，
-    // Community 走基础配置；新语法失败时回退到旧式过程调用（兼容老版本 Neo4j）。
-    try {
-      if (isEnterprise) {
-        await session.run(`
-          CREATE VECTOR INDEX gm_community_embedding IF NOT EXISTS
-          FOR (c:GmCommunity) ON c.embedding
-          OPTIONS {
-            indexConfig: {
-              \`vector.dimensions\`: ${dimension},
-              \`vector.similarity_function\`: 'cosine',
-              \`vector.quantization.type\`: 'SCALAR',
-              \`vector.default_search_expansion_factor\`: 1.5,
-              \`vector.hnsw.m\`: 16,
-              \`vector.hnsw.ef_construction\`: 128
-            }
-          }
-        `);
-      } else {
-        await session.run(`
-          CREATE VECTOR INDEX gm_community_embedding IF NOT EXISTS
-          FOR (c:GmCommunity) ON c.embedding
-          OPTIONS {
-            indexConfig: {
-              \`vector.dimensions\`: ${dimension},
-              \`vector.similarity_function\`: 'cosine'
-            }
-          }
-        `);
+    /**
+     * v2.8.x: 向量索引创建改为「三级回落 + 结果留痕」，并校验已有索引的 Provider。
+     *
+     * 规格（用户提供，Neo4j 2026.x）：不再支持全局 HNSW 环境变量
+     * （dbms.index.vector.default.*），HNSW/量化参数必须写在建索引的 vectorConfig 里，
+     * Provider 为 vector-2.0；efSearch 是**检索参数**（见 ./vector-query.ts），
+     * 建索引阶段只有 hnsw.efConstruction。
+     *
+     * 此前实现的两个问题：
+     *   ① 只写旧式 indexConfig（反引号 vector.* 键），在 2026.x 上拿不到 vector-2.0；
+     *   ② 外层 catch 空吞 → 索引是否真的建成、用的什么 Provider，日志上一无所知
+     *      （历史上正是这个静默 catch 让 gm_community_embedding 长期不存在）。
+     */
+    const indexTargets: Array<{ name: string; labels: string; prop: string; note?: string }> = [
+      { name: "gm_node_embedding", labels: "Task|Skill|Event", prop: "embedding" },
+      // 旧式按 label 分离的 3 个索引：保留创建（IF NOT EXISTS 语义）以兼容旧环境，
+      // 查询层优先用合并索引，这三个仅作回退。
+      { name: "gm_node_embedding_task", labels: "Task", prop: "embedding", note: "legacy fallback" },
+      { name: "gm_node_embedding_skill", labels: "Skill", prop: "embedding", note: "legacy fallback" },
+      { name: "gm_node_embedding_event", labels: "Event", prop: "embedding", note: "legacy fallback" },
+      { name: "gm_community_embedding", labels: "GmCommunity", prop: "embedding" },
+    ];
+
+    const methods: Record<string, string> = {};
+    for (const t of indexTargets) {
+      const m = await createVectorIndexBestEffort(session, t.name, t.labels, t.prop, dimension, isEnterprise);
+      methods[t.name] = m;
+      if (m === "failed") {
+        log.error(
+          `vector index NOT created: ${t.name} — 所有语法均被拒绝，该索引相关召回会失效`,
+          { labels: t.labels, dimension },
+        );
+      } else if (m !== "vector-2.0") {
+        log.warn(
+          `vector index ${t.name} created via legacy syntax (${m}) — 该环境未启用 2026.x 的 vector-2.0/vectorConfig，HNSW 参数可能未生效`,
+          { labels: t.labels },
+        );
       }
-    } catch {
-      // 老版本 Neo4j（无 CREATE VECTOR INDEX 语法）→ 回退旧式过程化 API（可能已存在）
-      try {
-        await session.run(`
-          CALL db.index.vector.createNodeIndex(
-            'gm_community_embedding', ['GmCommunity'], 'embedding',
-            ${dimension}, 'cosine'
-          )
-        `);
-      } catch { /* may exist */ }
+    }
+    log.info("vector indexes ensured", { edition, methods });
+
+    // 校验已有索引的实际 Provider（新建的也一并看，确认 vector-2.0 是否真的生效）
+    try {
+      const show = await session.run(
+        "SHOW VECTOR INDEXES YIELD name, indexProvider, state RETURN name, indexProvider, state",
+      );
+      const reports: VectorIndexReport[] = show.records.map((r) => {
+        const provider = r.get("indexProvider") ?? undefined;
+        return {
+          name: String(r.get("name")),
+          indexProvider: provider,
+          state: r.get("state") ?? undefined,
+          isModernProvider: provider === VECTOR_PROVIDER_2_0,
+        };
+      });
+      const ours = reports.filter((r) => indexTargets.some((t) => t.name === r.name));
+      log.info("vector index status", {
+        indexes: ours.map((r) => `${r.name}[${r.indexProvider ?? "?"}/${r.state ?? "?"}]`).join(", "),
+      });
+      // 需要重建的：仍是旧 Provider 的索引（IF NOT EXISTS 不会升级已存在的索引）
+      const needRebuild = ours.filter((r) => !r.isModernProvider);
+      if (needRebuild.length > 0) {
+        log.warn(
+          "部分向量索引仍使用旧 Provider —— IF NOT EXISTS 不会升级已存在的索引，需先 DROP 再 CREATE。" +
+            "大向量库重建为后台异步（state: POPULATING），耗时可能很长，故此处不自动执行。" +
+            "请按需手动执行（把维度换成你的实际值）：",
+          {
+            indexes: needRebuild.map((r) => r.name).join(", "),
+            fix: needRebuild
+              .map((r) => {
+                const t = indexTargets.find((x) => x.name === r.name)!;
+                return `DROP VECTOR INDEX \`${r.name}\` IF EXISTS; CREATE VECTOR INDEX \`${r.name}\` FOR (n:${t.labels}) ON (n.${t.prop}) ` +
+                  `OPTIONS { indexProvider: '${VECTOR_PROVIDER_2_0}', vectorConfig: { dimensions: ${dimension}, quantizationType: 'SCALAR', hnsw: { m: ${HNSW_M}, efConstruction: ${HNSW_EF_CONSTRUCTION} }, searchExpansionFactor: ${SEARCH_EXPANSION_FACTOR} } };`;
+              })
+              .join(" "),
+          },
+        );
+      }
+    } catch (err) {
+      // SHOW VECTOR INDEXES 不可用（老版本）→ 不影响主流程，但留痕
+      log.warn("SHOW VECTOR INDEXES unavailable — 无法校验索引 Provider", { error: describeError(err) });
     }
 
     // 社区摘要约束

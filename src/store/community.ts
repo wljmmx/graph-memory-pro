@@ -9,6 +9,7 @@ import neo4j from "neo4j-driver";
 import type { GmNode, CommunitySummary } from "../types.ts";
 import { getSession } from "./db.ts";
 import { recordToNode, getLastEnsuredDimension } from "./schema.ts";
+import { runVectorQuery, DEFAULT_EF_SEARCH } from "./vector-query.ts";
 
 // ─── v2.6.x: 社区向量索引缺失的自愈 + 优雅降级 ──────────────
 //
@@ -212,16 +213,18 @@ export async function communityRepresentatives(
 export async function communityVectorSearch(
   driver: Driver,
   vec: number[],
+  efSearch: number = DEFAULT_EF_SEARCH,
 ): Promise<Array<{ id: string; summary: string; score: number }>> {
   const session = getSession(driver);
   try {
     try {
-      const result = await session.run(
-        `CALL db.index.vector.queryNodes('gm_community_embedding', 5, $vec)
-         YIELD node, score
-         RETURN node, score
+      const result = await runVectorQuery(
+        session,
+        { indexExpr: "'gm_community_embedding'", topKExpr: "toInteger($topK)", vecExpr: "$vec" },
+        `RETURN node, score
          ORDER BY score DESC`,
-        { vec },
+        { vec, topK: 5 },
+        efSearch,
       );
       return result.records.map((r) => {
         const props = r.get("node").properties;
@@ -256,20 +259,22 @@ export async function communityVectorSearchWithReps(
   driver: Driver,
   vec: number[],
   maxCommunities = 3,
+  efSearch: number = DEFAULT_EF_SEARCH,
 ): Promise<Array<{ node: GmNode; communityScore: number }>> {
   const session = getSession(driver);
   try {
     try {
-      const result = await session.run(
-        `CALL db.index.vector.queryNodes('gm_community_embedding', toInteger($maxCommunities), $vec)
-         YIELD node, score
-         WITH node.id AS cid, score AS cscore
+      const result = await runVectorQuery(
+        session,
+        { indexExpr: "'gm_community_embedding'", topKExpr: "toInteger($maxCommunities)", vecExpr: "$vec" },
+        `WITH node.id AS cid, score AS cscore
          WHERE cid IS NOT NULL
          MATCH (n:Task|Skill|Event {status: 'active'})
          WHERE n.communityId = cid
          RETURN n, cscore
          ORDER BY cscore DESC, n.pagerank DESC, n.validatedCount DESC`,
         { vec, maxCommunities },
+        efSearch,
       );
       return result.records.map((r) => ({
         node: recordToNode(r.get("n")),

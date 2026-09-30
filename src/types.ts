@@ -91,6 +91,14 @@ export interface EmbeddingConfig {
    */
   requestIntervalMs?: number;
   /**
+   * v2.8.x: 向量检索的 efSearch（**检索阶段**参数，非索引存储参数）。
+   *
+   * 规格（Neo4j 2026.x）：建索引只配 `hnsw.efConstruction`；`efSearch` 只能在
+   * `db.index.vector.queryNodes(..., { efSearch: N })` 里传。默认 48。
+   * 越大召回越高、检索越慢。旧版本 Neo4j 不认识该参数时会自动回落（不带它重试）。
+   */
+  efSearch?: number;
+  /**
    * v2.8.x: 嵌入接口格式。
    * - "ollama"：Ollama 原生 POST {baseURL}/api/embed（body: input/keep_alive/options）
    * - "openai"：OpenAI 兼容 POST {baseURL}/embeddings（body: input），

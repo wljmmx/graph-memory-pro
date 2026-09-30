@@ -459,7 +459,7 @@ export class Recaller {
         }
 
         const tVecSearch = Date.now();
-        const vecResults = await vectorSearchWithScore(this.driver, searchVec, limit);
+        const vecResults = await vectorSearchWithScore(this.driver, searchVec, limit, this.cfg.embedding?.efSearch);
         logPhase("vec_search", Date.now() - tVecSearch, { nodes: vecResults.length });
         return vecResults.map(v => v.node).slice(0, limit);
       } catch (e) {
@@ -643,7 +643,7 @@ export class Recaller {
       // v2.3.1 性能优化: 合并 communityVectorSearch + communityRepresentatives 为单条 Cypher
       // 旧实现两步串行（两次网络往返），新实现单条 Cypher 一次完成，减少 ~5-20ms
       const tCommVec = Date.now();
-      const commReps = await communityVectorSearchWithReps(this.driver, vec, 3);
+      const commReps = await communityVectorSearchWithReps(this.driver, vec, 3, this.cfg.embedding?.efSearch);
       const communityCount = new Set(
         commReps.map(r => r.node.communityId).filter((id): id is string => !!id)
       ).size;

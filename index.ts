@@ -1892,6 +1892,7 @@ export default definePluginEntry({
       maxBatchChars: Type.Optional(Type.Number({ default: 0, description: "v2.8.x: 动态批处理总长度阈值（单请求累计字符数预算，0=关闭）。开启后条数 ≤ batchSize 且累计字符超阈值即封箱转下一子批次，用于稳定单请求耗时；建议用 scripts/embed-batch-bench.ts 实测取值" })),
       apiFormat: Type.Optional(Type.Union([Type.Literal("ollama"), Type.Literal("openai")], { description: "v2.8.x: 嵌入接口格式。ollama=/api/embed；openai=/embeddings（OVMS 内网服务 /v3、OpenAI /v1 等）。留空自动判定" })),
       requestIntervalMs: Type.Optional(Type.Number({ default: 0, description: "v2.8.x: 相邻两次嵌入请求的最小间隔 ms（0=不节流）。maxConcurrency 只管同时在飞的数量，释放许可后下一子批次立即补位、正常路径零间隔；部分后端（实测 OVMS 的 MediaPipe 图）在背靠背连续请求流下会间歇返回 404 graph definition not found。现象特征：并发仅 2 却失败、而手动 8~16 并发压测全部成功、加间隔后不再报错 → 触发点是持续速率而非并发上限。建议从 50~200 起试，吞吐上限约 1000/N 次/秒" })),
+      efSearch: Type.Optional(Type.Number({ default: 48, description: "v2.8.x: 向量检索 efSearch（默认 48）。属于**检索阶段**参数，只传给 db.index.vector.queryNodes，不在建索引时配置 —— Neo4j 2026.x 起 HNSW/量化参数必须写在建索引的 vectorConfig 里（indexProvider: vector-2.0），efSearch 不在此列。越大召回越高、检索越慢。旧版本 Neo4j 不认识该参数时自动回落重试" })),
       options: Type.Optional(Type.Object({}, { additionalProperties: true, default: {} })),
     })),
     timing: Type.Optional(Type.Object({

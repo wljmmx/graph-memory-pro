@@ -261,6 +261,12 @@
             "minimum": 0,
             "description": "v2.8.x: 相邻两次嵌入请求的最小间隔（毫秒，0=不节流）。maxConcurrency 只限制同时在飞的请求数，释放许可后下一个子批次会立即补位，正常路径零间隔。部分后端（实测 OVMS 的 MediaPipe 图在背靠背连续请求流下）会间歇返回 404 graph definition with requested name is not found。现象特征：插件并发仅 2 却失败、而手动 8~16 并发压测全部成功、加上间隔后不再报错 —— 即触发点是持续速率而非并发上限。建议仅在出现该间歇失败时设置，从 50~200 起试；代价是吞吐下降（上限约 1000/N 次/秒）。"
           },
+          "efSearch": {
+            "type": "integer",
+            "default": 48,
+            "minimum": 0,
+            "description": "v2.8.x: 向量检索 efSearch（默认 48）。属于**检索阶段**参数，只传给 db.index.vector.queryNodes；Neo4j 2026.x 建索引阶段的 HNSW 参数写在 vectorConfig 里（indexProvider: 'vector-2.0'，hnsw.m / hnsw.efConstruction / quantizationType / searchExpansionFactor），efSearch 不属建索引参数。越大召回越高、检索越慢。旧版本 Neo4j 不认识该参数时自动去掉重试。"
+          },
           "apiFormat": {
             "type": "string",
             "enum": [

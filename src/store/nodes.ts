@@ -16,6 +16,7 @@ import {
 } from "./schema.ts";
 import { createLogger, describeError } from "../logger.ts";
 import { bumpGraphRevision } from "./graph-revision.ts";
+import { runVectorQuery, DEFAULT_EF_SEARCH } from "./vector-query.ts";
 
 const log = createLogger("store:nodes");
 
@@ -449,6 +450,7 @@ export async function vectorSearchWithScore(
   driver: Driver,
   vec: number[],
   topK: number,
+  efSearch: number = DEFAULT_EF_SEARCH,
 ): Promise<Array<{ node: GmNode; score: number }>> {
   // v2.3.2 阶段二: 优先使用合并索引 gm_node_embedding（单索引跨 Task|Skill|Event）
   // 旧实现：3 个按 label 分离索引并行查询 + 合并去重（3 个 session）。
@@ -461,13 +463,16 @@ export async function vectorSearchWithScore(
   const session = getSession(driver);
   try {
     try {
-      const result = await session.run(
-        `CALL db.index.vector.queryNodes($indexName, toInteger($topK), $vec)
-         YIELD node, score
-         WITH node, score WHERE node.status = 'active'${benchmarkExclusion("node")}
+      // v2.8.x: efSearch 是**检索参数**（非索引存储参数），按 2026.x 规格在查询时传入；
+      // 旧版本不认识第 4 参时由 runVectorQuery 自动回落。
+      const result = await runVectorQuery(
+        session,
+        { indexExpr: "$indexName", topKExpr: "toInteger($topK)", vecExpr: "$vec" },
+        `WITH node, score WHERE node.status = 'active'${benchmarkExclusion("node")}
          RETURN node, score
          ORDER BY score DESC`,
         { indexName: MERGED_INDEX, vec, topK },
+        efSearch,
       );
       const out = result.records.map((r) => ({
         node: recordToNode(r.get("node")),
@@ -484,13 +489,14 @@ export async function vectorSearchWithScore(
       FALLBACK_INDEXES.map(async (indexName) => {
         const s = getSession(driver);
         try {
-          const result = await s.run(
-            `CALL db.index.vector.queryNodes($indexName, toInteger($topK), $vec)
-             YIELD node, score
-             WITH node, score WHERE node.status = 'active'${benchmarkExclusion("node")}
+          const result = await runVectorQuery(
+            s,
+            { indexExpr: "$indexName", topKExpr: "toInteger($topK)", vecExpr: "$vec" },
+            `WITH node, score WHERE node.status = 'active'${benchmarkExclusion("node")}
              RETURN node, score
              ORDER BY score DESC`,
             { indexName, vec, topK },
+            efSearch,
           );
           return result.records.map((r) => ({
             node: recordToNode(r.get("node")),

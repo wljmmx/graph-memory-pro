@@ -70,6 +70,48 @@
 缓存条目记录写入时的修订号、读取时比对。纯重复抽取不递增（否则缓存形同虚设）。
 同时把缓存键由 32-bit djb2 换为 64-bit FNV-1a —— 旧键会碰撞并返回**另一条 query** 的结果。
 
+### Changed — Neo4j 2026.x 向量索引：`vector-2.0` + `vectorConfig`，`efSearch` 移到检索时
+
+按 2026.x 规格改造（**不再支持全局默认 HNSW 环境变量** `dbms.index.vector.default.*`，
+HNSW/量化参数必须写在建索引的 `vectorConfig` 里，Provider 为 `vector-2.0`）：
+
+**建索引**（[schema.ts](src/store/schema.ts)）—— 三级回落，并留痕实际生效的语法：
+
+| 级别 | 写法 | 适用 |
+|---|---|---|
+| ① 首选 | `OPTIONS { indexProvider: 'vector-2.0', vectorConfig: { dimensions, similarityFunction, quantizationType: 'SCALAR', hnsw: { m: 16, efConstruction: 96 }, searchExpansionFactor: 2.0 } }` | Neo4j 2026.x |
+| ② 回落 | 旧式 `indexConfig` + 反引号 `vector.*` 键 | 5.x ~ 2026 早期 |
+| ③ 再回落 | 过程化 `db.index.vector.createNodeIndex` | 更老版本 |
+
+此前只写旧式 `indexConfig`，在 2026.x 上拿不到 `vector-2.0`；且外层 `catch` 空吞 ——
+索引是否真建成、用的什么 Provider，日志上一无所知（历史上正是这个静默 catch 让
+`gm_community_embedding` 长期不存在）。现每级结果都记录，非首选语法会 warn，
+全部失败会 error。
+
+**索引校验**：用 `SHOW VECTOR INDEXES YIELD name, indexProvider, state` 校验已有索引，
+仍是旧 Provider 的会 warn 并给出**可直接执行**的 `DROP + CREATE` 语句。
+**不自动重建** —— 大向量库重建是后台异步（`state: POPULATING`）且耗时可能很长，
+不宜静默触发。
+
+**检索**（新增 [vector-query.ts](src/store/vector-query.ts)）—— `efSearch` 是**检索参数**：
+建索引只有 `hnsw.efConstruction`；检索时传
+`db.index.vector.queryNodes(idx, k, vec, { efSearch: toInteger($efSearch) })`。
+4 处调用点（节点合并索引 / 3 索引回退 / 社区摘要 ×2）全部改为经该模块调用。
+旧版本不认识第 4 参时**自动去掉重试**（否则整个向量召回会失效）；
+但**索引缺失、维度不符等真实故障不会被回落吞掉**（有测试锁定判据）。
+
+新增配置 `embedding.efSearch`（默认 48，与既有 compose 的 ef_search 一致），
+登记于 [types.ts](src/types.ts)、[index.ts](workspace/index.ts)、
+[openclaw.plugin.json](workspace/openclaw.plugin.json)、[config.example.json](workspace/config.example.json)。
+
+> ⚠️ **已存在的索引不会被 `IF NOT EXISTS` 升级**。若你的索引此前用旧 Provider 创建，
+> 需按维护日志给出的 `DROP + CREATE` 手动重建（或用你原模板 3）。
+
+新增 [test/vector-index-2026.test.ts](test/vector-index-2026.test.ts) 10 个用例
+（建索引不含 efSearch、HNSW 参数在 vectorConfig 内、Community 不含量化、逐级回落、
+检索带 efSearch / 回落 / 真实故障不吞）；
+[test/edition-detection.test.ts](test/edition-detection.test.ts) 的 10/11 用例同步到新语法。
+
 ### Fixed — 孤立代理项导致请求体被严格 JSON 解析器拒绝（`Cannot parse JSON body`）
 
 **这是 `412 Cannot parse JSON body` 的可复现机制，且 curl 永远测不到。**
