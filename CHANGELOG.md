@@ -70,7 +70,30 @@
 缓存条目记录写入时的修订号、读取时比对。纯重复抽取不递增（否则缓存形同虚设）。
 同时把缓存键由 32-bit djb2 换为 64-bit FNV-1a —— 旧键会碰撞并返回**另一条 query** 的结果。
 
-### Changed — 可观测性
+### Fixed — 批量嵌入的失败韧性（OVMS 间歇 404 导致节点静默丢失）
+
+现场证据（OVMS `/v3/embeddings`，模型 `qwen-embedding`，`192.168.50.89:11412`）：
+
+```
+batch sub-batch failed (8 texts) {"url":".../v3/embeddings","apiFormat":"openai",
+  "model":"qwen-embedding","error":"Embedding API 404: {\"error\":\"Mediapipe graph
+  definition with requested name is not found\"}"}
+```
+
+- 失败是**部分性**的：一次 reEmbed 中 4/8 节点失败，另有节点 4/5 chunks 成功
+- 同一 URL/模型，用户 20 并发 curl 全部 200
+
+**⇒ 端点与模型名都没配错；是批量请求被后端间歇拒绝。** 旧行为有两个缺口：
+
+- **4xx（非 429）一律不重试** → 瞬时的 404 直接判死。现 404 纳入重试（**只重试 1 次**，
+  不消耗完整退避预算，故模型名真写错时也只多花约 1s 后失败）；其他 4xx 仍立即失败。
+- **子批次失败只有"整批置 null"** → 8 个节点直接丢失，无降级路径。现失败后**逐条重发**；
+  连续 2 条单发也失败即短路放弃（判定为系统性故障），避免把一次批量失败放大成请求风暴。
+
+新增 [test/embed-batch-resilience.test.ts](test/embed-batch-resilience.test.ts) 4 个用例
+（批量被拒→单条救回、短路不放大、404 重试可自愈、400 不重试）。
+
+### Changed — 可观测性（批次 2.4.7）
 
 - **`logger.ts`：接入宿主 logger 时把 `fields` 内联进 `msg`（超长截断）**。
   宿主插件 logger 只渲染第一个参数，此前 `fields` 仅作为第二个参数传出 → 生产日志里

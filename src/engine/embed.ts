@@ -396,9 +396,25 @@ async function performEmbedRequest(
       const error = err instanceof Error ? err : new Error(String(err));
       lastErr.push(error);
 
-      // v2.3.2 S6: 4xx 错误（非 429 限流）不重试 — 重试也不会成功（如 400 无效模型/401 鉴权失败）
-      if (error.message.match(/Embedding API 4\d{2}/) && !error.message.includes("429")) {
-        throw error;
+      /**
+       * 4xx 默认不重试（重试也不会成功，如 400 无效模型 / 401 鉴权失败）。
+       *
+       * v2.8.x: 但 **404 例外** —— 实测 OVMS 会在并发/资源未就绪时对
+       * `/v3/embeddings` 返回 404 `{"error":"Mediapipe graph definition with requested
+       * name is not found"}`，而**同一个 URL、同一个模型名在紧邻的请求中成功**
+       * （证据：一次 reEmbed 中 4/8 节点失败，另有节点 4/5 chunks 成功 —— 失败是"部分性"
+       * 的，不是配置错误；用户同地址 20 并发 curl 全部 200）。
+       * 既然 404 在这里是瞬时资源问题而非客户端错误，就必须允许重试。
+       *
+       * 成本控制：404 只重试 **1 次**（不消耗完整退避预算），
+       * 因此真正写错模型名时也只是多花约 1s 后失败，不会显著拖慢。
+       */
+      const statusMatch = error.message.match(/Embedding API (\d{3})/);
+      const status = statusMatch ? Number(statusMatch[1]) : 0;
+      const isClientError = status >= 400 && status < 500;
+      const isRetryable404 = status === 404;
+      if (isClientError && !error.message.includes("429")) {
+        if (!isRetryable404 || attempt >= 1) throw error;
       }
       if (attempt < delays.length) {
         // v2.3.2 S6: 加 jitter 防并发重试波峰对齐
@@ -611,6 +627,53 @@ export function createBatchEmbedFn(config: EmbeddingConfig): BatchEmbedFn {
             expectedDim: c.expectedDim,
             error: (err as Error)?.message ?? String(err),
           });
+
+          /**
+           * v2.8.x: 降级为**逐条重发**。
+           *
+           * 动因：实测 OVMS 对 `/v3/embeddings` 会间歇性返回 404
+           * `Mediapipe graph definition with requested name is not found`，而同一
+           * URL/模型在紧邻请求中成功 —— 端点没配错，是**批量请求**被后端拒绝。
+           * 旧行为只有"整批置 null"，于是 8 个节点直接丢失（reEmbed 4/8 failed）。
+           * 逐条重发把「批量失败」降级为「变慢但保住数据」。
+           *
+           * 短路：连续 2 条单发也失败 → 判定为系统性故障（如模型名真的写错、后端已挂），
+           * 立即放弃剩余条目，避免把「一次批量失败」放大成 N 倍请求风暴。
+           */
+          if (idxs.length > 1) {
+            let consecutiveFails = 0;
+            let recovered = 0;
+            for (const i of idxs) {
+              if (consecutiveFails >= 2) break; // 系统性故障，放弃剩余
+              try {
+                const vecs = await performEmbedRequest(
+                  c, [texts[i]],
+                  120_000,
+                );
+                const v = vecs[0];
+                if (v && v.length) {
+                  out[i] = v;
+                  if (c.cache) c.cache.set(hash64(texts[i]), v);
+                  recovered++;
+                  consecutiveFails = 0;
+                } else {
+                  consecutiveFails++;
+                }
+              } catch (oneErr) {
+                consecutiveFails++;
+                log.warn("batch item retry failed (single-input request also rejected)", {
+                  url: c.url, model: c.model,
+                  inputChars: texts[i]?.length ?? 0,
+                  error: (oneErr as Error)?.message ?? String(oneErr),
+                });
+              }
+            }
+            if (recovered > 0) {
+              log.info("batch sub-batch recovered by single-input retries", {
+                url: c.url, recovered, attempted: idxs.length,
+              });
+            }
+          }
         } finally {
           release();
         }
