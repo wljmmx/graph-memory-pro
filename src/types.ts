@@ -243,6 +243,15 @@ export interface GmConfig {
       enabled?: boolean;
       /** 历史评分保留条数（默认 200） */
       historyKeep?: number;
+      /**
+       * v2.8.x: 稀疏判定的评分阈值 —— `sparseHeal.scoreThreshold` 的**别名**。
+       *
+       * 两处都能配同一个值时，本项**优先**（更贴近"评分"语义）；
+       * 未设置则用 sparseHeal.scoreThreshold。两者都设且不同会 warn 一次。
+       */
+      sparseScoreThreshold?: number;
+      /** v2.8.x: 稀疏判定的孤立比例阈值 —— `sparseHeal.isolatedRatioThreshold` 的别名，本项优先。 */
+      sparseIsolatedRatioThreshold?: number;
     };
   };
 
@@ -447,6 +456,30 @@ export interface GmConfig {
     confidenceFactor?: number;
     /** 中文 CJK 文本相似度融合权重（默认 0.3） */
     cjkWeight?: number;
+
+    // ── v2.8.x: 三个行为开关 + 全局操作上限 + 出错回滚 ──
+    // 说明：这三个行为原本随 enabled 一体开启、无法单独控制；现补上独立开关，
+    // 默认值全部为 true / 不限 / false，**与既有行为完全等价**。
+
+    /** 补边（相似度推断 RELATES_TO）：默认 true */
+    autoEdgeRepair?: boolean;
+    /** 孤立节点自动合并：默认 true */
+    nodeMerge?: boolean;
+    /** 社区重连（孤立节点连到本社区代表）：默认 true */
+    communityReconnect?: boolean;
+    /**
+     * 单次运行的总操作上限（补边 + 合并 + 重连 合计），默认 0 = 不限。
+     * 注意与 maxEdgesPerCycle 的区别：后者只限制「补边」条数，本项限制三类操作的总量。
+     */
+    maxOperationsPerRun?: number;
+    /**
+     * 运行中出错时回滚本次写入，默认 false。
+     *
+     * ⚠️ 回滚范围仅限**本批次自愈写入的边**（补边 + 社区重连，按 selfHealBatch 标记精确删除）。
+     * **合并（mergeNodes）不在回滚范围内** —— 合并是软替换（state=superseded），
+     * 不携带批次标记，无法用 revertSelfHeal 撤销。
+     */
+    rollbackOnError?: boolean;
   };
 
   /**

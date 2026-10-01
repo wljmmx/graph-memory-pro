@@ -16,7 +16,7 @@ import type { GmConfig } from "../../types.ts";
 import { getSession } from "../../store/db.ts";
 import { computeGraphHealthScore, type GraphHealthScore } from "./health.ts";
 import { mergeNodes } from "../../store/edges.ts";
-import { createLogger } from "../../logger.ts";
+import { createLogger, describeError } from "../../logger.ts";
 
 const log = createLogger("self-heal");
 
@@ -39,6 +39,16 @@ export interface SelfHealConfig {
   confidenceFactor?: number;
   /** CJK 文本相似度权重（默认 0.3） */
   cjkWeight?: number;
+  /** v2.8.x: 补边开关（默认 true） */
+  autoEdgeRepair?: boolean;
+  /** v2.8.x: 孤立节点合并开关（默认 true） */
+  nodeMerge?: boolean;
+  /** v2.8.x: 社区重连开关（默认 true） */
+  communityReconnect?: boolean;
+  /** v2.8.x: 单次运行总操作上限（补边+合并+重连 合计），0 = 不限（默认 0） */
+  maxOperationsPerRun?: number;
+  /** v2.8.x: 出错时回滚本批次写入的边（默认 false；合并不在回滚范围内） */
+  rollbackOnError?: boolean;
 }
 
 export interface SelfHealResult {
@@ -52,6 +62,10 @@ export interface SelfHealResult {
   mergeCandidates: Array<{ a: string; b: string; sim: number }>;
   reLinks: number;
   skippedNoEmbedding: number;
+  /** v2.8.x: 因 maxOperationsPerRun 触顶而跳过的操作数 */
+  cappedByMaxOps?: number;
+  /** v2.8.x: 出错后是否已回滚本批次写入的边 */
+  rolledBack?: boolean;
 }
 
 const DEFAULT_CFG: Required<SelfHealConfig> = {
@@ -64,6 +78,12 @@ const DEFAULT_CFG: Required<SelfHealConfig> = {
   mergeSimThreshold: 0.85,
   confidenceFactor: 1.0,
   cjkWeight: 0.3,
+  // v2.8.x: 默认值刻意与「补丁前行为」逐项等价 —— 三个行为全开、不限总量、不自动回滚
+  autoEdgeRepair: true,
+  nodeMerge: true,
+  communityReconnect: true,
+  maxOperationsPerRun: 0,
+  rollbackOnError: false,
 };
 
 /**
@@ -92,12 +112,42 @@ export function cjkBigramSim(a: string, b: string): number {
   return union === 0 ? 0 : intersect / union;
 }
 
-/** 从 GmConfig 提取自愈配置 */
+/**
+ * 从 GmConfig 提取自愈配置。
+ *
+ * v2.8.x: 稀疏判定的两个阈值在 `sparseHeal.*` 与 `graphHealth.scoring.sparse*` 两处都可用 ——
+ * 后者语义更贴近"评分"，故**优先**。两处都设且不同值时 warn 一次，避免"配了但没生效"的静默歧义。
+ */
 export function sparsityConfigFrom(cfg: GmConfig): SelfHealConfig {
   const sh = cfg?.sparseHeal ?? {};
+  const scoring = cfg?.graphHealth?.scoring ?? {};
+
+  const scoreThreshold = scoring.sparseScoreThreshold ?? sh.scoreThreshold;
+  const isolatedRatioThreshold = scoring.sparseIsolatedRatioThreshold ?? sh.isolatedRatioThreshold;
+  if (
+    scoring.sparseScoreThreshold !== undefined &&
+    sh.scoreThreshold !== undefined &&
+    scoring.sparseScoreThreshold !== sh.scoreThreshold
+  ) {
+    log.warn(
+      "sparse threshold configured in two places — graphHealth.scoring.sparseScoreThreshold wins",
+      { graphHealthScoring: scoring.sparseScoreThreshold, sparseHeal: sh.scoreThreshold },
+    );
+  }
+  if (
+    scoring.sparseIsolatedRatioThreshold !== undefined &&
+    sh.isolatedRatioThreshold !== undefined &&
+    scoring.sparseIsolatedRatioThreshold !== sh.isolatedRatioThreshold
+  ) {
+    log.warn(
+      "isolated ratio threshold configured in two places — graphHealth.scoring.sparseIsolatedRatioThreshold wins",
+      { graphHealthScoring: scoring.sparseIsolatedRatioThreshold, sparseHeal: sh.isolatedRatioThreshold },
+    );
+  }
+
   return {
-    scoreThreshold: sh.scoreThreshold,
-    isolatedRatioThreshold: sh.isolatedRatioThreshold,
+    scoreThreshold,
+    isolatedRatioThreshold,
     inferSimMin: sh.inferSimMin,
     inferSimMax: sh.inferSimMax,
     maxEdgesPerNode: sh.maxEdgesPerNode,
@@ -105,6 +155,11 @@ export function sparsityConfigFrom(cfg: GmConfig): SelfHealConfig {
     mergeSimThreshold: sh.mergeSimThreshold,
     confidenceFactor: sh.confidenceFactor,
     cjkWeight: sh.cjkWeight,
+    autoEdgeRepair: sh.autoEdgeRepair,
+    nodeMerge: sh.nodeMerge,
+    communityReconnect: sh.communityReconnect,
+    maxOperationsPerRun: sh.maxOperationsPerRun,
+    rollbackOnError: sh.rollbackOnError,
   };
 }
 
@@ -127,9 +182,16 @@ export async function runSelfHeal(driver: Driver, cfg?: SelfHealConfig): Promise
   let mergesApplied = 0;
   const mergeCandidates: Array<{ a: string; b: string; sim: number }> = [];
   let reLinks = 0;
+  // v2.8.x: 全局操作上限（补边+合并+重连合计）。0 = 不限，与补丁前行为一致。
+  const maxOps = c.maxOperationsPerRun > 0 ? c.maxOperationsPerRun : Number.POSITIVE_INFINITY;
+  let ops = 0;
+  let cappedByMaxOps = 0;
+  const opsLeft = () => ops < maxOps;
   try {
     // ── 1. 补边候选（embedding 余弦 + 无既有语义边；与 dedup 同款原生 reduce，不依赖 GDS）──
-    const candidates = await session.run(
+    // v2.8.x: autoEdgeRepair=false 时整段跳过（含候选查询，避免无谓开销）
+    const candidates = c.autoEdgeRepair
+      ? await session.run(
       `MATCH (a:Task|Skill|Event {status: 'active'})
        WHERE a.embedding IS NOT NULL
        WITH a
@@ -151,7 +213,8 @@ export async function runSelfHeal(driver: Driver, cfg?: SelfHealConfig): Promise
        ORDER BY cosSim DESC
        LIMIT toInteger($maxEdgesPerCycle)`,
       { simMin: c.inferSimMin, simMax: c.inferSimMax, maxEdgesPerCycle: c.maxEdgesPerCycle },
-    );
+        )
+      : ({ records: [] } as unknown as Awaited<ReturnType<typeof session.run>>);
 
     // ── 补边写入：带 inferred 标记 ──
     const now = Date.now();
@@ -159,6 +222,7 @@ export async function runSelfHeal(driver: Driver, cfg?: SelfHealConfig): Promise
     const degreeBudget = new Map<string, number>();
     for (const rec of candidates.records) {
       if (created >= c.maxEdgesPerCycle) break;
+      if (!opsLeft()) { cappedByMaxOps++; break; }
       const idA = String(rec.get("idA"));
       const idB = String(rec.get("idB"));
       const nameA = String(rec.get("nameA") ?? "");
@@ -195,6 +259,7 @@ export async function runSelfHeal(driver: Driver, cfg?: SelfHealConfig): Promise
       degreeBudget.set(idA, budgetA + 1);
       degreeBudget.set(idB, budgetB + 1);
       created++;
+      ops++;
     }
 
     // ── 2. 孤立节点：合并候选 + 社区重连 ──
@@ -212,7 +277,9 @@ export async function runSelfHeal(driver: Driver, cfg?: SelfHealConfig): Promise
       const embedding = rec.get("embedding");
 
       // 2a. 社区重连：有社区 → 连到社区代表（PageRank 最高成员）
-      if (communityId) {
+      // v2.8.x: communityReconnect=false 时跳过该分支（继续走 2b 合并）
+      if (communityId && c.communityReconnect) {
+        if (!opsLeft()) { cappedByMaxOps++; } else {
         const rep = await session.run(
           `MATCH (n:Task|Skill|Event {communityId: $cid, status: 'active'})
            WHERE n.id <> $id
@@ -235,11 +302,19 @@ export async function runSelfHeal(driver: Driver, cfg?: SelfHealConfig): Promise
             { fromId: id, toId: String(rid), batchId, now: Date.now() },
           );
           reLinks++;
+          ops++;
           continue;
+        }
         }
       }
 
       // 2b. 合并候选：与最近非孤立节点比较（无 embedding 则跳过）
+      // v2.8.x: nodeMerge=false 时跳过合并（仍统计无向量节点）
+      if (!c.nodeMerge) {
+        if (!embedding) skippedNoEmbedding++;
+        continue;
+      }
+      if (!opsLeft()) { cappedByMaxOps++; continue; }
       if (!embedding) {
         skippedNoEmbedding++;
         continue;
@@ -269,16 +344,49 @@ export async function runSelfHeal(driver: Driver, cfg?: SelfHealConfig): Promise
       if (fused >= c.mergeSimThreshold) {
         await mergeNodes(driver, nid, id); // 保留非孤立节点 nid，合并孤立节点 id
         mergesApplied++;
+        ops++;
       } else {
         mergeCandidates.push({ a: id, b: nid, sim: Math.round(fused * 100) / 100 });
       }
     }
 
-    log.info("self-heal: recovery done", { edgesAdded: created, mergesApplied, reLinks, candidates: mergeCandidates.length, batchId });
+    log.info("self-heal: recovery done", {
+      edgesAdded: created, mergesApplied, reLinks,
+      candidates: mergeCandidates.length, batchId,
+      cappedByMaxOps,
+    });
     return {
       scored: true, score, sparse: true, batchId,
       edgesAdded: created, mergesApplied, mergeCandidates, reLinks, skippedNoEmbedding,
+      cappedByMaxOps,
     };
+  } catch (err) {
+    /**
+     * v2.8.x: rollbackOnError —— 出错时回滚**本批次写入的边**。
+     *
+     * 范围诚实说明：只覆盖带 selfHealBatch 标记的边（自愈补边 + 社区重连）。
+     * **合并（mergeNodes）不可回滚** —— 它是软替换（state=superseded），不携带批次标记，
+     * revertSelfHeal 删不到。故本项不是"事务级回滚"，别当成原子性保证。
+     */
+    let rolledBack = false;
+    if (c.rollbackOnError) {
+      try {
+        const r = await revertSelfHeal(driver, batchId);
+        rolledBack = true;
+        log.warn("self-heal: error → rolled back this batch's inferred edges", {
+          error: describeError(err), batchId, removed: r.removed,
+          note: "合并操作不在回滚范围内（无批次标记）",
+        });
+      } catch (rbErr) {
+        log.error("self-heal: rollback FAILED — 本批次自愈边可能残留", {
+          error: describeError(err), rollbackError: describeError(rbErr), batchId,
+        });
+      }
+    }
+    if (!c.rollbackOnError || !rolledBack) {
+      log.error("self-heal: recovery failed", { error: describeError(err), batchId, rolledBack });
+    }
+    throw err;
   } finally {
     await session.close();
   }

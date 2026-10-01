@@ -1948,6 +1948,8 @@ export default definePluginEntry({
       scoring: Type.Optional(Type.Object({
         enabled: Type.Optional(Type.Boolean({ default: true })),
         historyKeep: Type.Optional(Type.Number({ default: 200, description: "v2.6.0: 图谱健康评分历史保留条数（默认 200）" })),
+        sparseScoreThreshold: Type.Optional(Type.Number({ description: "v2.8.x: 稀疏判定的评分阈值 —— sparseHeal.scoreThreshold 的别名，本项**优先**（语义更贴近评分）。未设置则用 sparseHeal.scoreThreshold；两处都设且不同会 warn" })),
+        sparseIsolatedRatioThreshold: Type.Optional(Type.Number({ description: "v2.8.x: 稀疏判定的孤立节点比例阈值 —— sparseHeal.isolatedRatioThreshold 的别名，本项**优先**。健康报告 healthCheck 的告警阈值仍固定 0.3（无 config 入参）" })),
       })),
     })),
     // ── v2.8.x: 补齐此前 TypeBox 缺失的三整段 ────────────────────
@@ -1980,6 +1982,11 @@ export default definePluginEntry({
       mergeSimThreshold: Type.Optional(Type.Number({ default: 0.85, description: "孤立节点自动合并相似度阈值（默认 0.85）" })),
       confidenceFactor: Type.Optional(Type.Number({ default: 1, description: "补边权重 = 相似度 × 该系数（默认 1.0）" })),
       cjkWeight: Type.Optional(Type.Number({ default: 0.3, description: "中文 CJK 文本相似度融合权重（默认 0.3）" })),
+      autoEdgeRepair: Type.Optional(Type.Boolean({ default: true, description: "v2.8.x: 补边开关（默认 true）。相似度推断 RELATES_TO 边；关闭后整段跳过（含候选查询）。默认值与原行为等价" })),
+      nodeMerge: Type.Optional(Type.Boolean({ default: true, description: "v2.8.x: 孤立节点自动合并开关（默认 true）。关闭后不做合并，仅在 mergeCandidates 中报告候选" })),
+      communityReconnect: Type.Optional(Type.Boolean({ default: true, description: "v2.8.x: 社区重连开关（默认 true）。孤立节点连到本社区 PageRank 最高的代表；关闭后该分支跳过（仍会尝试合并）" })),
+      maxOperationsPerRun: Type.Optional(Type.Number({ default: 0, description: "v2.8.x: 单次运行的总操作上限（补边+合并+重连 合计），默认 0 = 不限（与原行为等价）。注意与 maxEdgesPerCycle 区别：后者只限制补边条数" })),
+      rollbackOnError: Type.Optional(Type.Boolean({ default: false, description: "v2.8.x: 运行出错时回滚本次写入，默认 false。⚠ 回滚范围仅限本批次自愈写入的**边**（补边+社区重连，按 selfHealBatch 精确删除）；**合并（mergeNodes）不在回滚范围内** —— 它是软替换、不携带批次标记，故本项不是事务级原子回滚" })),
     })),
     timestampBackfill: Type.Optional(Type.Object({
       enabled: Type.Optional(Type.Boolean({ default: true })),

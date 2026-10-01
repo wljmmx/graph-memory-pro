@@ -56,7 +56,19 @@
   "$comment_timestampBackfill": "v2.4.0: 时序字段回填（Maintenance Phase 4b，默认开启）。对缺失 updatedAt/createdAt/recordedAt 的历史节点用 timestamp 属性或现有字段推导补全，修复时序/过时/重要性失真",
   "timestampBackfill": { "enabled": true },
   "causalEdges": { "enabled": true, "extract": true },
-  "graphHealth": { "enabled": true, "alertOnAnomaly": true },
+  "graphHealth": {
+    "enabled": true,
+    "alertOnAnomaly": true,
+    "scoring": {
+      "$comment": "v2.6.0: 图谱 0-100 健康评分（Phase 6 计算并落盘 GraphHealthMetric）",
+      "enabled": true,
+      "historyKeep": 200,
+      "$comment_sparseScoreThreshold": "v2.8.x: 稀疏判定的评分阈值 —— sparseHeal.scoreThreshold 的别名，本项**优先**（语义更贴近评分）。未设置则用 sparseHeal.scoreThreshold；两处都设且不同会 warn 一次",
+      "sparseScoreThreshold": 60,
+      "$comment_sparseIsolatedRatioThreshold": "v2.8.x: 稀疏判定的孤立比例阈值 —— sparseHeal.isolatedRatioThreshold 的别名，本项**优先**。注意健康报告 healthCheck 的告警阈值仍固定 0.3（无 config 入参）",
+      "sparseIsolatedRatioThreshold": 0.3
+    }
+  },
   "queryCache": {
     "enabled": true,
     "maxSize": 100,

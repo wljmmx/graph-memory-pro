@@ -70,6 +70,42 @@
 缓存条目记录写入时的修订号、读取时比对。纯重复抽取不递增（否则缓存形同虚设）。
 同时把缓存键由 32-bit djb2 换为 64-bit FNV-1a —— 旧键会碰撞并返回**另一条 query** 的结果。
 
+### Added — 补齐现场被拒的 7 个配置键，并**全部接进实现**
+
+现场宿主报这 7 个键不存在（`schema is false` / `additional properties`）。按要求补全 schema ——
+但**只加 schema 不接代码 = 配置项说谎**（`communityReconnect: false` 看起来关掉了、
+实际什么都没发生），故同时实现了每一个：
+
+| 键 | 默认 | 实现位置 |
+|---|---|---|
+| `sparseHeal.autoEdgeRepair` | `true` | `runSelfHeal` 步骤 1：`false` 时**整段跳过**（含候选查询，省无谓开销） |
+| `sparseHeal.nodeMerge` | `true` | 步骤 2b：`false` 时不做合并，仍报告 `mergeCandidates` |
+| `sparseHeal.communityReconnect` | `true` | 步骤 2a：`false` 时该分支跳过（仍会尝试合并） |
+| `sparseHeal.maxOperationsPerRun` | `0`（不限） | 全局操作上限（补边+合并+重连**合计**）；触顶计入 `cappedByMaxOps` |
+| `sparseHeal.rollbackOnError` | `false` | 出错时调 `revertSelfHeal(driver, batchId)` 按批次精确回滚 |
+| `graphHealth.scoring.sparseScoreThreshold` | — | `sparseHeal.scoreThreshold` 的**别名，优先** |
+| `graphHealth.scoring.sparseIsolatedRatioThreshold` | — | `sparseHeal.isolatedRatioThreshold` 的**别名，优先** |
+
+**默认值与补丁前行为逐项等价**（三个行为全开 / 不限总量 / 不自动回滚）——
+不会偷偷改变既有行为。
+
+两处阈值别名的优先级在 `sparsityConfigFrom()` 实现：`graphHealth.scoring.*` 优先，
+**两处都设且不同时 warn 一次**（避免"配了但没生效"的静默歧义）。
+
+**关于 `rollbackOnError` 的诚实边界**（已写入代码注释与两套 schema 描述）：
+回滚范围仅限**本批次自愈写入的边**（补边 + 社区重连，按 `selfHealBatch` 标记精确删除）。
+**合并（`mergeNodes`）不可回滚** —— 它是软替换、不携带批次标记，`revertSelfHeal` 删不到。
+故本项**不是事务级原子回滚**，别当成原子性保证。
+
+新增 [test/sparse-heal-options.test.ts](test/sparse-heal-options.test.ts) 11 个用例，
+关键断言是**"开关真的改变执行"**而非"字段存在"：
+`autoEdgeRepair: false` → 补边候选查询**不发出**；默认 → 发出；
+三个开关彼此独立；阈值别名优先级；`revertSelfHeal` 按批次只删该批次。
+
+[test/config-schema-consistency.test.ts](test/config-schema-consistency.test.ts) 按新契约更新
+（原本断言这 7 个键**不属于**契约，现改为断言**已登记且两套 schema 一致**）——
+这条守卫正确抓到了本次行为变更。
+
 ### Added — `sparseHeal.isolatedRatioThreshold`：稀疏判定的孤立节点比例阈值可配
 
 核实 7 个被拒配置键时发现的**真实能力缺口**：`sparseIsolatedRatioThreshold` 这个键不存在，

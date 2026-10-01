@@ -69,18 +69,20 @@ describe("配置 schema 一致性：index.ts TypeBox vs openclaw.plugin.json（v
     expect(extra, `TypeBox 多出这些配置段（json 未声明）: ${extra.join(", ")}`).toEqual([]);
   });
 
-  it("sparseHeal 子键一致（现场报错的正是这一段）", () => {
+  it("sparseHeal 子键一致，且此前被拒的 5 个键已成为契约的一部分", () => {
     const jsonSub = Object.keys(jsonSchema.configSchema.properties.sparseHeal.properties ?? {});
     const tsSub = [...(sub.get("sparseHeal") ?? [])];
     expect(tsSub.sort()).toEqual(jsonSub.slice().sort());
-    // 曾被误用为配置项的键：确认它们确实不属于契约（宿主拒绝是正确的）
-    for (const bogus of ["autoEdgeRepair", "nodeMerge", "communityReconnect", "maxOperationsPerRun", "rollbackOnError"]) {
-      expect(jsonSub).not.toContain(bogus);
-      expect(tsSub).not.toContain(bogus);
+
+    // 现场曾被宿主拒绝（schema is false）的 5 个键 —— 现已**显式登记**并接到实现
+    // （只加 schema 不接代码 = 配置说谎，故这 5 项在 self-heal.ts 中都有真实分支）
+    for (const k of ["autoEdgeRepair", "nodeMerge", "communityReconnect", "maxOperationsPerRun", "rollbackOnError"]) {
+      expect(jsonSub, `openclaw.plugin.json 缺少 ${k}`).toContain(k);
+      expect(tsSub, `index.ts TypeBox 缺少 ${k}`).toContain(k);
     }
   });
 
-  it("graphHealth.scoring 子键一致，且不含被误用的两个阈值键", () => {
+  it("graphHealth.scoring 子键一致，且含两个稀疏阈值别名", () => {
     const jsonSub = Object.keys(
       (jsonSchema.configSchema.properties.graphHealth.properties?.scoring as { properties?: Record<string, unknown> })
         ?.properties ?? {},
@@ -88,10 +90,25 @@ describe("配置 schema 一致性：index.ts TypeBox vs openclaw.plugin.json（v
     const tsSub = [...(sub.get("graphHealth") ?? [])];
     // graphHealth 下有 enabled / alertOnAnomaly / scoring
     expect(tsSub).toContain("scoring");
-    // scoring 的两个合法子键在 json 侧存在
-    expect(jsonSub.sort()).toEqual(["enabled", "historyKeep"]);
-    for (const bogus of ["sparseScoreThreshold", "sparseIsolatedRatioThreshold"]) {
-      expect(jsonSub).not.toContain(bogus);
-    }
+    // 现场曾被拒的两个键 —— 现作为 sparseHeal 同名阈值的别名（本项优先）
+    expect(jsonSub.sort()).toEqual([
+      "enabled",
+      "historyKeep",
+      "sparseIsolatedRatioThreshold",
+      "sparseScoreThreshold",
+    ]);
+  });
+
+  it("两处阈值别名与 sparseHeal 原字段语义一致（不是只加 schema 不接代码）", () => {
+    // 约束：别名与本体必须都在，且实现里确实读了 graphHealth.scoring.*（有测试覆盖优先级）
+    const sh = Object.keys(jsonSchema.configSchema.properties.sparseHeal.properties ?? {});
+    const sc = Object.keys(
+      (jsonSchema.configSchema.properties.graphHealth.properties?.scoring as { properties?: Record<string, unknown> })
+        ?.properties ?? {},
+    );
+    expect(sh).toContain("scoreThreshold");
+    expect(sh).toContain("isolatedRatioThreshold");
+    expect(sc).toContain("sparseScoreThreshold");
+    expect(sc).toContain("sparseIsolatedRatioThreshold");
   });
 });
