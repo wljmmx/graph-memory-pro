@@ -1944,7 +1944,46 @@ export default definePluginEntry({
     graphHealth: Type.Optional(Type.Object({
       enabled: Type.Optional(Type.Boolean({ default: true })),
       alertOnAnomaly: Type.Optional(Type.Boolean({ default: true })),
+      // v2.8.x: 补齐 —— 此前 TypeBox 缺 scoring，与 openclaw.plugin.json / types.ts 不一致
+      scoring: Type.Optional(Type.Object({
+        enabled: Type.Optional(Type.Boolean({ default: true })),
+        historyKeep: Type.Optional(Type.Number({ default: 200, description: "v2.6.0: 图谱健康评分历史保留条数（默认 200）" })),
+      })),
     })),
+    // ── v2.8.x: 补齐此前 TypeBox 缺失的三整段 ────────────────────
+    // 背景：index.ts 的 TypeBox 与 openclaw.plugin.json 的 configSchema 曾不同步，
+    // 缺 recall / sparseHeal / timestampBackfill 三整段。宿主若改用 TypeBox 派生校验，
+    // 这些整段配置会被判为「不存在」而整体拒绝（sparseHeal 已实际发生）。
+    recall: Type.Optional(Type.Object({
+      memorySliceChars: Type.Optional(Type.Number({ default: 800, description: "v2.3.x: 单条记忆送入嵌入的切片字符数（默认 800）" })),
+      chunking: Type.Optional(Type.Object({
+        enabled: Type.Optional(Type.Boolean({ default: false })),
+        chunkSize: Type.Optional(Type.Number({ default: 400 })),
+        chunkOverlap: Type.Optional(Type.Number({ default: 40 })),
+      })),
+      multiStage: Type.Optional(Type.Boolean({ default: false })),
+      temporalWeight: Type.Optional(Type.Number({ default: 0.3 })),
+      outputFormat: Type.Optional(Type.Object({
+        enabled: Type.Optional(Type.Boolean({ default: true })),
+        concise: Type.Optional(Type.Boolean({ default: true })),
+        faithful: Type.Optional(Type.Boolean({ default: true })),
+      })),
+    })),
+    sparseHeal: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true, description: "v2.6.0: 稀疏图自维护（Maintenance Phase 12），默认开启" })),
+      scoreThreshold: Type.Optional(Type.Number({ default: 60, description: "触发稀疏判定：健康评分低于此值视为稀疏（默认 60）" })),
+      inferSimMin: Type.Optional(Type.Number({ default: 0.7, description: "补边相似度下限（默认 0.70）" })),
+      inferSimMax: Type.Optional(Type.Number({ default: 0.9, description: "补边相似度上限（默认 0.90，须低于 dedupThreshold）" })),
+      maxEdgesPerNode: Type.Optional(Type.Number({ default: 5, description: "每节点补边上限（默认 5）" })),
+      maxEdgesPerCycle: Type.Optional(Type.Number({ default: 50, description: "每周期补边上限（默认 50）" })),
+      mergeSimThreshold: Type.Optional(Type.Number({ default: 0.85, description: "孤立节点自动合并相似度阈值（默认 0.85）" })),
+      confidenceFactor: Type.Optional(Type.Number({ default: 1, description: "补边权重 = 相似度 × 该系数（默认 1.0）" })),
+      cjkWeight: Type.Optional(Type.Number({ default: 0.3, description: "中文 CJK 文本相似度融合权重（默认 0.3）" })),
+    })),
+    timestampBackfill: Type.Optional(Type.Object({
+      enabled: Type.Optional(Type.Boolean({ default: true })),
+    })),
+
     // ── v2.1.2 第二批 反馈闭环 + 冷启动 ────────────
     queryCache: Type.Optional(Type.Object({
       enabled: Type.Optional(Type.Boolean({ default: true })),

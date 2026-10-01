@@ -70,6 +70,47 @@
 缓存条目记录写入时的修订号、读取时比对。纯重复抽取不递增（否则缓存形同虚设）。
 同时把缓存键由 32-bit djb2 换为 64-bit FNV-1a —— 旧键会碰撞并返回**另一条 query** 的结果。
 
+### Fixed — 配置 schema 两处不一致（现场：宿主拒绝 sparseHeal / graphHealth.scoring 配置）
+
+现场报错：
+
+```
+config.graphHealth.scoring: must not have additional properties:
+  "sparseScoreThreshold", "sparseIsolatedRatioThreshold"
+config.sparseHeal.<k>: schema is false
+  （autoEdgeRepair / nodeMerge / communityReconnect / maxOperationsPerRun / rollbackOnError）
+```
+
+核实结论**分两部分，两者都成立**：
+
+**① 那 7 个键在插件中根本不存在 —— 宿主的拒绝是正确的。**
+
+全仓（src / index.ts / 所有 JSON / 所有 md）搜索这 7 个名字：**0 命中**。
+`sparseHeal` 的真实契约只有 9 个键（`enabled` / `scoreThreshold` / `inferSimMin` /
+`inferSimMax` / `maxEdgesPerNode` / `maxEdgesPerCycle` / `mergeSimThreshold` /
+`confidenceFactor` / `cjkWeight`）；`graphHealth.scoring` 只有 `enabled` / `historyKeep`。
+
+这些名字的来源很可能是 **schema 的 description 把它说大了**：`sparseHeal` 的描述写着
+「补边/合并/**社区重连**…**可回滚**」，但**这三个行为是随 `enabled` 一体开启的，没有独立开关**；
+`rollbackOnError` 也不存在 —— 回滚是 `rollbackSelfHeal()` 的**手动/按批次运维操作**，
+不是 on-error 配置项。
+
+**② 同时发现独立缺陷：`index.ts` 的 TypeBox 与 `openclaw.plugin.json` 的 configSchema 不同步。**
+
+TypeBox 是 JSON schema 的**真子集**，缺 3 整段 + 1 个子段：
+
+| 缺失项 | 后果 |
+|---|---|
+| `sparseHeal`（整段） | 宿主若改用 TypeBox 派生校验 → 整段被判「不存在」而拒绝 |
+| `recall`（整段） | 同上，`chunking` / `multiStage` / `temporalWeight` 全部失效 |
+| `timestampBackfill`（整段） | 同上 |
+| `graphHealth.scoring`（子段） | `historyKeep` 无法配置 |
+
+已补齐三整段与 `scoring`，并新增
+[test/config-schema-consistency.test.ts](test/config-schema-consistency.test.ts)
+作为**漂移守卫**：断言两套 schema 的顶层键集合完全一致、`sparseHeal` /
+`graphHealth.scoring` 子键一致，且明确断言那 7 个被误用的键**不属于契约**。
+
 ### Changed — Neo4j 向量索引：**不指定 `indexProvider`**，`efSearch` 移到检索时
 
 **核实结论（两轮修正后的最终版）**：官方 Cypher Manual 明确写着「在建索引的 OPTIONS 里
