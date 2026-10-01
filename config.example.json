@@ -163,5 +163,20 @@
     "multiStage": false,
     "temporalWeight": 0.3,
     "outputFormat": { "enabled": true, "concise": true, "faithful": true }
+  },
+  "sparseHeal": {
+    "$comment": "v2.6.0: 稀疏图自维护（Maintenance Phase 12，默认开启）。图谱稀疏时自动补边 / 合并孤立节点 / 社区重连，全部带 inferred 标记、按批次可回滚（rollbackSelfHeal）。注意：这三项行为随 enabled 一体开启，**没有独立开关**；回滚是手动/按批次的运维操作，不是 on-error 配置项。",
+    "enabled": true,
+    "$comment_scoreThreshold": "触发稀疏判定：健康评分低于此值视为稀疏（默认 60）",
+    "scoreThreshold": 60,
+    "$comment_isolatedRatioThreshold": "触发稀疏判定：孤立节点比例高于此值视为稀疏（默认 0.3）。健康报告 healthCheck 的告警阈值固定为 0.3（无 config 入参）—— 触发阈值与告警阈值有意分离",
+    "isolatedRatioThreshold": 0.3,
+    "inferSimMin": 0.7,
+    "inferSimMax": 0.9,
+    "maxEdgesPerNode": 5,
+    "maxEdgesPerCycle": 50,
+    "mergeSimThreshold": 0.85,
+    "confidenceFactor": 1.0,
+    "cjkWeight": 0.3
   }
 }

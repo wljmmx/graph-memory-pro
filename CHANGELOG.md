@@ -70,6 +70,31 @@
 缓存条目记录写入时的修订号、读取时比对。纯重复抽取不递增（否则缓存形同虚设）。
 同时把缓存键由 32-bit djb2 换为 64-bit FNV-1a —— 旧键会碰撞并返回**另一条 query** 的结果。
 
+### Added — `sparseHeal.isolatedRatioThreshold`：稀疏判定的孤立节点比例阈值可配
+
+核实 7 个被拒配置键时发现的**真实能力缺口**：`sparseIsolatedRatioThreshold` 这个键不存在，
+但**它想表达的概念确实存在、且阈值 0.3 是硬编码的** ——
+[health.ts](src/graph/maintenance/health.ts) 的稀疏判定与配套告警都写死 `0.3`，配置里无法调整。
+
+现新增 `sparseHeal.isolatedRatioThreshold`（默认 **0.3**，不改变既有行为）：
+
+- 稀疏判定 `sparse: score < scoreThreshold || isolatedRatio > isolatedRatioThreshold`
+- **配套告警文案用同一阈值**（阈值设 0.2 时文案写 `>20%`，不再固定 `>30%`）
+- 配置贯通：`GmConfig.sparseHeal` → `sparsityConfigFrom()` → `runSelfHeal()` →
+  `computeGraphHealthScore()`；维护管道复评（`maintenance.ts`）也带上同一阈值
+
+**一处有意的不一致（已在代码与文档中标注）**：健康报告 `healthCheck()` 无 config 入参
+（3 个调用点只有 1 个拿得到 cfg），其孤立告警固定用共享常量
+`DEFAULT_ISOLATED_RATIO_THRESHOLD = 0.3`。即「**触发阈值可配、告警阈值固定**」——
+这是触发与告警的有意分离，不是遗漏。
+
+登记于 [types.ts](src/types.ts)、[index.ts](index.ts) TypeBox、
+[openclaw.plugin.json](openclaw.plugin.json)、[config.example.json](config.example.json)。
+顺带补上示例配置里**整段缺失的 `sparseHeal`**（此前示例只有 graphHealth/recall/timestampBackfill）。
+
+新增 [test/sparse-heal-threshold.test.ts](test/sparse-heal-threshold.test.ts) 7 个用例：
+默认值不变、调低/调高阈值**真的生效**、告警文案跟随阈值、配置透传。
+
 ### Fixed — 配置 schema 两处不一致（现场：宿主拒绝 sparseHeal / graphHealth.scoring 配置）
 
 现场报错：

@@ -431,6 +431,8 @@ export interface GmConfig {
     enabled?: boolean;
     /** 触发稀疏判定：评分低于此值视为稀疏（默认 60） */
     scoreThreshold?: number;
+    /** 触发稀疏判定：孤立节点比例高于此值视为稀疏（默认 0.3） */
+    isolatedRatioThreshold?: number;
     /** 补边相似度下限（默认 0.70） */
     inferSimMin?: number;
     /** 补边相似度上限（默认 0.90，须低于 dedupThreshold 避免与去重冲突） */

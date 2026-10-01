@@ -39,9 +39,20 @@ export interface GraphHealthScore {
     highStaleRatio: number;
     transitionalRatio: number;
   };
-  sparse: boolean;            // score < 60 || isolatedRatio > 0.3
+  /** 稀疏判定：score < scoreThreshold 或 isolatedRatio > 阈值（默认 0.3） */
+  sparse: boolean;
   anomalies: string[];
 }
+
+/**
+ * v2.8.x: 孤立节点比例的**默认**阈值（0.3）。
+ *
+ * 此前该值在两处硬编码（稀疏判定 + 健康报告告警），配置里无法调整。
+ * 现抽为共享常量：稀疏判定可由 `sparseHeal.isolatedRatioThreshold` 覆盖；
+ * 健康报告（healthCheck）无 config 入参，固定用本默认值 —— 这是**触发阈值与
+ * 告警阈值的有意分离**，不是遗漏。
+ */
+export const DEFAULT_ISOLATED_RATIO_THRESHOLD = 0.3;
 
 /**
  * v2.6.0: 计算图谱健康评分（0-100）。
@@ -49,12 +60,17 @@ export interface GraphHealthScore {
  * 五维加权：连通性 35% / 密度 25% / 影响力 20% / 时效性 10% / 冲突 10%
  *   - density 用对数刻度归一：min(1, log2(1+avgDegree)/log2(1+K))，K=8
  *
- * 稀疏判定：score < scoreThreshold(60) 或 isolatedRatio > 0.3
+ * 稀疏判定：score < scoreThreshold(60) 或 isolatedRatio > isolatedRatioThreshold(0.3)
  *
  * @param driver Neo4j driver
  * @param scoreThreshold 稀疏评分阈值（默认 60）
+ * @param isolatedRatioThreshold 孤立节点比例阈值（默认 0.3，可由 sparseHeal.isolatedRatioThreshold 覆盖）
  */
-export async function computeGraphHealthScore(driver: Driver, scoreThreshold = 60): Promise<GraphHealthScore> {
+export async function computeGraphHealthScore(
+  driver: Driver,
+  scoreThreshold = 60,
+  isolatedRatioThreshold = DEFAULT_ISOLATED_RATIO_THRESHOLD,
+): Promise<GraphHealthScore> {
   const session = getSession(driver);
   try {
     const activeResult = await session.run(
@@ -122,7 +138,11 @@ export async function computeGraphHealthScore(driver: Driver, scoreThreshold = 6
 
     const anomalies: string[] = [];
     if (score < scoreThreshold) anomalies.push(`评分 ${score} 低于阈值 ${scoreThreshold}`);
-    if (isolatedRatio > 0.3) anomalies.push(`孤立节点比例过高 ${Math.round(isolatedRatio * 100)}% (>30%)`);
+    if (isolatedRatio > isolatedRatioThreshold) {
+      anomalies.push(
+        `孤立节点比例过高 ${Math.round(isolatedRatio * 100)}% (>${Math.round(isolatedRatioThreshold * 100)}%)`,
+      );
+    }
 
     return {
       timestamp: Date.now(),
@@ -135,7 +155,7 @@ export async function computeGraphHealthScore(driver: Driver, scoreThreshold = 6
         highStaleRatio: Math.round(highStaleRatio * 100) / 100,
         transitionalRatio: Math.round(transitionalRatio * 100) / 100,
       },
-      sparse: score < scoreThreshold || isolatedRatio > 0.3,
+      sparse: score < scoreThreshold || isolatedRatio > isolatedRatioThreshold,
       anomalies,
     };
   } finally {
@@ -281,8 +301,11 @@ export async function healthCheck(driver: Driver): Promise<GraphHealthReport> {
 
     // ── 异常检测 ──
     const isolatedRatio = activeNodes > 0 ? isolatedNodes / activeNodes : 0;
-    if (isolatedRatio > 0.3) {
-      anomalies.push(`孤立节点比例过高 ${Math.round(isolatedRatio * 100)}% (>30%)`);
+    // 用共享默认值（健康报告无 config 入参；触发阈值可配、告警阈值固定，属有意分离）
+    if (isolatedRatio > DEFAULT_ISOLATED_RATIO_THRESHOLD) {
+      anomalies.push(
+        `孤立节点比例过高 ${Math.round(isolatedRatio * 100)}% (>${Math.round(DEFAULT_ISOLATED_RATIO_THRESHOLD * 100)}%)`,
+      );
     }
     const staleRatio = activeNodes > 0 ? highStaleNodes / activeNodes : 0;
     if (staleRatio > 0.3) {

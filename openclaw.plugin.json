@@ -957,6 +957,13 @@
             "maximum": 100,
             "description": "触发稀疏判定：健康评分低于此值视为稀疏（默认 60）"
           },
+          "isolatedRatioThreshold": {
+            "type": "number",
+            "default": 0.3,
+            "minimum": 0,
+            "maximum": 1,
+            "description": "触发稀疏判定：孤立节点比例高于此值视为稀疏（默认 0.3）。注意健康报告 healthCheck 的告警阈值固定为 0.3（无 config 入参）—— 触发阈值与告警阈值有意分离"
+          },
           "inferSimMin": {
             "type": "number",
             "default": 0.7,

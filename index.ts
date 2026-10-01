@@ -1972,6 +1972,7 @@ export default definePluginEntry({
     sparseHeal: Type.Optional(Type.Object({
       enabled: Type.Optional(Type.Boolean({ default: true, description: "v2.6.0: 稀疏图自维护（Maintenance Phase 12），默认开启" })),
       scoreThreshold: Type.Optional(Type.Number({ default: 60, description: "触发稀疏判定：健康评分低于此值视为稀疏（默认 60）" })),
+      isolatedRatioThreshold: Type.Optional(Type.Number({ default: 0.3, description: "触发稀疏判定：孤立节点比例高于此值视为稀疏（默认 0.3）。注意健康报告 healthCheck 的告警阈值固定为 0.3（无 config 入参）—— 触发阈值与告警阈值有意分离" })),
       inferSimMin: Type.Optional(Type.Number({ default: 0.7, description: "补边相似度下限（默认 0.70）" })),
       inferSimMax: Type.Optional(Type.Number({ default: 0.9, description: "补边相似度上限（默认 0.90，须低于 dedupThreshold）" })),
       maxEdgesPerNode: Type.Optional(Type.Number({ default: 5, description: "每节点补边上限（默认 5）" })),

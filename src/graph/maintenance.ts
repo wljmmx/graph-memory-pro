@@ -480,7 +480,11 @@ export async function runMaintenance(
           });
           // 自愈后复评：未改善则回滚本次自愈边（按 batchId 精确回滚，
           // 避免误删上一轮已保留的自愈边）
-          const after = await computeGraphHealthScore(driver, cfg.sparseHeal?.scoreThreshold ?? 60);
+          const after = await computeGraphHealthScore(
+            driver,
+            cfg.sparseHeal?.scoreThreshold ?? 60,
+            cfg.sparseHeal?.isolatedRatioThreshold ?? 0.3,
+          );
           if (after.score <= (healResult.score?.score ?? 0)) {
             const reverted = await revertSelfHeal(driver, healResult.batchId);
             log.warn("self-heal reverted: no improvement", { before: healResult.score?.score, after: after.score, removed: reverted.removed });

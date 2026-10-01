@@ -23,6 +23,8 @@ const log = createLogger("self-heal");
 export interface SelfHealConfig {
   /** 稀疏判定评分阈值（默认 60） */
   scoreThreshold?: number;
+  /** 稀疏判定的孤立节点比例阈值（默认 0.3） */
+  isolatedRatioThreshold?: number;
   /** 补边相似度下限（默认 0.70） */
   inferSimMin?: number;
   /** 补边相似度上限（默认 0.90） */
@@ -54,6 +56,7 @@ export interface SelfHealResult {
 
 const DEFAULT_CFG: Required<SelfHealConfig> = {
   scoreThreshold: 60,
+  isolatedRatioThreshold: 0.3,
   inferSimMin: 0.7,
   inferSimMax: 0.9,
   maxEdgesPerNode: 5,
@@ -94,6 +97,7 @@ export function sparsityConfigFrom(cfg: GmConfig): SelfHealConfig {
   const sh = cfg?.sparseHeal ?? {};
   return {
     scoreThreshold: sh.scoreThreshold,
+    isolatedRatioThreshold: sh.isolatedRatioThreshold,
     inferSimMin: sh.inferSimMin,
     inferSimMax: sh.inferSimMax,
     maxEdgesPerNode: sh.maxEdgesPerNode,
@@ -111,7 +115,7 @@ export async function runSelfHeal(driver: Driver, cfg?: SelfHealConfig): Promise
   const c = { ...DEFAULT_CFG, ...cfg };
   // v2.6.2: 本次运行批次标记，写边时打标，回滚按批次精确删除
   const batchId = `selfheal-${Date.now()}`;
-  const score = await computeGraphHealthScore(driver, c.scoreThreshold);
+  const score = await computeGraphHealthScore(driver, c.scoreThreshold, c.isolatedRatioThreshold);
 
   if (!score.sparse) {
     log.info("self-heal: graph healthy, skip", { score: score.score });
