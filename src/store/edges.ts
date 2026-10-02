@@ -145,7 +145,7 @@ export async function mergeNodes(
        OPTIONAL MATCH (merge)-[r]->(target:Task|Skill|Event)
        WHERE target.id <> $keepId AND r IS NOT NULL
        RETURN target.id AS targetId, type(r) AS relType, r.instruction AS instruction, r.weight AS weight`,
-      { mergeId },
+      { mergeId, keepId },
     );
 
     // Phase 2: MERGE each outgoing edge (relType as literal per iteration)
@@ -181,7 +181,7 @@ export async function mergeNodes(
        OPTIONAL MATCH (source:Task|Skill|Event)-[r2]->(merge)
        WHERE source.id <> $keepId AND r2 IS NOT NULL
        RETURN source.id AS sourceId, type(r2) AS relType, r2.instruction AS instruction, r2.weight AS weight`,
-      { mergeId },
+      { mergeId, keepId },
     );
 
     // Phase 4: MERGE each incoming edge
