@@ -4,6 +4,116 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.4.8] - 2026-09-30
+
+**openclaw 2026.10.4 SDK 适配批次。** 规则**逐条来自 clone 的 v2026.10.4 源码**（非文档推测）。
+结论：项目**未触碰任何已移除接口**，但有 1 个**确证的功能缺陷**、2 项应当声明、1 项性能优化。
+
+### Fixed — `api.runtime` 在 cli-metadata / setup-only 下会抛错，且未被保护
+
+**这是确证缺陷（源码级证据，非推测）。**
+
+宿主 `createUnavailableRuntime()`（`src/plugins/api-builder.ts`）返回一个 Proxy，其 `get` 陷阱对
+**任何字符串属性**都抛错：
+
+```ts
+throw new Error(`${owner} runtime is intentionally unavailable during "${registrationMode}" registration. …`)
+```
+
+该 Proxy 由**两条独立路径**注入：
+- `src/plugins/registry-api.ts`：`registrationMode === "cli-metadata"`
+- `src/plugins/captured-registration.ts`：`cli-metadata || setup-only`
+
+⇒ [`api.runtime?.llm`](index.ts) **一定会抛** —— `api.runtime` 拿到的是 Proxy（非 null），
+**可选链只保护 null/undefined，拦不住抛错的 getter**。而项目这行位于 `doGatewayInitInner`，
+由 `register()` fire-and-forget 调用 —— 一旦抛出便中断整条初始化链
+（LLM/Embedding → recaller 装配 → 后台服务 → 定时器全部不执行）。
+
+**两层修复**：
+
+1. **注册模式守卫**（第一道）：`NON_RUNTIME_REGISTRATION_MODES = {cli-metadata, setup-only}`
+   在 `doGatewayInitInner` 最前面 return，**在连 Neo4j / 建 schema 之前** ——
+   这类模式下宿主要的是 CLI 元数据，不该连带连数据库（`openclaw plugins list` 连 Neo4j 纯属浪费）。
+   依据即那个错误消息自带的 remedy：`Defer runtime access out of register().`
+2. **防御式读取**（第二道）：`runtimeLlm = api.runtime?.llm` 包进 try/catch，
+   失败则 warn 并回落到插件配置 LLM —— 防漏网（新模式 / 旧宿主 / 宿主行为变化）。
+
+### Added — hook 超时预算（宿主默认 `agent_end` 30s、`gateway_stop` 5s）
+
+宿主默认预算见源码 `src/plugins/hooks.ts` 的 `DEFAULT_VOID_HOOK_TIMEOUT_MS_BY_HOOK`：
+`agent_end: 30_000`、`gateway_stop: 5_000`。
+
+**关键机制**：超时后宿主**只记日志并继续，不取消 handler**
+（`src/plugins/hook-timeout.ts` 用 `raceWithTimeout` + `trackAsyncWork` 保留其工作）——
+表现为「写入晚到 / 状态不明」。而项目的两个 handler 都远比默认预算重：
+
+- `agent_end`：整轮消息落库（Neo4j）→ judge（**LLM 调用**）→ `upsertFeedback` →
+  `incrementFeedback` → 更新 M 矩阵。一条 LLM 链塞在 30 s 内。
+- `gateway_stop`：`await import(...)`（冷路径）+ 关联矩阵落盘。
+
+现声明 `AGENT_END_TIMEOUT_MS = 60_000` / `GATEWAY_STOP_TIMEOUT_MS = 10_000`。
+优先级（`src/plugins/registry-state.ts` `resolveTypedHookTimeoutMs`）：
+`hooks.timeouts.<hook>` > `hooks.timeoutMs` > 插件自声明 ⇒ **声明的是可被运维覆盖的兜底值**。
+
+### Optimized — `after_tool_call` 增加 `matcher`（工具白名单预过滤）
+
+省略 `matcher` = **匹配所有工具** —— 此前每次任意工具调用（bash/read/edit…）都会唤起本插件，
+只为在函数内发现不在 `MEMORY_TOOL_NAMES` 里然后 return。
+
+宿主源码 `registry-registrars-tools-hooks.ts`：**只有 `before_tool_call` / `after_tool_call`
+接受 matcher**（其余会告警 `ignores tool matcher`）；校验规则见 `src/plugins/tool-hook-matcher.ts`
+（非空数组、`"*"` 通配不支持、`bash`/`exec_command`/`apply-patch`/`Write`/`Edit`/`agent`
+属非规范名会被拒、其余按**小写**归一）。
+
+现声明 `MEMORY_TOOL_MATCHER`。**安全性**：该列表与 handler 内部 `MEMORY_TOOL_NAMES.has(toolName)`
+是**同一集合**（该判断本就要求精确小写匹配），故 matcher 是**等价前置过滤，不会丢事件**。
+
+### Changed — 构建目标版本对齐到 2026.10.4
+
+`openclaw.build.openclawVersion` / `pluginSdkVersion`：`2026.9.6` → **`2026.10.4`**。
+
+**`compat` 范围刻意不加下界以外的约束**：宿主在**安装时**按 `satisfiesPluginApiRange`
+强校验（`src/plugins/install-shared.ts`），范围过窄会**直接装不上**；官方示例本身也是
+开放下界（`>=2026.3.24-beta.2`）。当前 `>=2026.8.1` 与官方形态一致。
+
+### 核实结论：未触碰任何已移除接口（无需改动）
+
+逐项对照 `docs/plugins/sdk-migration/removed-surfaces` 与源码：
+
+| 已移除/改名 | 项目现状 | 结论 |
+|---|---|---|
+| `api.on("deactivate")` 别名 | 已用文档指定的 `gateway_stop` | ✅ |
+| `registerApiProvider` / `unregisterApiProviders` | 未用 | ✅ |
+| 根 SDK / compat barrel、extension API bridge | 只用 `plugin-sdk/plugin-entry` 子路径 | ✅ |
+| `plugin-sdk/testing` 私有桶、`command-auth` re-export | 未用 | ✅ |
+| 迁移指南重头戏（SQLite 同步写、SessionManager、GitHub publication V2、conversation bindings V2、`runtime.state.openKeyedStoreV2`） | **全部不适用** | ✅ |
+
+5 个 hook 名（`gateway_start` / `gateway_stop` / `agent_end` / `after_tool_call` / `llm_output`）
+在 2026.10.4 中**全部有效**。`definePluginEntry` 的 `kind` 已废弃 —— 项目未用 ✅。
+
+### 未采纳（附理由）
+
+- **`extensions` → `runtimeExtensions` 形态**：官方推荐 `extensions: [源码]` +
+  `runtimeExtensions: [产物]`。但宿主源码 `src/plugins/package-entry-resolution.ts` 要求
+  **两者长度必须相等**，且**声明了但产物缺失会直接「打包错误」失败、不会回落到源码**。
+  项目当前 `extensions: ["./dist/index.js"]`（单条、不声明 runtimeExtensions）经解析路径
+  `{ ok: true }` —— **可用且无风险**，改动收益仅为开发体验，故**未动**。
+- **`api.runtime.capabilities` 能力探测**：目前「有就用、没有就回落」已足够；
+  待需要按能力 ID 启用新行为时再引入。
+
+### 测试
+
+新增 [test/sdk-contract-2026-10.test.ts](test/sdk-contract-2026-10.test.ts) 13 个用例，
+规则**按已核对的宿主源码复现**（宿主未公开导出该校验器）：
+注册模式守卫位置、`api.runtime` 的 try/catch 包覆、两个 hook 的 `timeoutMs` 声明且不低于宿主默认、
+`after_tool_call` 的 matcher 通过宿主校验规则且**只出现一次**、`build.*` 版本对齐。
+
+### Changed — 版本对齐
+
+`src/version.ts`、`package.json`、`openclaw.plugin.json`、`package-lock.json`、
+[index.ts](index.ts) 头部、[README.md](README.md)、[test/version.test.ts](test/version.test.ts)
+由 **2.4.7** 对齐至 **2.4.8**。
+
 ## [2.4.7] - 2026-09-29
 
 **多模块缺陷审计后的整改批次。头条修复：重抽（re-extract）会改写节点状态与时间语义 —— 这是「问修改后的结果却答出旧事实」的直接机制。**

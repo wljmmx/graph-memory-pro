@@ -1,7 +1,7 @@
 /**
  * graph-memory-pro — Neo4j Knowledge Graph Memory Plugin
  *
- * Version: 2.4.7
+ * Version: 2.4.8
  *
  * 架构定位（A 方案）:
  *   - 不占用 slots（memory/contextEngine）
@@ -34,7 +34,7 @@ import { Extractor } from "./src/extractor/extract.ts";
 import { Recaller } from "./src/recaller/recall.ts";
 import { runMaintenance } from "./src/graph/maintenance.ts";
 import { resolveBenchmarkDataDir } from "./src/benchmark/dataDir.ts";
-import { setExternalLogger, createLogger } from "./src/logger.ts";
+import { setExternalLogger, createLogger, describeError } from "./src/logger.ts";
 import { setTimingEnabled } from "./src/timing.ts";
 import { extractInBackground, extractInterimTexts, writeExtractResult } from "./src/services/extract-service.ts";  // v2.3.4 ARCH-1: 从 index.ts 拆出 // v2.5.4: 中间 assistant 文本提取
 import { getSessionRecallCache, resetSessionRecallCache } from "./src/recaller/session-recall-cache.ts";
@@ -1641,8 +1641,84 @@ async function doGatewayInit(api: unknown, logger: LoggerLike): Promise<void> {
   }
 }
 
+/**
+ * v2.8.x: 判断当前是否为「无运行时」的注册模式。
+ *
+ * 为什么必须挡住（已核对 openclaw 源码，非推测）：
+ *
+ * ① **`api.runtime` 在这些模式下是一个「访问即抛错」的 Proxy。**
+ *    `createUnavailableRuntime()`（src/plugins/api-builder.ts）返回的 Proxy 的 `get` 陷阱
+ *    对**任何字符串属性**都 `throw new Error("...runtime is intentionally unavailable
+ *    during \"cli-metadata\" registration...")`。它被两条独立路径注入：
+ *      - src/plugins/registry-api.ts：`registrationMode === "cli-metadata"`
+ *      - src/plugins/captured-registration.ts：`cli-metadata || setup-only`
+ *    ⇒ `api.runtime?.llm` **一定会抛** —— `api.runtime` 拿到的是 Proxy（非 null），
+ *      可选链只保护 null/undefined，拦不住抛错的 getter。
+ *
+ * ② 这两个模式是宿主为**收集 CLI 元数据**而调用 register() 的（因此 `api.on` 等被替换成
+ *    noop 静默吸收）。此时去连 Neo4j、建 schema 纯属浪费 —— `openclaw plugins list`
+ *    不应该连带连数据库。
+ *
+ * 官方给的话术与 remedy 就在那个错误消息里：`Defer runtime access out of register().`
+ */
+const NON_RUNTIME_REGISTRATION_MODES = new Set(["cli-metadata", "setup-only"]);
+
+function nonRuntimeRegistrationMode(api: unknown): string | null {
+  const mode = (api as { registrationMode?: unknown } | null)?.registrationMode;
+  return typeof mode === "string" && NON_RUNTIME_REGISTRATION_MODES.has(mode) ? mode : null;
+}
+
+/**
+ * v2.8.x: hook 超时预算（插件自声明；运维可通过 `hooks.timeouts.<hook>` / `hooks.timeoutMs` 覆盖）。
+ *
+ * 宿主的默认预算（源码 src/plugins/hooks.ts 的 DEFAULT_VOID_HOOK_TIMEOUT_MS_BY_HOOK）：
+ *   - `agent_end`   → **30 s**
+ *   - `gateway_stop` → **5 s**
+ * 优先级（源码 src/plugins/registry-state.ts resolveTypedHookTimeoutMs）：
+ *   `hooks.timeouts.<hook>` > `hooks.timeoutMs` > 插件自声明 `opts.timeoutMs`
+ * ⇒ 插件声明的是**可被覆盖的兜底值**。
+ *
+ * 为什么必须显式声明：超时后宿主只「记日志并继续」，**不会取消 handler**
+ * （源码 src/plugins/hook-timeout.ts 用 raceWithTimeout + trackAsyncWork 保留其工作）。
+ * 我们的两个 handler 都远比默认预算重：
+ *   - agent_end：整轮消息落库（Neo4j）→ judge（**LLM 调用**）→ upsertFeedback
+ *     → incrementFeedback → 更新 M 矩阵。一条 LLM 链塞在 30 s 里，本地慢模型极易超。
+ *   - gateway_stop：`await import(...)`（冷路径）+ 持久化关联矩阵。5 s 太紧。
+ */
+const AGENT_END_TIMEOUT_MS = 60_000;
+const GATEWAY_STOP_TIMEOUT_MS = 10_000;
+
+/**
+ * v2.8.x: `after_tool_call` 的 matcher（工具白名单预过滤）。
+ *
+ * 宿主源码（src/plugins/registry-registrars-tools-hooks.ts）：
+ *   `hookName === "before_tool_call" || hookName === "after_tool_call" ? normalizePluginToolMatcher(opts?.matcher) : undefined`
+ * 即**只有这两个 hook 接受 matcher**；用在别处会得到 `ignores tool matcher` 告警。
+ *
+ * 校验规则（src/plugins/tool-hook-matcher.ts）：非空字符串数组；`"*"` 通配**不支持**；
+ * `bash` / `exec_command` / `apply-patch` / `Write` / `Edit` / `agent` 属非规范名会被拒；
+ * 其余按**小写**归一后比对。
+ *
+ * 收益：省略 matcher = 匹配所有工具 —— 之前**每次任意工具调用**（bash/read/edit…）
+ * 都会唤起本插件，只为在函数内发现不在 MEMORY_TOOL_NAMES 里然后 return。
+ * 用小写名声明后，宿主在派发前就过滤掉无关调用。
+ *
+ * 安全性：本列表与 handler 内部 `MEMORY_TOOL_NAMES.has(toolName)` 是**同一集合**
+ * （该判断本就要求精确小写匹配），故 matcher 只是等价前置过滤，不会丢事件。
+ */
+const MEMORY_TOOL_MATCHER: readonly [string, ...string[]] = [...MEMORY_TOOL_NAMES] as [string, ...string[]];
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function doGatewayInitInner(api: any, logger: LoggerLike): Promise<void> {
+  const deferredMode = nonRuntimeRegistrationMode(api);
+  if (deferredMode) {
+    log.info(
+      `core init skipped: registration mode "${deferredMode}" has no runtime — deferring to gateway_start ` +
+        "(avoids both the throwing api.runtime proxy and a pointless Neo4j connection during CLI metadata collection)",
+    );
+    return;
+  }
+
   const eventCfg = api.pluginConfig ?? api.config;
   log.info(`config check: neo4j.uri=${eventCfg?.neo4j?.uri ? "present" : "missing"}`);
   if (!eventCfg?.neo4j?.uri) {
@@ -1706,7 +1782,25 @@ async function doGatewayInitInner(api: any, logger: LoggerLike): Promise<void> {
   }
 
   // 3. 初始化 LLM / Embedding
-  const runtimeLlm = api.runtime?.llm;
+  /**
+   * v2.8.x: `api.runtime` 必须防御式读取。
+   *
+   * 在 `cli-metadata` / `setup-only` 下它是「访问即抛错」的 Proxy（见上方模式守卫的说明），
+   * 而 `?.` **拦不住抛错的 getter** —— 一旦漏网（新模式、旧宿主、宿主行为变化），
+   * 这里会直接抛出并中断整个初始化链：LLM/Embedding → recaller 装配 → 后台服务 →
+   * 定时器全部不执行。上面的模式守卫是第一道防线，这里是第二道。
+   */
+  // 注：宿主 `RuntimeLlm` 类型未声明 `model` 字段（原代码是靠 `api` 为 any 才可访问），
+  // 故这里同样保持宽松类型，仅为其加上抛错防护 —— 不改变原有字段访问行为。
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let runtimeLlm: any;
+  try {
+    runtimeLlm = api.runtime?.llm;
+  } catch (err) {
+    log.warn("api.runtime unavailable (throwing proxy) — falling back to plugin-config LLM", {
+      error: describeError(err),
+    });
+  }
   // v2.6.x: 从 SDK 运行时上下文提取 agent 当前生效模型 + provider 注册表，供
   // createRuntimeCompleteFn 解析真实 provider 端点（绕过 OpenClaw 网关）。
   // 当前生效模型优先取 runtime.llm.model（runtimeContext.llm.model，可反映会话级
@@ -2176,7 +2270,8 @@ export default definePluginEntry({
       resetSessionRecallCache();
       // 注意：不再 closeDriver() / 关闭 API server / null 化组件
       // compaction 后 register() 会检测到 _driver 已存在并跳过重复初始化
-    });
+      // v2.8.x: 声明超时预算 —— 本 handler 含冷路径 await import + 关联矩阵落盘，宿主默认仅 5s
+    }, { timeoutMs: GATEWAY_STOP_TIMEOUT_MS });
 
     // ── v2.3.5 方案 A: agent_end 自动反馈采集 ──────────────────────
     //
@@ -2291,7 +2386,8 @@ export default definePluginEntry({
       } catch (err) {
         log.warn(`auto-feedback failed: ${(err as Error)?.message ?? err}`);
       }
-    });
+      // v2.8.x: 声明超时预算 —— 本 handler 含 LLM judge，宿主默认仅 30s
+    }, { timeoutMs: AGENT_END_TIMEOUT_MS });
 
     // ─────────────────────────────────────────────────────────────────
     // v2.5.4 L0: after_tool_call 实时反馈（长任务期间 M 矩阵即时更新）
@@ -2328,7 +2424,8 @@ export default definePluginEntry({
       const signals = getSessionRecallCache().consumeGetSignals(sessionKey);
       if (!signals || signals.getNodeIds.length === 0) return;
       await flushGetSignals(sessionKey, signals.query, signals.getNodeIds, [], log);
-    });
+      // v2.8.x: matcher 让宿主在派发前过滤 —— 否则每次任意工具调用都会唤起本插件
+    }, { matcher: MEMORY_TOOL_MATCHER });
 
     // ─────────────────────────────────────────────────────────────────
     // v2.5.4 L0: llm_output 实时提取（长任务中间轮 assistant 数据及时入图）
