@@ -17,7 +17,10 @@ Error: error occurred in dts build
 **根因**：`after_tool_call` 注册时传了 `{ matcher: MEMORY_TOOL_MATCHER }`。`matcher` 是 openclaw
 **2026.8.1 才加入** `api.on` 第三参的选项；2026.7.x 的签名只有 `{ priority?, timeoutMs? }`
 （已核对 2026.7.35 / 2026.8.1 / 2026.9.6 / 2026.10.4 / 2026.10.5 的 `on:` 声明）。
-本机宿主是 2026.7.x，低于 `peerDependencies` 声明的 `>=2026.8.1`，于是 DTS 构建在此处直接失败。
+
+**注意版本错位**：Gateway 是 2026.10.5，但构建按扩展目录里 `node_modules/openclaw` 的 d.ts 校验 ——
+那份仍是 2026.7.x，于是 DTS 构建在此处失败。因此修复同时做两件事：代码兼容旧签名
+（不再传 `matcher`），并建议在扩展目录重装依赖（`rm -rf node_modules && npm ci`）让本地类型与 10.5 对齐。
 
 **修复**：移除 `matcher` 选项与 `MEMORY_TOOL_MATCHER` 常量，注册恢复为无选项。
 handler 内 `MEMORY_TOOL_NAMES.has(toolName)` 的过滤本就和 matcher 是**同一集合**

@@ -2404,7 +2404,7 @@ export default definePluginEntry({
       const signals = getSessionRecallCache().consumeGetSignals(sessionKey);
       if (!signals || signals.getNodeIds.length === 0) return;
       await flushGetSignals(sessionKey, signals.query, signals.getNodeIds, [], log);
-      // 注意：`matcher` 是 openclaw 2026.8.1 才加入 api.on 的选项；宿主 2026.7.x 的第三参
+      // 注意：`matcher` 是 openclaw 2026.8.1 才加入 api.on 的选项；旧宿主（2026.7.x）的第三参
       // 只有 { priority, timeoutMs }，声明它会直接 DTS 报 TS2353。此处不传，靠 handler 内
       // 的 MEMORY_TOOL_NAMES 过滤（同一集合、等价前置过滤，不丢事件）。
     });
