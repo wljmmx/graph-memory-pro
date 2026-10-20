@@ -4,6 +4,31 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.4.10] - 2026-10-20
+
+**DTS 构建报错修复（宿主 openclaw 2026.7.x）。** `npm run build` 报：
+
+```
+index.ts(2428,10): error TS2353: Object literal may only specify known properties,
+and 'matcher' does not exist in type '{ priority?: number | undefined; timeoutMs?: number | undefined; }'.
+Error: error occurred in dts build
+```
+
+**根因**：`after_tool_call` 注册时传了 `{ matcher: MEMORY_TOOL_MATCHER }`。`matcher` 是 openclaw
+**2026.8.1 才加入** `api.on` 第三参的选项；2026.7.x 的签名只有 `{ priority?, timeoutMs? }`
+（已核对 2026.7.35 / 2026.8.1 / 2026.9.6 / 2026.10.4 / 2026.10.5 的 `on:` 声明）。
+本机宿主是 2026.7.x，低于 `peerDependencies` 声明的 `>=2026.8.1`，于是 DTS 构建在此处直接失败。
+
+**修复**：移除 `matcher` 选项与 `MEMORY_TOOL_MATCHER` 常量，注册恢复为无选项。
+handler 内 `MEMORY_TOOL_NAMES.has(toolName)` 的过滤本就和 matcher 是**同一集合**
+（该判断要求精确小写匹配），故行为完全不变，只是少了宿主派发前的前置过滤；
+在新宿主上如需省掉这次函数调用，升级 openclaw 后再启用 matcher 即可。
+
+**守卫更新**：[test/sdk-contract-2026-10.test.ts](test/sdk-contract-2026-10.test.ts)
+改为断言 `api.on` 不传 `matcher`（否则 2026.7.x 必炸），并断言 handler 内白名单过滤仍在。
+
+**版本对齐** 2.4.9 → 2.4.10。
+
 ## [2.4.9] - 2026-10-20
 
 **Node 26 构建报错修复。** 现场在 Node 26 上 `npm run build` 报 `Cannot find module 'openclaw/plugin-sdk/plugin-entry'` + `DTS build error`。

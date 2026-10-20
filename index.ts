@@ -1,7 +1,7 @@
 /**
  * graph-memory-pro — Neo4j Knowledge Graph Memory Plugin
  *
- * Version: 2.4.9
+ * Version: 2.4.10
  *
  * 架构定位（A 方案）:
  *   - 不占用 slots（memory/contextEngine）
@@ -1688,26 +1688,6 @@ function nonRuntimeRegistrationMode(api: unknown): string | null {
 const AGENT_END_TIMEOUT_MS = 60_000;
 const GATEWAY_STOP_TIMEOUT_MS = 10_000;
 
-/**
- * v2.8.x: `after_tool_call` 的 matcher（工具白名单预过滤）。
- *
- * 宿主源码（src/plugins/registry-registrars-tools-hooks.ts）：
- *   `hookName === "before_tool_call" || hookName === "after_tool_call" ? normalizePluginToolMatcher(opts?.matcher) : undefined`
- * 即**只有这两个 hook 接受 matcher**；用在别处会得到 `ignores tool matcher` 告警。
- *
- * 校验规则（src/plugins/tool-hook-matcher.ts）：非空字符串数组；`"*"` 通配**不支持**；
- * `bash` / `exec_command` / `apply-patch` / `Write` / `Edit` / `agent` 属非规范名会被拒；
- * 其余按**小写**归一后比对。
- *
- * 收益：省略 matcher = 匹配所有工具 —— 之前**每次任意工具调用**（bash/read/edit…）
- * 都会唤起本插件，只为在函数内发现不在 MEMORY_TOOL_NAMES 里然后 return。
- * 用小写名声明后，宿主在派发前就过滤掉无关调用。
- *
- * 安全性：本列表与 handler 内部 `MEMORY_TOOL_NAMES.has(toolName)` 是**同一集合**
- * （该判断本就要求精确小写匹配），故 matcher 只是等价前置过滤，不会丢事件。
- */
-const MEMORY_TOOL_MATCHER: readonly [string, ...string[]] = [...MEMORY_TOOL_NAMES] as [string, ...string[]];
-
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function doGatewayInitInner(api: any, logger: LoggerLike): Promise<void> {
   const deferredMode = nonRuntimeRegistrationMode(api);
@@ -2424,8 +2404,10 @@ export default definePluginEntry({
       const signals = getSessionRecallCache().consumeGetSignals(sessionKey);
       if (!signals || signals.getNodeIds.length === 0) return;
       await flushGetSignals(sessionKey, signals.query, signals.getNodeIds, [], log);
-      // v2.8.x: matcher 让宿主在派发前过滤 —— 否则每次任意工具调用都会唤起本插件
-    }, { matcher: MEMORY_TOOL_MATCHER });
+      // 注意：`matcher` 是 openclaw 2026.8.1 才加入 api.on 的选项；宿主 2026.7.x 的第三参
+      // 只有 { priority, timeoutMs }，声明它会直接 DTS 报 TS2353。此处不传，靠 handler 内
+      // 的 MEMORY_TOOL_NAMES 过滤（同一集合、等价前置过滤，不丢事件）。
+    });
 
     // ─────────────────────────────────────────────────────────────────
     // v2.5.4 L0: llm_output 实时提取（长任务中间轮 assistant 数据及时入图）
