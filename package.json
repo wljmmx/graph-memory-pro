@@ -1,6 +1,6 @@
 {
   "name": "@openclaw/graph-memory-pro",
-  "version": "2.4.8",
+  "version": "2.4.9",
   "description": "Neo4j Knowledge Graph Memory Engine for OpenClaw — GDS PageRank, community detection, vector index",
   "author": "Ananas <Wywelljob@gmail.com>",
   "license": "MIT",
@@ -15,8 +15,8 @@
     }
   },
   "engines": {
-    "node": ">=22.22.3 <23 || >=24.15 <25 || >=25.9 <26 || >=26",
-    "npm": ">=11.16"
+    "node": ">=24.16.0 <25 || >=26.1.0",
+    "npm": ">=11.13.0"
   },
   "scripts": {
     "build": "tsup && node scripts/publish-dist.mjs",

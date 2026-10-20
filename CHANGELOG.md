@@ -4,6 +4,53 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.4.9] - 2026-10-20
+
+**Node 26 构建报错修复。** 现场在 Node 26 上 `npm run build` 报 `Cannot find module 'openclaw/plugin-sdk/plugin-entry'` + `DTS build error`。
+
+### Fixed — `engines.node` 与宿主 openclaw 冲突，导致依赖装不上、构建报误导性 TS 错误
+
+**症状**（看似 TS/tsup 问题，实为依赖未装上）：
+
+```
+index.ts(21,88): error TS2307: Cannot find module 'openclaw/plugin-sdk/plugin-entry'
+index.ts(2307,32): error TS7006: Parameter 'event' implicitly has an 'any' type.
+Error: error occurred in dts build
+```
+
+**真正根因**：`openclaw` 自身 `engines.node = ">=24.16.0 <25 || >=26.1.0"`（9.6 / 10.4 一致）。
+本项目此前声明 `>=22.22.3 <23 || >=24.15 <25 || >=25.9 <26 || >=26` —— **三个下界全不被宿主支持**，
+且 `>=26` 误把 26.0.0 也算受支持：
+
+| Node | 宿主 openclaw | 旧 engines.node | 后果 |
+|---|---|---|---|
+| 22.22.3 / 24.15.0 / 25.9.0 | ❌ | ✅ 允许 | 声明了不存在的支持 |
+| **26.0.0** | ❌（需 26.1） | ✅ 允许 | **装不上 → 构建报 TS2307** |
+| 26.1.0+ / 24.16.0+ | ✅ | ✅ | 正常 |
+
+在 `engine-strict`（CI 常见）下 `npm ci` 直接 EBADENGINE，node_modules 装不出来，
+随后 `npm run build` 只报 `tsup` 的 DTS 解析错误 —— **真因被这层表象完全掩盖**。
+
+同时原 `engines.npm: ">=11.16"` 也不自洽：`engines.node` 每个最低版本自带 npm 都不到 11.16
+（22.22.3→10.9.8、24.15.0→11.12.1、25.9.0→11.12.1、26.0.0→11.12.1）。
+
+**修复**：`engines.node` 对齐宿主 → `>=24.16.0 <25 || >=26.1.0`；`engines.npm` 对齐 → `>=11.13.0`。
+数据来自 `nodejs.org/dist/index.json` 的 npm 字段实测。
+
+修复后：不支持的版本（如 26.0.0）给出**明确可行动的** `EBADENGINE`（`Required: {...node >=26.1.0...}`），
+受支持的版本（24.16+ / 26.1+）正常安装与构建。
+
+### Added — engines 自洽性守卫
+
+新增 [test/engines-consistency.test.ts](test/engines-consistency.test.ts)（7 用例），把两条不变量固化：
+① 本项目支持的 Node 版本必须 ⊆ 宿主 openclaw 的支持范围 —— **宿主升级时守卫会失败，提醒同步**；
+② `engines.npm` 必须能被每个受支持 Node 自带的最小 npm 满足（上次「>=11.16 逼死所有下界」即此漏洞）。
+
+### Changed — 版本对齐 2.4.8 → 2.4.9
+
+`src/version.ts`、`package.json`、`openclaw.plugin.json`、`package-lock.json`、[index.ts](index.ts) 头部、
+[README.md](README.md)、[test/version.test.ts](test/version.test.ts)。
+
 ## [2.4.8] - 2026-09-30
 
 **openclaw 2026.10.4 SDK 适配批次。** 规则**逐条来自 clone 的 v2026.10.4 源码**（非文档推测）。
