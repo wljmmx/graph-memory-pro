@@ -14,7 +14,9 @@
  *
  * ## 真正根因：`engines.node` 与宿主冲突
  *
- * `openclaw` 自身声明 `engines.node = ">=24.16.0 <25 || >=26.1.0"`（9.6 与 10.4 一致）。
+ * `openclaw` 自身声明 `engines.node = ">=24.22.1 <25 || >=26.12.1"`（10.9；9.6 / 10.4 曾为
+ * `>=24.16.0 <25 || >=26.1.0`）。本项目的范围必须始终跟随宿主的当前声明。
+ *
  * 而本项目此前声明的是 `>=22.22.3 <23 || >=24.15 <25 || >=25.9 <26 || >=26` ——
  * **三个下界全部不被宿主支持**，且 `>=26` 误把 26.0.0 也算作受支持：
  *
@@ -43,18 +45,17 @@ const pluginManifest = JSON.parse(
   readFileSync(resolve(repoRoot, "openclaw.plugin.json"), "utf-8"),
 ) as { engines?: { node?: string } };
 
-/** 宿主（openclaw）自身的 engines.node —— 9.6 与 10.4 实测一致 */
-const HOST_ENGINES_NODE = ">=24.16.0 <25 || >=26.1.0";
+/** 宿主（openclaw）自身的 engines.node —— 2026.10.9 实测 */
+const HOST_ENGINES_NODE = ">=24.22.1 <25 || >=26.12.1";
 
 /** 受支持 Node 版本及其自带 npm（来源 nodejs.org/dist/index.json 的 npm 字段） */
 const SUPPORTED_NODES: Array<{ node: string; bundledNpm: string }> = [
-  { node: "24.16.0", bundledNpm: "11.13.0" },
-  { node: "26.1.0", bundledNpm: "11.13.0" },
-  { node: "26.12.0", bundledNpm: "11.20.0" },
+  { node: "24.22.1", bundledNpm: "11.19.1" },
+  { node: "26.12.1", bundledNpm: "11.20.0" },
 ];
 
-/** 明确不被宿主支持的版本（本项目也不得声明支持） */
-const UNSUPPORTED_NODES = ["22.22.3", "24.15.0", "25.9.0", "26.0.0"];
+/** 明确不被宿主支持的版本（本项目也不得声明支持；含 10.4 时代的下界） */
+const UNSUPPORTED_NODES = ["22.22.3", "24.15.0", "24.16.0", "24.22.0", "25.9.0", "26.0.0", "26.1.0", "26.12.0"];
 
 const ver = (v: string) => v.split(".").map(Number);
 
@@ -110,9 +111,12 @@ describe("engines.node 必须 ⊆ 宿主 openclaw 的支持范围", () => {
     }
   });
 
-  it("Node 26.0.0 被明确排除（现场报错版本，宿主需 26.1.0+）", () => {
+  it("两个版本线的下界都被明确排除（26.0.0 是现场报错版本；26.12.0 差一个补丁版）", () => {
     expect(satisfies("26.0.0", pkg.engines!.node!)).toBe(false);
-    expect(satisfies("26.1.0", pkg.engines!.node!)).toBe(true);
+    expect(satisfies("26.12.0", pkg.engines!.node!)).toBe(false);
+    expect(satisfies("26.12.1", pkg.engines!.node!)).toBe(true);
+    expect(satisfies("24.22.0", pkg.engines!.node!)).toBe(false);
+    expect(satisfies("24.22.1", pkg.engines!.node!)).toBe(true);
   });
 
   it("openclaw.plugin.json 若声明 engines 则必须与 package.json 一致", () => {

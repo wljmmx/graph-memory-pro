@@ -4,6 +4,50 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.4.11] - 2026-10-20
+
+**openclaw SDK 2026.10.9 对齐。** 本次为核实后的调整，不是故障修复。
+
+### Changed — `engines.node` 跟随宿主 10.9 上移（真实改进点）
+
+10.9 的 `package.json` 与 `docs/install/node-compatibility.md` 均声明
+`>=24.22.1 <25 || >=26.12.1`，比 10.4 的 `>=24.16.0 <25 || >=26.1.0` 更窄
+（起因是 2026-10 eMudhra 事件：这两个版本起才拒绝被泄露的公钥）。
+
+本项目沿用的是旧下界，等于**声明支持宿主不接受的 24.16.0–24.22.0 与 26.1.0–26.12.0** ——
+与 2.4.9 修的同类问题。现对齐为 `>=24.22.1 <25 || >=26.12.1`；
+`engines.npm` 同步改为 `>=11.19.1`（24.22.1 自带 11.19.1、26.12.1 自带 11.20.0，取最小值）。
+
+副作用：Node 24.16–24.22.0 / 26.1.0–26.12.0 上的旧宿主用户会被 `EBADENGINE` 挡住 ——
+这是有意为之：这些 Node 本身已不被 10.9 支持。若需继续服务 10.4/10.5 用户，应改用
+宿主下界对应的范围，而不是放宽本项目。
+
+### Changed — 构建目标版本 2026.10.4 → 2026.10.9
+
+`package.json` 的 `openclaw.build.openclawVersion` / `pluginSdkVersion` 对齐到 10.9；
+`compat.pluginApi` / `minGatewayVersion` 保持 `>=2026.8.1`（代码只用到 8.1 起就存在的
+`plugin-sdk/plugin-entry` + `api.on` + `registerTool/Service/MemoryCorpusSupplement`）。
+
+### Verified — 10.9 无破坏性 SDK 变更
+
+| 核对项 | 结论 |
+|---|---|
+| `openclaw/plugin-sdk/plugin-entry` 子路径 | 存在，`definePluginEntry` / `buildJsonPluginConfigSchema` 签名未变 |
+| `PLUGIN_HOOK_NAMES` | `agent_end` / `gateway_start` / `gateway_stop` / `llm_output` / `after_tool_call` 全在 |
+| `api.on` 选项 | 10.9 仍支持 `matcher`（8.1+），`priority` / `registrationId` / `timeoutMs` 未变 |
+| 超时默认值 | `agent_end` 30s、`gateway_stop` 5s 未变，本项目声明 60s / 10s 仍合法 |
+| `registerMemoryCorpusSupplement` | 仍在 `OpenClawPluginApi` 上（slot-less 方案继续有效） |
+| 清单 `kind` | 仍为可选；本项目按设计不占 slots，无需声明 |
+| 兼容策略文档 | 本次涉及的迁移条目（transcript 准备、私有 facade、harness 建面）本项目均未使用 |
+
+实测：以 10.9 类型替换 `node_modules/openclaw` 后，`tsc --noEmit` / `tsup`（ESM + DTS）/ eslint
+全部通过。
+
+### Changed — 版本对齐 2.4.10 → 2.4.11
+
+`src/version.ts`、`package.json`、`openclaw.plugin.json`、`package-lock.json`、[index.ts](index.ts) 头部、
+[README.md](README.md)、[test/version.test.ts](test/version.test.ts)。
+
 ## [2.4.10] - 2026-10-20
 
 **DTS 构建报错修复（宿主 openclaw 2026.7.x）。** `npm run build` 报：

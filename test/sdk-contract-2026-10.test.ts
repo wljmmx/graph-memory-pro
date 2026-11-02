@@ -83,10 +83,10 @@ describe("hook 超时预算（宿主默认 agent_end=30s / gateway_stop=5s，且
   });
 });
 
-describe("包清单版本对齐（build 目标 = 2026.10.4）", () => {
-  it("build.openclawVersion / pluginSdkVersion 已对齐到 2026.10.4", () => {
-    expect(pkg.openclaw.build.openclawVersion).toBe("2026.10.4");
-    expect(pkg.openclaw.build.pluginSdkVersion).toBe("2026.10.4");
+describe("包清单版本对齐（build 目标 = 2026.10.9）", () => {
+  it("build.openclawVersion / pluginSdkVersion 已对齐到 2026.10.9", () => {
+    expect(pkg.openclaw.build.openclawVersion).toBe("2026.10.9");
+    expect(pkg.openclaw.build.pluginSdkVersion).toBe("2026.10.9");
   });
 
   it("compat 保留开放下界（官方示例同样如此；加上界会在新版本上阻断安装）", () => {
