@@ -50,15 +50,15 @@
     "vitest": "^1.4.0"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.8.1"
+    "openclaw": ">=2026.10.9"
   },
   "openclaw": {
     "extensions": [
       "./dist/index.js"
     ],
     "compat": {
-      "pluginApi": ">=2026.8.1",
-      "minGatewayVersion": "2026.8.1"
+      "pluginApi": ">=2026.10.9",
+      "minGatewayVersion": "2026.10.9"
     },
     "build": {
       "openclawVersion": "2026.10.9",

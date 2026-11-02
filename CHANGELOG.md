@@ -18,15 +18,21 @@
 与 2.4.9 修的同类问题。现对齐为 `>=24.22.1 <25 || >=26.12.1`；
 `engines.npm` 同步改为 `>=11.19.1`（24.22.1 自带 11.19.1、26.12.1 自带 11.20.0，取最小值）。
 
-副作用：Node 24.16–24.22.0 / 26.1.0–26.12.0 上的旧宿主用户会被 `EBADENGINE` 挡住 ——
-这是有意为之：这些 Node 本身已不被 10.9 支持。若需继续服务 10.4/10.5 用户，应改用
-宿主下界对应的范围，而不是放宽本项目。
+副作用：Node 24.16–24.22.0 / 26.1.0–26.12.0 上的用户会被 `EBADENGINE` 挡住 ——
+这是有意为之：本项目只跟随最新更新集合（10.9），不再为旧宿主保留兼容。
 
 ### Changed — 构建目标版本 2026.10.4 → 2026.10.9
 
 `package.json` 的 `openclaw.build.openclawVersion` / `pluginSdkVersion` 对齐到 10.9；
-`compat.pluginApi` / `minGatewayVersion` 保持 `>=2026.8.1`（代码只用到 8.1 起就存在的
-`plugin-sdk/plugin-entry` + `api.on` + `registerTool/Service/MemoryCorpusSupplement`）。
+`peerDependencies.openclaw`、`compat.pluginApi`、`compat.minGatewayVersion` 一并锁定
+`>=2026.10.9` —— 不再为 8.1–10.8 的旧宿主保留兼容（本次决策：只跟随最新更新集合）。
+
+### Restored — `after_tool_call` 的 matcher 前置过滤
+
+2.4.10 为兼容 2026.7.x（当时扩展目录里的陈旧 `node_modules`）移除了 `matcher`，代价是
+**每次任意工具调用都会唤起本插件**。既然兼容下界已锁到 10.9（且 matcher 自 8.1 起一直存在），
+现恢复 `{ matcher: MEMORY_TOOL_MATCHER }`：宿主在派发前过滤，handler 内的
+`MEMORY_TOOL_NAMES.has(toolName)` 保留作双保险，两者是同一集合。
 
 ### Verified — 10.9 无破坏性 SDK 变更
 

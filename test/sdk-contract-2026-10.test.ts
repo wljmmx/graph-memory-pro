@@ -1,7 +1,7 @@
 /**
- * v2.8.x — openclaw 2026.10.4 SDK 适配的回归守卫
+ * openclaw SDK 适配的回归守卫（目标版本 2026.10.9）
  *
- * 本文件的规则**逐条来自已核对的 openclaw 源码**（cloned v2026.10.4），非推测：
+ * 本文件的规则**逐条来自已核对的 openclaw 源码**（cloned v2026.10.9），非推测：
  *
  * | 事实 | 源码位置 |
  * |---|---|
@@ -10,7 +10,8 @@
  * | 兜底超时：agent_end 30s、gateway_stop 5s | `src/plugins/hooks.ts` DEFAULT_VOID_HOOK_TIMEOUT_MS_BY_HOOK |
  * | 超时**不取消** handler（race + trackAsyncWork 保留其工作） | `src/plugins/hook-timeout.ts` |
  * | 超时优先级：hooks.timeouts.<hook> > hooks.timeoutMs > 插件自声明 | `src/plugins/registry-state.ts` resolveTypedHookTimeoutMs |
- * | `api.on` 第三参在 2026.7.x 只有 `{ priority, timeoutMs }`；`matcher` 是 2026.8.1 新增 | 各版本 `package/dist/types-<hash>.d.ts` 中的 `on:` 签名 |
+ * | `matcher` 仅 `before_tool_call` / `after_tool_call` 接受（8.1+，10.9 仍有效） | `plugin-sdk/plugin-entry` 的 `PluginHookRegistrationOptions` |
+ * | matcher 校验：非空数组、禁 `"*"`、禁非规范名、按小写归一 | `src/plugins/tool-hook-matcher.ts` |
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
@@ -19,6 +20,7 @@ import { resolve } from "node:path";
 const repoRoot = resolve(__dirname, "..");
 const src = readFileSync(resolve(repoRoot, "index.ts"), "utf-8");
 const pkg = JSON.parse(readFileSync(resolve(repoRoot, "package.json"), "utf-8")) as {
+  peerDependencies: { openclaw: string };
   openclaw: {
     compat: { pluginApi: string; minGatewayVersion: string };
     build: { openclawVersion: string; pluginSdkVersion: string };
@@ -26,13 +28,61 @@ const pkg = JSON.parse(readFileSync(resolve(repoRoot, "package.json"), "utf-8"))
   };
 };
 
-describe("after_tool_call 注册（兼容 2026.7.x 的 api.on 选项类型）", () => {
-  it("不向 api.on 传 matcher（2026.7.x 无此选项，会 DTS 报 TS2353）", () => {
-    expect(src).not.toMatch(/,\s*\{\s*matcher:/);
+/**
+ * 复刻宿主的 matcher 校验器（src/plugins/tool-hook-matcher.ts）。
+ * 未从 SDK 导入是因为宿主未公开导出该函数；此处按源码规则复现。
+ */
+const NON_CANONICAL_TOOL_MATCHER_NAMES = new Set([
+  "bash", "exec_command", "apply-patch", "Write", "Edit", "agent",
+]);
+
+function validateToolMatcher(matcher: unknown): string {
+  if (!Array.isArray(matcher)) throw new TypeError("must be an array");
+  if (matcher.length === 0) throw new TypeError("must contain at least one tool name");
+  const out = new Set<string>();
+  for (const name of matcher) {
+    if (typeof name !== "string" || !name.trim()) throw new TypeError("entries must be non-empty strings");
+    const canonical = name.trim().toLowerCase();
+    if (canonical === "*") throw new TypeError("wildcard entries are not supported");
+    if (NON_CANONICAL_TOOL_MATCHER_NAMES.has(canonical) || NON_CANONICAL_TOOL_MATCHER_NAMES.has(name.trim())) {
+      throw new TypeError("entries must use canonical OpenClaw tool ids");
+    }
+    out.add(canonical);
+  }
+  return [...out].toSorted().join(",");
+}
+
+describe("after_tool_call matcher（宿主在派发前过滤，避免每次工具调用都唤起插件）", () => {
+  it("after_tool_call 传入了 matcher", () => {
+    expect(src).toMatch(/api\.on\("after_tool_call"[\s\S]*?\}\s*,\s*\{\s*matcher:\s*MEMORY_TOOL_MATCHER\s*\}\s*\)/);
   });
 
-  it("handler 内保留工具白名单过滤（无宿主侧前置过滤，必须自行兜底）", () => {
+  it("matcher 列表通过宿主校验规则（非空、无通配、无非法名、全小写）", () => {
+    const block = /const MEMORY_TOOL_NAMES = new Set\(\[([\s\S]*?)\]\)/.exec(src);
+    expect(block, "未找到 MEMORY_TOOL_NAMES").toBeTruthy();
+    const names = [...block![1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+    expect(names.length).toBeGreaterThan(0);
+
+    expect(() => validateToolMatcher(names)).not.toThrow();
+    for (const n of names) expect(n).toBe(n.toLowerCase());
+  });
+
+  it("matcher 与 handler 内部过滤是同一集合（等价前置过滤，不丢事件）", () => {
+    expect(src).toMatch(/MEMORY_TOOL_MATCHER[^=]*=\s*\[\.\.\.MEMORY_TOOL_NAMES\]/);
     expect(src).toContain("MEMORY_TOOL_NAMES.has(toolName)");
+  });
+
+  it("matcher 只用在 tool hook 上（宿主对其它 hook 会告警 ignores tool matcher）", () => {
+    const occurrences = [...src.matchAll(/,\s*\{\s*matcher:/g)];
+    expect(occurrences, "matcher 应恰好出现一次").toHaveLength(1);
+
+    const at = occurrences[0].index!;
+    const aStart = src.indexOf('api.on("after_tool_call"');
+    expect(aStart, "未找到 after_tool_call 注册").toBeGreaterThan(-1);
+    const aEnd = src.indexOf('api.on("', aStart + 10);
+    expect(aEnd, "未找到 after_tool_call 之后的下一个注册").toBeGreaterThan(aStart);
+    expect(at, "matcher 不在 after_tool_call 注册块内").toBeGreaterThan(aStart);
+    expect(at, "matcher 落到了别的注册块").toBeLessThan(aEnd);
   });
 });
 
@@ -89,10 +139,10 @@ describe("包清单版本对齐（build 目标 = 2026.10.9）", () => {
     expect(pkg.openclaw.build.pluginSdkVersion).toBe("2026.10.9");
   });
 
-  it("compat 保留开放下界（官方示例同样如此；加上界会在新版本上阻断安装）", () => {
-    // 宿主在安装时按 satisfiesPluginApiRange 强校验；范围过窄会直接装不上
-    expect(pkg.openclaw.compat.pluginApi).toMatch(/^>=/);
-    expect(pkg.openclaw.compat.minGatewayVersion).toBeTruthy();
+  it("peerDependencies.openclaw 与 compat 的最小宿主版本一致，均为 >=2026.10.9", () => {
+    expect(pkg.peerDependencies.openclaw).toBe(">=2026.10.9");
+    expect(pkg.openclaw.compat.pluginApi).toBe(">=2026.10.9");
+    expect(pkg.openclaw.compat.minGatewayVersion).toBe("2026.10.9");
   });
 
   it("extensions 无 runtimeExtensions 时长度校验安全（宿主仅在两者都声明时校验长度相等）", () => {
